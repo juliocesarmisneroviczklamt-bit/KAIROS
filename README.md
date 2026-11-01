@@ -68,9 +68,9 @@ O programa roda em ~0,3 s sobre 31 anos de B3 e reproduz **bit a bit** os númer
 | Linux (qualquer distribuição) | x86_64 e ARM64 |
 | macOS | Intel e Apple Silicon |
 | Windows | x86_64 e ARM64 |
-| FreeBSD, NetBSD | x86_64 |
+| FreeBSD, NetBSD, OpenBSD | x86_64 |
 
-**Em qualquer outro sistema** que o Rust suporta (OpenBSD, illumos, …), compile a partir do código. A Kairós é Rust puro: nenhuma biblioteca do sistema é necessária.
+**Em qualquer outro sistema** que o Rust suporta (illumos, DragonFly, outras arquiteturas…), compile a partir do código. A Kairós é Rust puro: nenhuma biblioteca do sistema é necessária.
 
 ```text
 cargo build --release -p kairos          # target/release/kairos

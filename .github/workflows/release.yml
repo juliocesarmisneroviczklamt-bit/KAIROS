@@ -24,7 +24,6 @@ jobs:
           - { name: linux-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  tool: cross }
           - { name: linux-aarch64,   os: ubuntu-latest,  target: aarch64-unknown-linux-musl, tool: cross }
           - { name: freebsd-x86_64,  os: ubuntu-latest,  target: x86_64-unknown-freebsd,     tool: cross }
-          - { name: netbsd-x86_64,   os: ubuntu-latest,  target: x86_64-unknown-netbsd,      tool: cross }
           - { name: macos-x86_64,    os: macos-latest,   target: x86_64-apple-darwin,        tool: cargo }
           - { name: macos-aarch64,   os: macos-latest,   target: aarch64-apple-darwin,       tool: cargo }
           - { name: windows-x86_64,  os: windows-latest, target: x86_64-pc-windows-msvc,     tool: cargo }
@@ -67,6 +66,59 @@ jobs:
             kairos-*.tar.gz
             kairos-*.zip
 
+  # NetBSD and OpenBSD: native builds inside a VM (cross images lack parts of their base system)
+  bsd:
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: netbsd-x86_64,  vm: netbsd }
+          - { name: openbsd-x86_64, vm: openbsd }
+    steps:
+      - uses: actions/checkout@v4
+      - name: build in a NetBSD VM
+        if: matrix.vm == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: /usr/sbin/pkg_add curl
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --release --locked -p kairos
+            ./target/release/kairos run kairos/examples/finance.krs > /dev/null
+            cp target/release/kairos kairos-bin && rm -rf target
+      - name: build in an OpenBSD VM
+        if: matrix.vm == 'openbsd'
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg_add rust
+          run: |
+            cargo build --release --locked -p kairos
+            ./target/release/kairos run kairos/examples/finance.krs > /dev/null
+            cp target/release/kairos kairos-bin && rm -rf target
+      - name: package
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' kairos/Cargo.toml | head -n 1)
+          dir="kairos-${version}-${{ matrix.name }}"
+          mkdir -p "$dir/examples" "$dir/docs"
+          cp kairos-bin "$dir/kairos"
+          chmod +x "$dir/kairos"
+          cp LICENSE kairos/README.md "$dir/"
+          cp kairos/docs/spec.md "$dir/docs/"
+          cp kairos/examples/*.krs "$dir/examples/"
+          tar czf "$dir.tar.gz" "$dir"
+          ls -l kairos-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: kairos-*.tar.gz
+
   vscode:
     name: build (VS Code extension)
     runs-on: ubuntu-latest
@@ -87,8 +139,9 @@ jobs:
 
   publish:
     name: publish
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, vscode]
+    # the BSD VMs never block a release: their packages go in when they build
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && needs.vscode.result == 'success'
+    needs: [build, bsd, vscode]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

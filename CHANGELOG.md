@@ -11,10 +11,9 @@ Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release n
   | Linux (estático, roda em qualquer distribuição) | x86_64 e ARM64 |
   | macOS | Intel e Apple Silicon |
   | Windows | x86_64 e ARM64 |
-  | FreeBSD | x86_64 |
-  | NetBSD | x86_64 |
+  | FreeBSD, NetBSD, OpenBSD | x86_64 |
 
-  Nos outros sistemas, inclusive OpenBSD, é só compilar com `cargo build --release -p kairos`.
+  Nos outros sistemas (illumos, DragonFly, outras arquiteturas…), é só compilar com `cargo build --release -p kairos`.
 - **Rust puro:** a Kairós não depende de nenhuma biblioteca do sistema. O acesso à rede do laboratório virou o recurso opcional `net`, que a linguagem não usa, e com isso o OpenSSL deixou de ser necessário.
 - **Os mesmos bits em qualquer sistema:** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a do sistema operacional.
 - **`.krs` reconhecido:**
