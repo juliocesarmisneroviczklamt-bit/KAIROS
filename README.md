@@ -65,10 +65,11 @@ O programa roda em ~0,3 s sobre 31 anos de B3 e reproduz **bit a bit** os númer
 
 | sistema | arquiteturas |
 |---|---|
-| Linux (qualquer distribuição) | x86_64 e ARM64 |
+| Linux (qualquer distribuição) | x86_64, i686 (32 bits), ARM64, ARMv7 e ARMv6 (32 bits, Raspberry Pi), RISC-V 64, PowerPC64 LE, s390x |
 | macOS | Intel e Apple Silicon |
-| Windows | x86_64 e ARM64 |
+| Windows | x86_64, i686 (32 bits), ARM64 |
 | FreeBSD, NetBSD, OpenBSD | x86_64 |
+| WebAssembly (WASI) | qualquer sistema com runtime WASI (wasmtime, wasmer…) |
 
 **Em qualquer outro sistema** que o Rust suporta (illumos, DragonFly, outras arquiteturas…), compile a partir do código. A Kairós é Rust puro: nenhuma biblioteca do sistema é necessária.
 
@@ -79,7 +80,7 @@ kairos run kairos/examples/finance.krs   # exemplo do núcleo
 cargo test -p kairos                     # testes dourados + teste de aceitação
 ```
 
-**Mesmo resultado em qualquer lugar:** `exp`, `ln` e `^` usam matemática em Rust puro, não a do sistema operacional. O mesmo programa dá os mesmos bits em todos os sistemas. A CI roda os testes a cada push em Linux (x86_64 e ARM64), macOS, Windows e FreeBSD.
+**Mesmo resultado em qualquer lugar:** `exp`, `ln` e `^` usam matemática em Rust puro, não a do sistema operacional. O mesmo programa dá os mesmos bits em todos os sistemas. A CI roda os testes a cada push em 11 combinações de sistema e arquitetura. Nativas: Linux x86_64 e ARM64, macOS, Windows x86_64 e i686, FreeBSD. Emuladas: Linux i686 e ARMv7, RISC-V 64, PowerPC64 LE e s390x (big-endian). E também WebAssembly.
 
 **Arquivos `.krs`:**
 - **VS Code:** instale a extensão `kairos-vscode-*.vsix` das Releases (`code --install-extension arquivo.vsix`). Ela traz reconhecimento, cores de sintaxe e blocos ` ```krs ` no Markdown.

@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.2.1**, com o M1 (núcleo) e o M2 (tensores com eixos nomeados + dados da B3) prontos. Roda em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e em qualquer sistema com Rust: é Rust puro, e a matemática dá os mesmos bits em todos eles.
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.2.1**, com o M1 (núcleo) e o M2 (tensores com eixos nomeados + dados da B3) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
 ```text
 cargo build --release -p kairos              # gera target/release/kairos (kairos.exe no Windows)

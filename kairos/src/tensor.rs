@@ -277,9 +277,10 @@ fn region(t: &TensorVal, sels: &[(u32, Sel)]) -> TResult<(Vec<usize>, Vec<usize>
     for (ax, s) in sels {
         let p = t.pos(*ax).ok_or_else(|| TErr::Shape("index over an axis the tensor does not have".into()))?;
         let n = t.shape[p];
+        // bounds are checked in 64 bits before narrowing, so 32-bit systems behave the same
         match *s {
             Sel::At(i) => {
-                if i < 0 || i as usize >= n {
+                if i < 0 || i as u64 >= n as u64 {
                     return Err(TErr::OutOfBounds { axis: *ax, index: i, size: n });
                 }
                 start[p] = i as usize;
@@ -290,7 +291,7 @@ fn region(t: &TensorVal, sels: &[(u32, Sel)]) -> TResult<(Vec<usize>, Vec<usize>
                 if hi < lo {
                     return Err(TErr::Reversed { axis: *ax, lo, hi });
                 }
-                if lo < 0 || hi as usize > n {
+                if lo < 0 || hi as u64 > n as u64 {
                     let bad = if lo < 0 { lo } else { hi - 1 };
                     return Err(TErr::OutOfBounds { axis: *ax, index: bad, size: n });
                 }
@@ -421,7 +422,7 @@ pub fn top_k(t: &TensorVal, ax: u32, k: i64, top: bool) -> TResult<TensorVal> {
     let mut out = vec![false; v.len()];
     fibers(t, p, |offs| {
         let s = sorted_valid(v, offs);
-        let k = (k.max(0) as usize).min(s.len());
+        let k = usize::try_from(k.max(0)).unwrap_or(usize::MAX).min(s.len());
         let chosen = if top { &s[s.len() - k..] } else { &s[..k] };
         for (o, _) in chosen {
             out[*o] = true;

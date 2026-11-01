@@ -325,8 +325,11 @@ impl Interp<'_> {
                     if n < 0 {
                         return Err(Ctl::Err(Diag::new("R0203", sp, format!("negative size {n} for axis `{}`", self.axis_name(a)))));
                     }
+                    let Ok(n) = usize::try_from(n) else {
+                        return Err(Ctl::Err(Diag::new("R0203", sp, format!("tensor too large (axis `{}` of size {n})", self.axis_name(a)))));
+                    };
                     axes.push(a);
-                    shape.push(n as usize);
+                    shape.push(n);
                 }
                 self.filled(axes, shape, &fill, sp)?
             }

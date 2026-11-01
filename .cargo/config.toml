@@ -1,0 +1,4 @@
+# WebAssembly (WASI) has no threads: the interpreter runs on the main thread, whose stack is
+# fixed at link time. 64 MiB is the size kairos/src/main.rs assumes for it.
+[target.wasm32-wasip1]
+rustflags = ["-C", "link-arg=-zstack-size=67108864"]

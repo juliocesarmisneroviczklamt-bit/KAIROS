@@ -29,9 +29,14 @@ impl Write for Buf {
 
 #[test]
 fn momentum_in_kairos_matches_the_rust_lab() {
-    let h = std::thread::Builder::new().stack_size(256 << 20).spawn(run).expect("test thread");
-    if let Err(panic) = h.join() {
-        std::panic::resume_unwind(panic);
+    match std::thread::Builder::new().stack_size(256 << 20).spawn(run) {
+        Ok(h) => {
+            if let Err(panic) = h.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        // no threads (WebAssembly/WASI)
+        Err(_) => run(),
     }
 }
 

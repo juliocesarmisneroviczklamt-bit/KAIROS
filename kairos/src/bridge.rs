@@ -187,9 +187,9 @@ impl Host {
             return Err(herr("R0102", format!("the weights have {} months x {} assets, but the B3 data has {nm} x {nt}", w.shape[pm], w.shape[pa]))
                 .hint("build them from the data, e.g. `zeros_like(b3.monthly_returns())`"));
         }
-        if cfg.lag < 0 {
-            return Err(herr("R0102", format!("`lag` must be >= 0, got {}", cfg.lag)));
-        }
+        let Ok(lag) = usize::try_from(cfg.lag) else {
+            return Err(herr("R0102", format!("`lag` must be between 0 and the number of sessions, got {}", cfg.lag)));
+        };
         if !(cfg.capital > 0.0 && cfg.capital.is_finite()) {
             return Err(herr("R0102", format!("`capital` must be positive, got {:?}", cfg.capital)));
         }
@@ -226,7 +226,7 @@ impl Host {
             return Err(herr("R0102", "all weights are zero: there is nothing to evaluate"));
         }
         let costs = if cfg.real_costs { search::REAL } else { Costs::Fixed { bps: cfg.cost_bps } };
-        let sim = SimCfg { capital0: cfg.capital, lag: cfg.lag as usize, costs, tax: cfg.tax, cap_adv: None };
+        let sim = SimCfg { capital0: cfg.capital, lag, costs, tax: cfg.tax, cap_adv: None };
         let out = backtest::simulate(d, &plans, &sim);
         if out.ret.is_empty() {
             return Err(herr("R0102", "the simulation produced no months").hint("are the weights only in the first month or after the end of the data?"));

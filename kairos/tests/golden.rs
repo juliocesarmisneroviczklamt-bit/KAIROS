@@ -22,11 +22,25 @@ impl Write for Buf {
 }
 
 /// The reference interpreter recurses on the HIR, so it runs on a large stack (as the CLI does).
+/// Without threads (WebAssembly/WASI) it runs on the main thread, whose stack is set at link time.
 #[test]
 fn golden_programs() {
-    let h = std::thread::Builder::new().stack_size(256 << 20).spawn(run_golden).expect("test thread");
-    if let Err(panic) = h.join() {
-        std::panic::resume_unwind(panic);
+    use kairos::interp::STACK_BYTES;
+    use std::sync::atomic::Ordering;
+    let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(|| {
+        STACK_BYTES.store(256 << 20, Ordering::Relaxed);
+        run_golden()
+    });
+    match spawned {
+        Ok(h) => {
+            if let Err(panic) = h.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(_) => {
+            STACK_BYTES.store(64 << 20, Ordering::Relaxed);
+            run_golden()
+        }
     }
 }
 

@@ -17,17 +17,34 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # experimental targets never block a release
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  tool: cross }
-          - { name: linux-aarch64,   os: ubuntu-latest,  target: aarch64-unknown-linux-musl, tool: cross }
-          - { name: freebsd-x86_64,  os: ubuntu-latest,  target: x86_64-unknown-freebsd,     tool: cross }
-          - { name: macos-x86_64,    os: macos-latest,   target: x86_64-apple-darwin,        tool: cargo }
-          - { name: macos-aarch64,   os: macos-latest,   target: aarch64-apple-darwin,       tool: cargo }
-          - { name: windows-x86_64,  os: windows-latest, target: x86_64-pc-windows-msvc,     tool: cargo }
-          - { name: windows-aarch64, os: windows-latest, target: aarch64-pc-windows-msvc,    tool: cargo }
+          # Linux: static (musl) where Rust supports it, so one binary runs on any distribution
+          - { name: linux-x86_64,      os: ubuntu-latest,  target: x86_64-unknown-linux-musl,      tool: cross }
+          - { name: linux-i686,        os: ubuntu-latest,  target: i686-unknown-linux-musl,        tool: cross }
+          - { name: linux-aarch64,     os: ubuntu-latest,  target: aarch64-unknown-linux-musl,     tool: cross }
+          - { name: linux-armv7,       os: ubuntu-latest,  target: armv7-unknown-linux-musleabihf, tool: cross }
+          - { name: linux-armv6,       os: ubuntu-latest,  target: arm-unknown-linux-musleabihf,   tool: cross }
+          - { name: linux-riscv64,     os: ubuntu-latest,  target: riscv64gc-unknown-linux-gnu,    tool: cross }
+          - { name: linux-ppc64le,     os: ubuntu-latest,  target: powerpc64le-unknown-linux-gnu,  tool: cross }
+          - { name: linux-s390x,       os: ubuntu-latest,  target: s390x-unknown-linux-gnu,        tool: cross }
+          - { name: linux-loongarch64, os: ubuntu-latest,  target: loongarch64-unknown-linux-gnu,  tool: cross, experimental: true }
+          # BSD and illumos (NetBSD and OpenBSD are built natively in VMs, job `bsd`)
+          - { name: freebsd-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-freebsd,         tool: cross }
+          - { name: freebsd-i686,      os: ubuntu-latest,  target: i686-unknown-freebsd,           tool: cross, experimental: true }
+          - { name: illumos-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-illumos,         tool: cross, experimental: true }
+          # macOS, Windows
+          - { name: macos-x86_64,      os: macos-latest,   target: x86_64-apple-darwin,            tool: cargo }
+          - { name: macos-aarch64,     os: macos-latest,   target: aarch64-apple-darwin,           tool: cargo }
+          - { name: windows-x86_64,    os: windows-latest, target: x86_64-pc-windows-msvc,         tool: cargo }
+          - { name: windows-i686,      os: windows-latest, target: i686-pc-windows-msvc,           tool: cargo }
+          - { name: windows-aarch64,   os: windows-latest, target: aarch64-pc-windows-msvc,        tool: cargo }
+          # WebAssembly: runs on any system with a WASI runtime (wasmtime, wasmer, ...)
+          - { name: wasm32-wasi,       os: ubuntu-latest,  target: wasm32-wasip1,                  tool: cargo }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -49,6 +66,7 @@ jobs:
           mkdir -p "$dir/examples" "$dir/docs"
           bin=kairos
           if [[ "${{ matrix.target }}" == *windows* ]]; then bin=kairos.exe; fi
+          if [[ "${{ matrix.target }}" == wasm* ]]; then bin=kairos.wasm; fi
           cp "target/${{ matrix.target }}/release/$bin" "$dir/"
           cp LICENSE kairos/README.md "$dir/"
           cp kairos/docs/spec.md "$dir/docs/"
@@ -139,8 +157,9 @@ jobs:
 
   publish:
     name: publish
-    # the BSD VMs never block a release: their packages go in when they build
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && needs.vscode.result == 'success'
+    # experimental targets and the BSD VMs never block a release: their packages go in when they
+    # build; the step below refuses to publish if any non-experimental package is missing
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.vscode.result == 'success'
     needs: [build, bsd, vscode]
     runs-on: ubuntu-latest
     steps:
@@ -149,6 +168,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: every required package is there
+        run: |
+          missing=0
+          for n in linux-x86_64 linux-i686 linux-aarch64 linux-armv7 linux-armv6 linux-riscv64 linux-ppc64le linux-s390x \
+                   freebsd-x86_64 macos-x86_64 macos-aarch64 windows-x86_64 windows-i686 windows-aarch64 wasm32-wasi; do
+            if ! ls dist/kairos-*-"$n".* > /dev/null 2>&1; then echo "missing: $n"; missing=1; fi
+          done
+          ls -l dist
+          exit $missing
       - name: checksums
         run: |
           cd dist

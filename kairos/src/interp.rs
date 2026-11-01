@@ -13,6 +13,7 @@ use crate::value::{FuncVal, Value, total_cmp};
 use std::cmp::Ordering;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 mod tensors;
 
@@ -25,7 +26,19 @@ pub enum Ctl {
 
 pub type R<T> = Result<T, Ctl>;
 
-const MAX_DEPTH: u32 = 20_000;
+/// Stack size (bytes) of the thread that runs the interpreter, set by whoever creates it. The
+/// recursion limit scales with it, so deep recursion is a clean R0005 on every system, including
+/// 32-bit ones that get a smaller stack. 0 = unknown (assume a large stack).
+pub static STACK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn max_depth() -> u32 {
+    // stack used per Kairós call, measured with a margin (debug builds use far more)
+    let per_call: usize = if cfg!(debug_assertions) { 128 << 10 } else { 16 << 10 };
+    match STACK_BYTES.load(AtomicOrdering::Relaxed) {
+        0 => 20_000,
+        bytes => u32::try_from(bytes / per_call).unwrap_or(u32::MAX).clamp(32, 20_000),
+    }
+}
 
 fn err<T>(code: &'static str, sp: Span, msg: impl Into<String>) -> R<T> {
     Err(Ctl::Err(Diag::new(code, sp, msg)))
@@ -59,7 +72,7 @@ fn place_mut<'v>(root: &'v mut Value, path: &[Step]) -> R<&'v mut Value> {
                 Value::List(xs) => {
                     let xs = Rc::make_mut(xs);
                     let n = xs.len();
-                    if *i < 0 || *i as usize >= n {
+                    if *i < 0 || *i as u64 >= n as u64 {
                         return err("R0001", *sp, format!("index {i} out of bounds for a list of length {n}"));
                     }
                     &mut xs[*i as usize]
@@ -122,11 +135,12 @@ pub struct Interp<'a> {
     out: &'a mut dyn Write,
     host: &'a Host,
     depth: u32,
+    max_depth: u32,
 }
 
 impl<'a> Interp<'a> {
     pub fn new(ck: &'a Checker, out: &'a mut dyn Write, host: &'a Host) -> Self {
-        Interp { ck, out, host, depth: 0 }
+        Interp { ck, out, host, depth: 0, max_depth: max_depth() }
     }
 
     fn eval_all(&mut self, xs: &[HExpr], f: &mut Vec<Value>) -> R<Vec<Value>> {
@@ -164,7 +178,7 @@ impl<'a> Interp<'a> {
                 let i = as_int(self.eval(i, f)?);
                 match xs {
                     Value::List(xs) => {
-                        if i < 0 || i as usize >= xs.len() {
+                        if i < 0 || i as u64 >= xs.len() as u64 {
                             return err("R0001", *sp, format!("index {i} out of bounds for a list of length {}", xs.len()));
                         }
                         Ok(xs[i as usize].clone())
@@ -328,7 +342,7 @@ impl<'a> Interp<'a> {
     }
 
     fn enter(&mut self, sp: Span, run: impl FnOnce(&mut Self) -> R<Value>) -> R<Value> {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= self.max_depth {
             return err("R0005", sp, "stack overflow: too many nested calls");
         }
         self.depth += 1;

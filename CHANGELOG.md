@@ -4,26 +4,36 @@ Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release n
 
 ## 0.2.1 — Kairós em qualquer sistema
 
-- **Binários para todos os sistemas**, gerados e publicados automaticamente a cada versão:
+- **Binários para 32 e 64 bits, x86, ARM e além**, gerados e publicados automaticamente a cada versão:
 
   | sistema | arquiteturas |
   |---|---|
-  | Linux (estático, roda em qualquer distribuição) | x86_64 e ARM64 |
+  | Linux (estático, roda em qualquer distribuição) | x86_64, i686 (32 bits), ARM64, ARMv7 e ARMv6 (32 bits, Raspberry Pi), RISC-V 64, PowerPC64 LE, s390x |
   | macOS | Intel e Apple Silicon |
-  | Windows | x86_64 e ARM64 |
-  | FreeBSD, NetBSD, OpenBSD | x86_64 |
+  | Windows | x86_64, i686 (32 bits), ARM64 |
+  | FreeBSD | x86_64 |
+  | NetBSD, OpenBSD | x86_64 (compilados nativamente) |
+  | WebAssembly (WASI) | qualquer sistema com um runtime WASI: wasmtime, wasmer… |
+  | experimentais | Linux LoongArch64, FreeBSD i686, illumos x86_64 |
 
-  Nos outros sistemas (illumos, DragonFly, outras arquiteturas…), é só compilar com `cargo build --release -p kairos`.
+  Nos outros sistemas é só compilar com `cargo build --release -p kairos`.
 - **Rust puro:** a Kairós não depende de nenhuma biblioteca do sistema. O acesso à rede do laboratório virou o recurso opcional `net`, que a linguagem não usa, e com isso o OpenSSL deixou de ser necessário.
 - **Os mesmos bits em qualquer sistema:** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a do sistema operacional.
 - **`.krs` reconhecido:**
   - extensão do VS Code (`kairos-vscode-0.2.1.vsix`): reconhece arquivos `.krs`, dá cores de sintaxe, comentários (`Ctrl+/`), fechamento de colchetes e cores nos blocos ` ```krs ` do Markdown;
   - gramática TextMate em `editors/vscode/syntaxes/kairos.tmLanguage.json`, que serve também no Sublime Text e nos editores JetBrains, e é a base para o reconhecimento pelo GitHub (ver `editors/README.md`);
   - scripts com `#!/usr/bin/env kairos` na primeira linha rodam direto no Linux, macOS e BSD (`chmod +x programa.krs` e depois `./programa.krs`).
-- **CI:** testes a cada push em Linux (x86_64 e ARM64), macOS, Windows e FreeBSD.
+- **CI:** testes a cada push:
+  - nativos em Linux (x86_64 e ARM64), macOS, Windows (x86_64 e i686 de 32 bits) e FreeBSD;
+  - emulados (QEMU) em Linux i686 e ARMv7 de 32 bits, RISC-V 64, PowerPC64 LE e s390x, que é big-endian;
+  - WebAssembly, rodando sob o wasmtime.
 - **Licença MIT** (`LICENSE`), incluída também nos pacotes e na extensão.
 - **Política de segurança** (`SECURITY.md`): versões com suporte e reporte privado pela aba Security.
-- **Sistemas de 32 bits:** a pilha do interpretador recua para um tamanho menor quando falta espaço de endereçamento.
+- **32 bits de verdade:**
+  - índices e tamanhos são conferidos em 64 bits antes de virar `usize`, então nada é truncado em silêncio;
+  - a pilha do interpretador recua para um tamanho menor quando falta espaço de endereçamento;
+  - recursão profunda é sempre um erro limpo (R0005), com o limite proporcional à pilha. O teste novo `tests/stack.rs` cobre isso.
+- **WebAssembly:** sem threads, o interpretador roda na thread principal, com pilha de 64 MB fixada no link (`.cargo/config.toml`).
 
 ## 0.2.0 — M2: tensores com eixos nomeados + dados da B3
 

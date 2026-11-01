@@ -1,7 +1,9 @@
 //! `kairos` command line: run, check and an interactive REPL.
 
+use kairos::interp::STACK_BYTES;
 use kairos::session::Session;
 use std::io::{BufRead, Write};
+use std::sync::atomic::Ordering;
 
 const USAGE: &str = "Kairós — a language for financial research and AI
 
@@ -17,10 +19,18 @@ fn main() {
     // small address space (32-bit) get a smaller one, and the main thread as a last resort.
     for mb in [512usize, 64, 16] {
         let a = args.clone();
-        if let Ok(worker) = std::thread::Builder::new().stack_size(mb << 20).spawn(move || real_main(a)) {
+        let spawned = std::thread::Builder::new().stack_size(mb << 20).spawn(move || {
+            STACK_BYTES.store(mb << 20, Ordering::Relaxed);
+            real_main(a)
+        });
+        if let Ok(worker) = spawned {
             std::process::exit(worker.join().unwrap_or(101));
         }
     }
+    // no threads (WebAssembly/WASI): the main thread's stack is set at link time
+    // (.cargo/config.toml); elsewhere assume a small one
+    let main_stack = if cfg!(target_family = "wasm") { 64 << 20 } else { 1 << 20 };
+    STACK_BYTES.store(main_stack, Ordering::Relaxed);
     std::process::exit(real_main(args));
 }
 

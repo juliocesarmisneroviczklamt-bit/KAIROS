@@ -1,4 +1,8 @@
-# Tests Kairós on every push: Linux (x86_64 and ARM64), macOS (Apple Silicon), Windows and FreeBSD.
+# Tests Kairós on every push, natively and under emulation:
+# - 64-bit: Linux x86_64 and ARM64, macOS (Apple Silicon), Windows x86_64, FreeBSD
+# - 32-bit: Windows i686, Linux i686 and ARMv7
+# - other architectures: RISC-V 64, PowerPC64 LE and s390x (big-endian), under QEMU
+# - WebAssembly (WASI), under wasmtime
 name: CI
 
 on:
@@ -14,27 +18,79 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  native:
+    name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        include:
+          - { name: linux-x86_64,          os: ubuntu-latest }
+          - { name: linux-aarch64,         os: ubuntu-24.04-arm }
+          - { name: macos-aarch64,         os: macos-latest }
+          - { name: windows-x86_64,        os: windows-latest }
+          - { name: windows-i686 (32-bit), os: windows-latest, target: i686-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: tests (golden programs; the B3 acceptance test skips without data)
-        run: cargo test -p kairos --locked
+        with:
+          targets: ${{ matrix.target }}
+      - name: tests (golden programs, small stacks; the B3 acceptance test skips without data)
+        shell: bash
+        run: |
+          t="${{ matrix.target }}"
+          cargo test -p kairos --locked ${t:+--target $t}
       - name: run the examples
         shell: bash
         run: |
-          cargo build -p kairos --locked
-          ./target/debug/kairos run kairos/examples/finance.krs
-          ./target/debug/kairos --version
+          t="${{ matrix.target }}"
+          cargo build -p kairos --locked ${t:+--target $t}
+          bin="target/${t:+$t/}debug/kairos"
+          "$bin" run kairos/examples/finance.krs
+          "$bin" --version
+
+  emulated:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-i686 (32-bit),        target: i686-unknown-linux-musl }
+          - { name: linux-armv7 (32-bit, QEMU), target: armv7-unknown-linux-musleabihf }
+          - { name: linux-riscv64 (QEMU),       target: riscv64gc-unknown-linux-gnu }
+          - { name: linux-ppc64le (QEMU),       target: powerpc64le-unknown-linux-gnu }
+          - { name: linux-s390x (big-endian, QEMU), target: s390x-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: tests
+        run: cross test -p kairos --locked --target ${{ matrix.target }}
+
+  wasm:
+    name: test (wasm32-wasi, wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - name: tests
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
+        run: cargo test -p kairos --locked --target wasm32-wasip1
+      - name: run the examples
+        run: |
+          cargo build -p kairos --locked --target wasm32-wasip1
+          wasmtime run --dir=. target/wasm32-wasip1/debug/kairos.wasm run kairos/examples/finance.krs
+          wasmtime run target/wasm32-wasip1/debug/kairos.wasm --version
 
   freebsd:
-    name: test (freebsd)
+    name: test (freebsd-x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
