@@ -1,0 +1,3 @@
+#!/usr/bin/env kairos
+// A .krs file can be an executable script: chmod +x, then ./shebang.krs
+print("hello from a script")   // out: hello from a script

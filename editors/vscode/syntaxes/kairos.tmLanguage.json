@@ -1,0 +1,208 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kairós",
+  "scopeName": "source.kairos",
+  "fileTypes": ["krs"],
+  "firstLineMatch": "^#!.*\\bkairos\\b",
+  "patterns": [
+    { "include": "#shebang" },
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#tensor-type" },
+    { "include": "#declarations" },
+    { "include": "#over-axis" },
+    { "include": "#keywords" },
+    { "include": "#labels" },
+    { "include": "#b3" },
+    { "include": "#builtins" },
+    { "include": "#constants" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "shebang": {
+      "name": "comment.line.shebang.kairos",
+      "match": "\\A#!.*$"
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.kairos",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.kairos" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.kairos" } }
+        },
+        {
+          "name": "comment.line.double-slash.kairos",
+          "begin": "//",
+          "end": "$",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.kairos" } }
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.kairos",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.kairos" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.kairos" } },
+      "patterns": [
+        { "name": "constant.character.escape.kairos", "match": "\\\\[nt\"\\\\]" },
+        { "name": "invalid.illegal.escape.kairos", "match": "\\\\." }
+      ]
+    },
+    "tensor-type": {
+      "comment": "Tensor[month, asset; f64]: axis names, then the element type",
+      "begin": "\\b(Tensor)\\s*(\\[)",
+      "beginCaptures": {
+        "1": { "name": "support.type.tensor.kairos" },
+        "2": { "name": "punctuation.section.brackets.begin.kairos" }
+      },
+      "end": "\\]",
+      "endCaptures": { "0": { "name": "punctuation.section.brackets.end.kairos" } },
+      "patterns": [
+        {
+          "begin": ";",
+          "beginCaptures": { "0": { "name": "punctuation.separator.semicolon.kairos" } },
+          "end": "(?=\\])",
+          "patterns": [{ "include": "#types" }]
+        },
+        { "name": "entity.name.type.axis.kairos", "match": "[[:alpha:]_][[:alnum:]_]*" },
+        { "name": "punctuation.separator.comma.kairos", "match": "," }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([[:alpha:]_][[:alnum:]_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.kairos" },
+            "2": { "name": "entity.name.function.kairos" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum)\\s+([[:alpha:]_][[:alnum:]_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kairos" },
+            "2": { "name": "entity.name.type.kairos" }
+          }
+        },
+        {
+          "match": "\\b(axis)\\s+([[:alpha:]_][[:alnum:]_]*)(?:\\s*(:)\\s*(temporal)\\s*(\\()\\s*(daily|monthly)\\s*(\\)))?",
+          "captures": {
+            "1": { "name": "storage.type.axis.kairos" },
+            "2": { "name": "entity.name.type.axis.kairos" },
+            "3": { "name": "punctuation.separator.colon.kairos" },
+            "4": { "name": "storage.modifier.temporal.kairos" },
+            "6": { "name": "constant.language.frequency.kairos" }
+          }
+        },
+        {
+          "match": "\\b(let|var)\\s+([[:alpha:]_][[:alnum:]_]*)",
+          "captures": {
+            "1": { "name": "storage.type.kairos" },
+            "2": { "name": "variable.other.declaration.kairos" }
+          }
+        }
+      ]
+    },
+    "over-axis": {
+      "comment": "the axis of a reduction or ranking: sum(x, over: asset)",
+      "match": "\\b(over)\\s*(:)\\s*([[:alpha:]_][[:alnum:]_]*)",
+      "captures": {
+        "1": { "name": "variable.parameter.label.kairos" },
+        "2": { "name": "punctuation.separator.colon.kairos" },
+        "3": { "name": "entity.name.type.axis.kairos" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.kairos", "match": "\\b(if|else|match|for|in|while|break|continue|return)\\b" },
+        { "name": "keyword.operator.logical.kairos", "match": "\\b(and|or|not)\\b" },
+        { "name": "storage.modifier.inout.kairos", "match": "\\binout\\b" },
+        { "name": "storage.type.kairos", "match": "\\b(let|var|fn|struct|enum|axis)\\b" },
+        {
+          "comment": "reserved for later milestones",
+          "name": "keyword.other.reserved.kairos",
+          "match": "\\b(trait|protocol|kernel|compute|schedule|unsafe|parallel|smooth|sink|import|pub|as|loop|type|const|use|self)\\b"
+        }
+      ]
+    },
+    "labels": {
+      "comment": "named arguments, axis selectors (ret[month: m]), struct fields and parameters",
+      "match": "\\b([[:alpha:]_][[:alnum:]_]*)\\s*(:)(?!:)",
+      "captures": {
+        "1": { "name": "variable.parameter.label.kairos" },
+        "2": { "name": "punctuation.separator.colon.kairos" }
+      }
+    },
+    "b3": {
+      "patterns": [
+        {
+          "match": "\\b(b3)\\s*(\\.)\\s*(monthly_returns|eligible|cdi|months|tickers|month_index|evaluate)\\b",
+          "captures": {
+            "1": { "name": "support.class.module.kairos" },
+            "2": { "name": "punctuation.accessor.kairos" },
+            "3": { "name": "support.function.b3.kairos" }
+          }
+        },
+        { "name": "support.class.module.kairos", "match": "\\bb3\\b" }
+      ]
+    },
+    "builtins": {
+      "name": "support.function.builtin.kairos",
+      "match": "\\b(print|len|push|pop|sort|reverse|contains|map|filter|sum|min|max|minimum|maximum|abs|sqrt|exp|ln|floor|ceil|round|float|int|str|assert|mean|prod|nan_sum|nan_mean|nan_prod|nan_count|count|is_nan|fill_nan|where|size|zeros|ones|full|zeros_like|full_like|tensor|to_list|rank|top_k|bottom_k|contract|variance|std_dev|product|compound|wealth|max_drawdown|sharpe)\\b(?=\\s*\\()"
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.kairos", "match": "\\b(true|false)\\b" },
+        { "name": "constant.language.kairos", "match": "\\b(nan|inf|pi)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "support.type.primitive.kairos", "match": "\\b(i64|f64|bool|str)\\b" },
+        { "name": "support.type.kairos", "match": "\\b(List|Tensor)\\b" },
+        { "name": "entity.name.type.kairos", "match": "\\b[[:upper:]][[:alnum:]_]*\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.kairos", "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?[eE][+-]?[0-9]+\\b" },
+        { "name": "constant.numeric.float.kairos", "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b" },
+        { "name": "constant.numeric.integer.kairos", "match": "\\b[0-9][0-9_]*\\b" }
+      ]
+    },
+    "calls": {
+      "match": "\\b([[:alpha:]_][[:alnum:]_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.kairos" } }
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.kairos", "match": "->|=>" },
+        { "name": "keyword.operator.range.kairos", "match": "\\.\\.=?" },
+        { "name": "keyword.operator.comparison.kairos", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.assignment.compound.kairos", "match": "\\+=|-=|\\*=|/=" },
+        { "name": "keyword.operator.assignment.kairos", "match": "=" },
+        { "name": "keyword.operator.arithmetic.kairos", "match": "[-+*/%^]" },
+        { "name": "keyword.operator.lambda.kairos", "match": "\\|" },
+        { "name": "keyword.operator.temporal.kairos", "match": "@" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.comma.kairos", "match": "," },
+        { "name": "punctuation.terminator.statement.kairos", "match": ";" },
+        { "name": "punctuation.separator.colon.kairos", "match": ":" },
+        { "name": "punctuation.accessor.kairos", "match": "\\." },
+        { "name": "punctuation.section.braces.kairos", "match": "[{}]" },
+        { "name": "punctuation.section.brackets.kairos", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.parens.kairos", "match": "[()]" }
+      ]
+    }
+  }
+}

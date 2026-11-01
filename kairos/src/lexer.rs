@@ -195,6 +195,12 @@ pub fn lex(src: &str, file: u16) -> KResult<Vec<Token>> {
     let mut toks: Vec<Token> = Vec::new();
     let mut i = 0;
     let mut nl = false;
+    // `#!/usr/bin/env kairos` on the first line: a .krs file can be an executable script
+    if src.starts_with("#!") {
+        while i < n && chars[i].1 != '\n' {
+            i += 1;
+        }
+    }
     while i < n {
         let (start, c) = chars[i];
         if c == '\n' {

@@ -13,12 +13,15 @@ usage:
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // the reference interpreter recurses on the HIR: give it a large stack
-    let worker = std::thread::Builder::new()
-        .stack_size(512 << 20)
-        .spawn(move || real_main(args))
-        .expect("interpreter thread");
-    std::process::exit(worker.join().unwrap_or(101));
+    // The reference interpreter recurses on the HIR, so it runs on a large stack. Systems with a
+    // small address space (32-bit) get a smaller one, and the main thread as a last resort.
+    for mb in [512usize, 64, 16] {
+        let a = args.clone();
+        if let Ok(worker) = std::thread::Builder::new().stack_size(mb << 20).spawn(move || real_main(a)) {
+            std::process::exit(worker.join().unwrap_or(101));
+        }
+    }
+    std::process::exit(real_main(args));
 }
 
 fn real_main(args: Vec<String>) -> i32 {
@@ -30,7 +33,10 @@ fn real_main(args: Vec<String>) -> i32 {
             println!("kairos {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Some(path) if path.ends_with(".krs") => file_cmd(Some(&path.to_string()), true),
+        // `kairos programa.krs`, and scripts with `#!/usr/bin/env kairos` (any file name)
+        Some(path) if path.ends_with(".krs") || std::path::Path::new(path).is_file() => {
+            file_cmd(Some(&path.to_string()), true)
+        }
         _ => {
             eprintln!("{USAGE}");
             2

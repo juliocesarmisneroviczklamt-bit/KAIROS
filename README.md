@@ -1,5 +1,8 @@
 # KAIROS
 
+[![CI](https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/actions/workflows/ci.yml/badge.svg)](https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/juliocesarmisneroviczklamt-bit/KAIROS)](https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/releases)
+
 **Kairós** é uma linguagem de programação criada do zero para pesquisa e IA no mercado financeiro. *Kairós* (καιρός) é grego para "o momento certo". A garantia central da linguagem é que cada decisão só enxerga o que já era conhecido quando foi tomada.
 
 O repositório tem duas partes que trabalham juntas:
@@ -18,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.2.0 (M2)
+## Estado: v0.2.1 (M2, em qualquer sistema)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -58,7 +61,16 @@ O programa roda em ~0,3 s sobre 31 anos de B3 e reproduz **bit a bit** os númer
 
 ## Como usar
 
-O binário para Windows está nas [Releases](https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/releases). Para compilar do código (Rust 1.85+):
+**Binários prontos** nas [Releases](https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/releases), sem dependências:
+
+| sistema | arquiteturas |
+|---|---|
+| Linux (qualquer distribuição) | x86_64 e ARM64 |
+| macOS | Intel e Apple Silicon |
+| Windows | x86_64 e ARM64 |
+| FreeBSD, NetBSD | x86_64 |
+
+**Em qualquer outro sistema** que o Rust suporta (OpenBSD, illumos, …), compile a partir do código. A Kairós é Rust puro: nenhuma biblioteca do sistema é necessária.
 
 ```text
 cargo build --release -p kairos          # target/release/kairos
@@ -66,6 +78,13 @@ kairos repl                              # sessão interativa
 kairos run kairos/examples/finance.krs   # exemplo do núcleo
 cargo test -p kairos                     # testes dourados + teste de aceitação
 ```
+
+**Mesmo resultado em qualquer lugar:** `exp`, `ln` e `^` usam matemática em Rust puro, não a do sistema operacional. O mesmo programa dá os mesmos bits em todos os sistemas. A CI roda os testes a cada push em Linux (x86_64 e ARM64), macOS, Windows e FreeBSD.
+
+**Arquivos `.krs`:**
+- **VS Code:** instale a extensão `kairos-vscode-*.vsix` das Releases (`code --install-extension arquivo.vsix`). Ela traz reconhecimento, cores de sintaxe e blocos ` ```krs ` no Markdown.
+- **Outros editores:** veja [`editors/`](editors/). O mesmo diretório explica por que o GitHub ainda mostra "Rust".
+- **Scripts:** com `#!/usr/bin/env kairos` na primeira linha e `chmod +x`, o programa roda direto: `./programa.krs`.
 
 O módulo `b3` precisa dos dados da B3, que o laboratório baixa e monta: são cerca de 1 GB vindos da B3, do BCB e do NEFIN-USP, e as pastas `data/` e `results/` não ficam no repositório.
 

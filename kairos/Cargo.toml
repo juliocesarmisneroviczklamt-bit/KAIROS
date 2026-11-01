@@ -1,6 +1,6 @@
 [package]
 name = "kairos"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Kairós: linguagem de programação para pesquisa e IA no mercado financeiro (tipos temporais, holdout linear, diferenciação nativa, eixos nomeados)"
 
@@ -14,4 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 # ponte com o laboratório: dados da B3, simulador realista, registro de testes
-quant-b3 = { path = ".." }
+quant-b3 = { path = "..", default-features = false }
+# exp, ln e pow em Rust puro: o mesmo programa dá os mesmos bits em qualquer sistema
+libm = "0.2"

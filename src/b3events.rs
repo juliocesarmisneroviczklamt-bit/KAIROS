@@ -136,7 +136,7 @@ fn run_jobs(jobs: Vec<Job>, dir: &Path, threads: usize) -> Result<()> {
     Ok(())
 }
 
-fn fetch_supp(agent: &ureq::Agent, dir: &Path, issuer: &str) -> Result<()> {
+fn fetch_supp(agent: &http::Agent, dir: &Path, issuer: &str) -> Result<()> {
     let q = serde_json::json!({"issuingCompany": issuer, "language": "pt-br"}).to_string();
     let url = format!("{BASE}/GetListedSupplementCompany/{}", b64(&q));
     let body = http::get_text(agent, &url)?;
@@ -149,7 +149,7 @@ fn fetch_supp(agent: &ureq::Agent, dir: &Path, issuer: &str) -> Result<()> {
     Ok(())
 }
 
-fn fetch_cash(agent: &ureq::Agent, dir: &Path, name: &str) -> Result<()> {
+fn fetch_cash(agent: &http::Agent, dir: &Path, name: &str) -> Result<()> {
     let mut all: Vec<serde_json::Value> = Vec::new();
     let (mut page, mut total_pages) = (1u64, 1u64);
     while page <= total_pages {

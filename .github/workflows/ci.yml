@@ -1,0 +1,49 @@
+# Tests Kairós on every push: Linux (x86_64 and ARM64), macOS (Apple Silicon), Windows and FreeBSD.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: tests (golden programs; the B3 acceptance test skips without data)
+        run: cargo test -p kairos --locked
+      - name: run the examples
+        shell: bash
+        run: |
+          cargo build -p kairos --locked
+          ./target/debug/kairos run kairos/examples/finance.krs
+          ./target/debug/kairos --version
+
+  freebsd:
+    name: test (freebsd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y curl
+          run: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo test -p kairos --locked
+            ./target/debug/kairos run kairos/examples/finance.krs

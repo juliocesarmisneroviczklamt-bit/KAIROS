@@ -1,0 +1,62 @@
+{
+  "name": "kairos",
+  "displayName": "Kairós",
+  "description": "Suporte à linguagem Kairós (.krs): reconhecimento de arquivos, cores de sintaxe, comentários, colchetes e blocos ```krs no Markdown.",
+  "version": "0.2.1",
+  "publisher": "kairos-lang",
+  "homepage": "https://github.com/juliocesarmisneroviczklamt-bit/KAIROS",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/juliocesarmisneroviczklamt-bit/KAIROS"
+  },
+  "bugs": {
+    "url": "https://github.com/juliocesarmisneroviczklamt-bit/KAIROS/issues"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "kairos",
+    "kairós",
+    "krs",
+    "finance",
+    "quant"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kairos",
+        "aliases": [
+          "Kairós",
+          "Kairos",
+          "kairos"
+        ],
+        "extensions": [
+          ".krs"
+        ],
+        "firstLine": "^#!.*\\bkairos\\b",
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kairos",
+        "scopeName": "source.kairos",
+        "path": "./syntaxes/kairos.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.kairos.codeblock",
+        "path": "./syntaxes/kairos.markdown.tmLanguage.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.kairos": "kairos"
+        }
+      }
+    ]
+  }
+}
