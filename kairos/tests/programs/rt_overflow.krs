@@ -1,0 +1,3 @@
+// Runtime: i64 arithmetic is checked.
+let big = 9223372036854775807
+print(big + 1)   // error: R0006

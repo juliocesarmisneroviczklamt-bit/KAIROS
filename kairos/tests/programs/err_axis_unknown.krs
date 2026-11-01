@@ -1,0 +1,3 @@
+// Axes must be declared (month, day and asset are built in).
+let x = zeros(month: 2, asset: 3)
+print(sum(x, over: sector))   // error: E0200

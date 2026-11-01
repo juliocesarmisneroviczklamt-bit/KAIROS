@@ -1,0 +1,3 @@
+// Runtime: integer division by zero.
+let z = 0
+print(7 / z)   // error: R0002

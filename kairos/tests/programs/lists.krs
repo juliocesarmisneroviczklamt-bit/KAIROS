@@ -1,0 +1,30 @@
+// Lists: value semantics (copy on write), uniform call syntax, inout.
+fn bump_all(inout v: List[i64], k: i64) {
+    for i in 0..len(v) { v[i] += k }
+}
+
+var xs = [3, 1, 2]
+let ys = xs
+xs.push(10)
+xs.sort()
+print(xs)                               // out: [1, 2, 3, 10]
+print(ys)                               // out: [3, 1, 2]
+print(len(xs), sum(xs))                 // out: 4 16
+print(xs.map(|v| v * 2))                // out: [2, 4, 6, 20]
+print(xs.filter(|v| v > 2))             // out: [3, 10]
+xs.bump_all(100)
+print(xs)                               // out: [101, 102, 103, 110]
+bump_all(inout xs, -100)
+print(xs[0], xs.contains(10))           // out: 1 true
+let empty: List[f64] = []
+print(sum(empty))                       // out: 0.0
+print(mean([1.0, 2.0, 3.0]), product([1.0, 2.0, 3.0]))   // out: 2.0 6.0
+var m = [[1, 2], [3, 4]]
+m[1][0] = 30
+print(m)                                // out: [[1, 2], [30, 4]]
+print(xs.pop(), xs)                     // out: 10 [1, 2, 3]
+print(minimum([4, 2, 8]), maximum([1.5, -2.0]), min(3, 9), max(0.5, 0.25))   // out: 2 1.5 3 0.5
+var names = ["b", "c", "a"]
+names.sort()
+names.reverse()
+print(names)                            // out: ["c", "b", "a"]

@@ -1,0 +1,2 @@
+// Runtime: failed assertion inside the prelude (variance of a single value).
+print(variance([1.0]))   // error: R0003

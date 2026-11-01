@@ -1,0 +1,3 @@
+// Reducing over an axis the tensor does not have is a compile error.
+let r = tensor([0.5, 1.0], asset)
+print(sum(r, over: month))   // error: E0201

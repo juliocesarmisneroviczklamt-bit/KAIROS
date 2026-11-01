@@ -1,0 +1,72 @@
+// Kairós prelude: the standard library, written in Kairós itself.
+// Loaded into every session before user code.
+// (`mean`, `sum` and `prod` are builtins: they work on lists and on tensors.)
+
+// sample variance (n - 1)
+fn variance(xs: List[f64]) -> f64 {
+    assert(len(xs) > 1, "variance needs at least two values")
+    let m = mean(xs)
+    var acc = 0.0
+    for x in xs { acc += (x - m) ^ 2 }
+    acc / float(len(xs) - 1)
+}
+
+fn std_dev(xs: List[f64]) -> f64 {
+    sqrt(variance(xs))
+}
+
+fn product(xs: List[f64]) -> f64 {
+    var p = 1.0
+    for x in xs { p *= x }
+    p
+}
+
+// compound return of a series of simple returns: (1 + r1)(1 + r2)... - 1
+fn compound(returns: List[f64]) -> f64 {
+    var g = 1.0
+    for r in returns { g *= 1.0 + r }
+    g - 1.0
+}
+
+// cumulative wealth path starting at 1
+fn wealth(returns: List[f64]) -> List[f64] {
+    var w = 1.0
+    var path = []
+    for r in returns {
+        w *= 1.0 + r
+        path.push(w)
+    }
+    path
+}
+
+// worst peak-to-trough loss (a negative number)
+fn max_drawdown(returns: List[f64]) -> f64 {
+    var peak = 1.0
+    var worst = 0.0
+    for w in wealth(returns) {
+        peak = max(peak, w)
+        worst = min(worst, w / peak - 1.0)
+    }
+    worst
+}
+
+// annualized Sharpe ratio of monthly returns over a monthly risk-free rate
+fn sharpe(returns: List[f64], rf: f64) -> f64 {
+    let ex = returns.map(|r| r - rf)
+    mean(ex) / std_dev(ex) * sqrt(12.0)
+}
+
+// Result of `b3.evaluate(weights, ...)`: the quant-b3 realistic simulator, after costs
+// (and after taxes with `tax: true`). Rates are fractions: 0.146 = 14.6% a year.
+struct Evaluation {
+    months: i64,       // simulated months
+    cagr: f64,         // compound annual growth of total wealth
+    vol: f64,          // annualized volatility of monthly returns
+    sharpe: f64,       // annualized Sharpe over the CDI
+    max_dd: f64,       // worst drawdown of the monthly series (negative)
+    beta: f64,         // CAPM beta against the NEFIN market factor
+    alpha: f64,        // annualized CAPM alpha (Newey-West regression)
+    t_alpha: f64,      // t statistic of the alpha
+    turnover: f64,     // traded value per year, as a fraction of wealth (buys + sells)
+    cost_bps: f64,     // average cost paid per traded real, in basis points
+}

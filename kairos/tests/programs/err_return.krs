@@ -1,0 +1,2 @@
+// Body type differs from the declared return type.
+fn f() -> i64 { "x" }   // error: E0108

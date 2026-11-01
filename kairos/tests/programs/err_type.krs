@@ -1,0 +1,2 @@
+// A string where a f64 is expected.
+let x: f64 = "a"   // error: E0101

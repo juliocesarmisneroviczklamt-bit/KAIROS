@@ -1,0 +1,2 @@
+// Unknown name.
+print(y)   // error: E0100

@@ -1,0 +1,6 @@
+// Element-wise operations need one side's axes to contain the other's (spec, section 5).
+axis feature
+axis hidden
+let x = zeros(asset: 4, feature: 3)
+let y = zeros(asset: 4, hidden: 2)
+print(x + y)   // error: E0201

@@ -1,0 +1,23 @@
+// Functions as values, closures capturing by value, the prelude written in Kairós.
+fn make_adder(k: i64) -> fn(i64) -> i64 {
+    |x| x + k
+}
+
+fn apply_twice(f: fn(i64) -> i64, x: i64) -> i64 {
+    f(f(x))
+}
+
+let add5 = make_adder(5)
+print(add5(10))                                     // out: 15
+print(apply_twice(add5, 1))                         // out: 11
+var factor = 2
+let scale = |v: i64| v * factor
+factor = 100
+print(scale(3))                                     // out: 6
+print([1, 2, 3].map(|v| v * v))                     // out: [1, 4, 9]
+print(apply_twice(|x| x * 3, 2))                    // out: 18
+let rets = [0.5, 1.5]
+print(round(sharpe(rets, 0.0) * 1000.0) / 1000.0)   // out: 4.899
+print(compound([0.5, -0.5]))                        // out: -0.25
+print(max_drawdown([0.25, -0.5, 0.5]))              // out: -0.5
+print(wealth([0.5, 1.0]))                           // out: [1.5, 3.0]

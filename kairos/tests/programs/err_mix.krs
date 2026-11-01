@@ -1,0 +1,4 @@
+// i64 and f64 never mix silently.
+let a = 1.5
+let n = 2
+print(a * n)   // error: E0107

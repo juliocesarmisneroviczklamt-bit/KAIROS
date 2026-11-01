@@ -1,0 +1,39 @@
+// Kairós M1 example: portfolio statistics and a momentum ranking, in plain Kairós.
+// Run: kairos run kairos/examples/finance.krs
+
+struct Stats { cagr: f64, vol: f64, sharpe: f64, max_dd: f64 }
+
+fn stats(returns: List[f64], rf: f64) -> Stats {
+    let years = float(len(returns)) / 12.0
+    Stats {
+        cagr: (1.0 + compound(returns)) ^ (1.0 / years) - 1.0,
+        vol: std_dev(returns) * sqrt(12.0),
+        sharpe: sharpe(returns, rf),
+        max_dd: max_drawdown(returns),
+    }
+}
+
+fn pct(x: f64) -> str {
+    str(round(x * 1000.0) / 10.0) + "%"
+}
+
+// monthly returns of two made-up portfolios and the monthly risk-free rate (CDI ~ 1%)
+let winners = [0.04, -0.02, 0.06, 0.01, -0.08, 0.05, 0.03, -0.01, 0.02, 0.04, -0.03, 0.05]
+let market = [0.02, -0.01, 0.03, 0.00, -0.06, 0.02, 0.02, -0.02, 0.01, 0.02, -0.02, 0.03]
+let cdi = 0.01
+
+for (name, rets) in [("winners", winners), ("market", market)] {
+    let s = stats(rets, cdi)
+    print(name, "| CAGR", pct(s.cagr), "| vol", pct(s.vol), "| Sharpe", round(s.sharpe * 100.0) / 100.0, "| maxDD", pct(s.max_dd))
+}
+
+// momentum ranking: cumulative return of the past months, best first
+let tickers = ["PETR4", "VALE3", "ITUB4", "WEGE3"]
+let past = [[0.05, 0.02], [-0.03, 0.01], [0.01, 0.01], [0.08, 0.04]]
+var scored = []
+for i in 0..len(tickers) {
+    scored.push((compound(past[i]), tickers[i]))
+}
+scored.sort()
+scored.reverse()
+print("momentum ranking:", scored.map(|p| p.1))

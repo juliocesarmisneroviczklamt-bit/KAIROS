@@ -1,0 +1,56 @@
+// Named-axis tensors (M2): construction, element-wise operations aligned by axis name,
+// reductions, selection, assignment, missing data, ranking and contraction.
+axis feature
+axis hidden
+
+let r = tensor([0.5, -0.25, 1.0], asset)
+print(r)                                    // out: Tensor[asset: 3; f64] [0.5, -0.25, 1.0]
+print(sum(r), mean(r), max(r), min(r))      // out: 1.25 0.4166666666666667 1.0 -0.25
+print(r * 2.0 + 1.0)                        // out: Tensor[asset: 3; f64] [2.0, 0.5, 3.0]
+print(r > 0.0)                              // out: Tensor[asset: 3; bool] [true, false, true]
+print(max(r, 0.0), to_list(r))              // out: Tensor[asset: 3; f64] [0.5, 0.0, 1.0] [0.5, -0.25, 1.0]
+
+// a month x asset panel: a tensor over `asset` repeats along `month`, and vice versa
+var x = zeros(month: 2, asset: 3)
+x[month: 0] = r
+x[month: 1] = r * 2.0
+print(x)                                    // out: Tensor[month: 2, asset: 3; f64]
+print(sum(x, over: month))                  // out: Tensor[asset: 3; f64] [1.5, -0.75, 3.0]
+print(sum(x, over: asset))                  // out: Tensor[month: 2; f64] [1.25, 2.5]
+print((x - sum(x, over: asset))[month: 1])  // out: Tensor[asset: 3; f64] [-1.5, -3.0, -0.5]
+print(x[month: 0 ..= 1, asset: 2])          // out: Tensor[month: 2; f64] [1.0, 2.0]
+print(x[month: 1, asset: 0], size(x, month), size(x, asset))   // out: 1.0 2 3
+
+// the order of axes in a type never matters
+let z: Tensor[asset, month; f64] = x
+print(z[asset: 2, month: 1])                // out: 2.0
+
+fn excess(x: Tensor[month, asset; f64], rf: Tensor[month; f64]) -> Tensor[month, asset; f64] {
+    x - rf
+}
+print(excess(x, tensor([0.25, 0.5], month))[month: 1])   // out: Tensor[asset: 3; f64] [0.5, -1.0, 1.5]
+
+// value semantics: changing a copy never changes the original
+var y = x
+y[month: 0] += 10.0
+print(x[month: 0, asset: 0], y[month: 0, asset: 0])      // out: 0.5 10.5
+
+// missing data is NaN
+let s = tensor([0.5, nan, -0.25, 2.0], asset)
+print(is_nan(s))                            // out: Tensor[asset: 4; bool] [false, true, false, false]
+print(nan_count(s), nan_sum(s), sum(s))     // out: 3.0 2.25 NaN
+print(fill_nan(s, 0.0))                     // out: Tensor[asset: 4; f64] [0.5, 0.0, -0.25, 2.0]
+print(where(s > 0.0 and not is_nan(s), s, 0.0))          // out: Tensor[asset: 4; f64] [0.5, 0.0, 0.0, 2.0]
+print(count(s > 0.0))                       // out: 2.0
+
+// ranking: NaN never ranks, ties keep the asset order
+print(top_k(s, 2))                          // out: Tensor[asset: 4; bool] [true, false, false, true]
+print(bottom_k(s, 1))                       // out: Tensor[asset: 4; bool] [false, false, true, false]
+print(rank(s))                              // out: Tensor[asset: 4; f64] [0.5, NaN, 0.0, 1.0]
+let w = where(top_k(s, 2), 0.5, 0.0)
+print(w, sum(w))                            // out: Tensor[asset: 4; f64] [0.5, 0.0, 0.0, 0.5] 1.0
+
+// contraction is the matrix product, by axis name
+let v = tensor([1.0, 2.0], feature)
+print(contract(v, ones(feature: 2, hidden: 3), over: feature))   // out: Tensor[hidden: 3; f64] [3.0, 3.0, 3.0]
+print(contract(v, v, over: feature))        // out: 5.0

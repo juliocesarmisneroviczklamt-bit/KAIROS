@@ -1,0 +1,4 @@
+// inout parameter needs an explicit inout argument.
+fn bump(inout x: i64) { x += 1 }
+var v = 1
+bump(v)   // error: E0115

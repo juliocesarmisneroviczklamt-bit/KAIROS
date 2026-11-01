@@ -1,0 +1,17 @@
+[package]
+name = "kairos"
+version = "0.2.0"
+edition = "2024"
+description = "Kairós: linguagem de programação para pesquisa e IA no mercado financeiro (tipos temporais, holdout linear, diferenciação nativa, eixos nomeados)"
+
+[lib]
+name = "kairos"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kairos"
+path = "src/main.rs"
+
+[dependencies]
+# ponte com o laboratório: dados da B3, simulador realista, registro de testes
+quant-b3 = { path = ".." }

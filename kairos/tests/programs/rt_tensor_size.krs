@@ -1,0 +1,4 @@
+// Same axes, different sizes: a runtime error (sizes are not part of the type yet).
+let a = tensor([1.0, 2.0], asset)
+let b = tensor([1.0, 2.0, 3.0], asset)
+print(a + b)   // error: R0201

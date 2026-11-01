@@ -1,0 +1,5 @@
+// Non-exhaustive match on an enum.
+enum Side { Buy, Sell }
+fn sign(s: Side) -> i64 {
+    match s { Buy => 1 }   // error: E0110
+}
