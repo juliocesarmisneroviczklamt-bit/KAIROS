@@ -32,7 +32,6 @@ jobs:
           - { name: linux-riscv64,     os: ubuntu-latest,  target: riscv64gc-unknown-linux-gnu,    tool: cross }
           - { name: linux-ppc64le,     os: ubuntu-latest,  target: powerpc64le-unknown-linux-gnu,  tool: cross }
           - { name: linux-s390x,       os: ubuntu-latest,  target: s390x-unknown-linux-gnu,        tool: cross }
-          - { name: linux-loongarch64, os: ubuntu-latest,  target: loongarch64-unknown-linux-gnu,  tool: cross, experimental: true }
           # BSD and illumos (NetBSD and OpenBSD are built natively in VMs, job `bsd`)
           - { name: freebsd-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-freebsd,         tool: cross }
           - { name: freebsd-i686,      os: ubuntu-latest,  target: i686-unknown-freebsd,           tool: cross, experimental: true }

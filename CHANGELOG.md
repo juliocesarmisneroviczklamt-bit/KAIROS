@@ -14,7 +14,7 @@ Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release n
   | FreeBSD | x86_64 |
   | NetBSD, OpenBSD | x86_64 (compilados nativamente) |
   | WebAssembly (WASI) | qualquer sistema com um runtime WASI: wasmtime, wasmer… |
-  | experimentais | Linux LoongArch64, FreeBSD i686, illumos x86_64 |
+  | experimentais (compilados, sem teste em execução) | FreeBSD i686, illumos x86_64 |
 
   Nos outros sistemas é só compilar com `cargo build --release -p kairos`.
 - **Rust puro:** a Kairós não depende de nenhuma biblioteca do sistema. O acesso à rede do laboratório virou o recurso opcional `net`, que a linguagem não usa, e com isso o OpenSSL deixou de ser necessário.
@@ -33,7 +33,7 @@ Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release n
   - índices e tamanhos são conferidos em 64 bits antes de virar `usize`, então nada é truncado em silêncio;
   - a pilha do interpretador recua para um tamanho menor quando falta espaço de endereçamento;
   - recursão profunda é sempre um erro limpo (R0005), com o limite proporcional à pilha. O teste novo `tests/stack.rs` cobre isso.
-- **WebAssembly:** sem threads, o interpretador roda na thread principal, com pilha de 64 MB fixada no link (`.cargo/config.toml`).
+- **WebAssembly:** sem threads, o interpretador roda na thread principal. A profundidade de chamadas é limitada pelo runtime: no wasmtime, 512 KiB por padrão, cerca de 30 níveis de recursão. Para mais, rode com `wasmtime run -W max-wasm-stack=N --env KAIROS_STACK_BYTES=N`.
 
 ## 0.2.0 — M2: tensores com eixos nomeados + dados da B3
 

@@ -81,7 +81,8 @@ jobs:
       - uses: bytecodealliance/actions/wasmtime/setup@v1
       - name: tests
         env:
-          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
+          # the tests assume 4 MiB of wasm stack (kairos/tests/*.rs)
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run -W max-wasm-stack=4194304 --dir=/
         run: cargo test -p kairos --locked --target wasm32-wasip1
       - name: run the examples
         run: |

@@ -22,7 +22,7 @@ impl Write for Buf {
 }
 
 /// The reference interpreter recurses on the HIR, so it runs on a large stack (as the CLI does).
-/// Without threads (WebAssembly/WASI) it runs on the main thread, whose stack is set at link time.
+/// Without threads (WebAssembly/WASI) it runs on the main thread, with the stack the runtime allows.
 #[test]
 fn golden_programs() {
     use kairos::interp::STACK_BYTES;
@@ -38,7 +38,8 @@ fn golden_programs() {
             }
         }
         Err(_) => {
-            STACK_BYTES.store(64 << 20, Ordering::Relaxed);
+            // WebAssembly: CI runs wasmtime with -W max-wasm-stack=4194304
+            STACK_BYTES.store(4 << 20, Ordering::Relaxed);
             run_golden()
         }
     }

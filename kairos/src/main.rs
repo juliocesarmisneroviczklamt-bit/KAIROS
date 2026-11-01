@@ -27,9 +27,11 @@ fn main() {
             std::process::exit(worker.join().unwrap_or(101));
         }
     }
-    // no threads (WebAssembly/WASI): the main thread's stack is set at link time
-    // (.cargo/config.toml); elsewhere assume a small one
-    let main_stack = if cfg!(target_family = "wasm") { 64 << 20 } else { 1 << 20 };
+    // No threads (WebAssembly/WASI). There the depth of calls is limited by the runtime, not by
+    // the program: wasmtime allows 512 KiB unless run with `-W max-wasm-stack=N`; then pass the
+    // same N in KAIROS_STACK_BYTES (`--env KAIROS_STACK_BYTES=N`) to allow deeper recursion.
+    let default = if cfg!(target_family = "wasm") { 512 << 10 } else { 1 << 20 };
+    let main_stack = std::env::var("KAIROS_STACK_BYTES").ok().and_then(|s| s.parse().ok()).unwrap_or(default);
     STACK_BYTES.store(main_stack, Ordering::Relaxed);
     std::process::exit(real_main(args));
 }

@@ -1,4 +1,6 @@
-# WebAssembly (WASI) has no threads: the interpreter runs on the main thread, whose stack is
-# fixed at link time. 64 MiB is the size kairos/src/main.rs assumes for it.
+# WebAssembly (WASI) has no threads, so the interpreter runs on the main thread. Rust keeps the
+# addressable part of each frame in linear memory (the "shadow stack", 1 MiB by default): give it
+# 64 MiB. The depth of calls is also limited by the runtime's own stack (wasmtime:
+# `-W max-wasm-stack=N`, 512 KiB by default); kairos/src/main.rs explains how to raise it.
 [target.wasm32-wasip1]
 rustflags = ["-C", "link-arg=-zstack-size=67108864"]

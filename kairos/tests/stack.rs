@@ -25,9 +25,9 @@ fn deep_recursion_is_a_clean_error_on_small_stacks() {
                     std::panic::resume_unwind(panic);
                 }
             }
-            // no threads (WebAssembly/WASI): the main thread has the stack set at link time
+            // no threads (WebAssembly/WASI): the main thread, with the stack the runtime allows
             Err(_) => {
-                deep(64 << 20);
+                deep(4 << 20); // CI runs wasmtime with -W max-wasm-stack=4194304
                 return;
             }
         }
