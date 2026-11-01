@@ -92,3 +92,7 @@ O módulo `b3` precisa dos dados da B3, que o laboratório baixa e monta: são c
 cargo run --release -p quant-b3 -- all   # baixa e monta data/processed/panel.bin
 kairos run kairos/examples/momentum.krs  # da raiz do repositório (ou defina KAIROS_DATA)
 ```
+
+## Licença e segurança
+
+[MIT](LICENSE): use, modifique e distribua à vontade, mantendo o aviso de copyright. Para reportar uma falha de segurança, veja [SECURITY.md](SECURITY.md).

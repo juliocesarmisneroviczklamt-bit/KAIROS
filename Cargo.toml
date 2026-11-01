@@ -2,6 +2,7 @@
 name = "quant-b3"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [workspace]
 # kairos/: a linguagem Kairós (compilador, runtime e motor de IA)

@@ -4,6 +4,7 @@
   "description": "Suporte à linguagem Kairós (.krs): reconhecimento de arquivos, cores de sintaxe, comentários, colchetes e blocos ```krs no Markdown.",
   "version": "0.2.1",
   "publisher": "kairos-lang",
+  "license": "MIT",
   "homepage": "https://github.com/juliocesarmisneroviczklamt-bit/KAIROS",
   "repository": {
     "type": "git",
@@ -15,6 +16,12 @@
   "engines": {
     "vscode": "^1.75.0"
   },
+  "files": [
+    "syntaxes/**",
+    "language-configuration.json",
+    "README.md",
+    "LICENSE"
+  ],
   "categories": [
     "Programming Languages"
   ],

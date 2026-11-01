@@ -14,7 +14,7 @@ A barra de linguagens do GitHub e as cores dos arquivos vêm do **Linguist**, qu
 Para entrar, a [regra do Linguist](https://github.com/github-linguist/linguist/blob/main/CONTRIBUTING.md) exige:
 
 1. **Uso real:** pelo menos **2.000 arquivos `.krs`** indexados pela busca do GitHub no último ano, sem contar forks, espalhados por usuários e repositórios diferentes.
-2. **Gramática com licença aberta** (MIT, Apache, BSD…). A gramática já existe neste repositório, mas o repositório ainda **não tem licença**, e sem isso o Linguist não pode usá-la.
+2. **Gramática com licença aberta** (MIT, Apache, BSD…). ✅ A gramática está neste repositório, sob licença [MIT](../LICENSE).
 3. **Amostras de código:** os programas de [`kairos/examples/`](../kairos/examples/) e [`kairos/tests/programs/`](../kairos/tests/programs/) servem.
 
 Quando essas condições estiverem cumpridas, o pull request para o Linguist leva a entrada abaixo (o `language_id` é gerado pelo `script/update-ids` deles):

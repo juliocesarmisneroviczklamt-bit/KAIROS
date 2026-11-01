@@ -51,7 +51,7 @@ jobs:
           bin=kairos
           if [[ "${{ matrix.target }}" == *windows* ]]; then bin=kairos.exe; fi
           cp "target/${{ matrix.target }}/release/$bin" "$dir/"
-          cp kairos/README.md "$dir/"
+          cp LICENSE kairos/README.md "$dir/"
           cp kairos/docs/spec.md "$dir/docs/"
           cp kairos/examples/*.krs "$dir/examples/"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
@@ -79,7 +79,7 @@ jobs:
         working-directory: editors/vscode
         run: |
           version=$(node -p "require('./package.json').version")
-          npx --yes @vscode/vsce@3 package --skip-license --out "../../kairos-vscode-${version}.vsix"
+          npx --yes @vscode/vsce@3 package --out "../../kairos-vscode-${version}.vsix"
       - uses: actions/upload-artifact@v4
         with:
           name: vscode

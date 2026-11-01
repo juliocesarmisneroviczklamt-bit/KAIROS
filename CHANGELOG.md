@@ -22,6 +22,8 @@ Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release n
   - gramática TextMate em `editors/vscode/syntaxes/kairos.tmLanguage.json`, que serve também no Sublime Text e nos editores JetBrains, e é a base para o reconhecimento pelo GitHub (ver `editors/README.md`);
   - scripts com `#!/usr/bin/env kairos` na primeira linha rodam direto no Linux, macOS e BSD (`chmod +x programa.krs` e depois `./programa.krs`).
 - **CI:** testes a cada push em Linux (x86_64 e ARM64), macOS, Windows e FreeBSD.
+- **Licença MIT** (`LICENSE`), incluída também nos pacotes e na extensão.
+- **Política de segurança** (`SECURITY.md`): versões com suporte e reporte privado pela aba Security.
 - **Sistemas de 32 bits:** a pilha do interpretador recua para um tamanho menor quando falta espaço de endereçamento.
 
 ## 0.2.0 — M2: tensores com eixos nomeados + dados da B3
