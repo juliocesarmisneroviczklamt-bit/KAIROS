@@ -2,6 +2,46 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.14.0 — M14: o back-end WebAssembly completo
+
+**Os programas da Kairós rodam como WebAssembly com os mesmos números do interpretador, inclusive os que usam o laboratório, os holdouts e o `grad`.** O back-end escrito em Kairós ([`compiler/wasmgen.krs`](kairos/compiler/wasmgen.krs)) agora compila closures, tensores, a ponte `b3`, os protocolos e a diferenciação automática. O runtime dos módulos continua escrito em Kairós.
+
+- **Os programas do laboratório, os mesmos bits:**
+  - `examples/momentum.krs` compilado imprime os mesmos 9 números e grava a mesma linha no registro de testes e no livro-razão;
+  - o modelo do M6 (`research/tax_portfolio.krs`, treinado com `grad` no patrimônio depois de custos e IR) dá a mesma saída, o mesmo registro e o mesmo livro-razão;
+  - `examples/mlp.krs` treina 1500 passos de Adam com as mesmas perdas;
+  - todo programa da suíte dourada do interpretador que compila dá a mesma saída e os mesmos erros, menos os textos do sistema operacional.
+- **Closures e tensores:**
+  - lambdas com capturas e funções como valores;
+  - tensores com eixos nomeados, com o runtime em Kairós ([`rt_tensor.krs`](kairos/compiler/rt_tensor.krs)), operação por operação como o do interpretador.
+- **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](kairos/compiler/rt_b3.krs), sobre [`kairos/lab`](kairos/lab)):
+  - os dados do laboratório (`panel.bin`, o CDI, o IPCA, os fatores NEFIN mensais e diários, os tensores diários);
+  - a avaliação e a simulação pelo simulador em Kairós;
+  - o registro de testes com o DSR, `record_trial`, `deflate_trial` e o SHA-256 dos resultados;
+  - a cerca do livro-razão de holdouts.
+- **Protocolos e holdouts de uso único**, com as garantias do M5:
+  - o programa vê só a pesquisa, e `b3.holdout` recusa um holdout já aberto (R0502);
+  - `open_once` grava a abertura antes de o holdout ser visto;
+  - um erro dentro da função dos pesos gasta o holdout, e o livro-razão grava a falha.
+- **`grad`, `value_and_grad` e as regras suaves:**
+  - a fita é escrita em Kairós ([`rt_diff.krs`](kairos/compiler/rt_diff.krs)), nó por nó como a do interpretador;
+  - o back-end faz uma cópia rastreada de cada função que o `grad` alcança. Os floats e tensores viram nós, e cada operação calcula o valor comum com o código de sempre;
+  - funções com nome e lambdas, o espaço tangente, enums e as atribuições em fatias;
+  - `grad` dentro de `grad` para com R0401, como no interpretador.
+- **O espaço tangente e as funções genéricas:** `p - lr * g` em structs, campo a campo, e `fn f[P]` instanciada para cada tipo.
+- **Builtins novos no runtime:**
+  - `format_fixed` exato, `lines`, `today`;
+  - `minimum`, `maximum`, `append_text`, `list_dir` e `file_date`;
+  - `nan_quantile`, `merge_days`, `contract` e `randn`, este com o `sin` e o `cos` da `libm` portados;
+  - `upper` e `lower` como os do Rust;
+  - `sum`, `mean` e `prod` de listas;
+  - `read_lines`, também de arquivos ZIP, com o inflate escrito em Kairós. Um COTAHIST da B3 sai igual em 4 s.
+- **Os mesmos bits em todo sistema:** o DSR do registro em Rust passou a usar o `exp` e o `ln` da `libm`.
+- **Limites conhecidos:**
+  - a memória: o alocador separa os blocos livres por tamanho e não os junta, e os dados do laboratório ocupam muito mais que no interpretador (o `momentum` chega a 1,5 GB, perto dos 4 GB do wasm32);
+  - a internet (`http_get`, `download`) não compila: o WASI não tem rede;
+  - dentro de uma função derivada ainda não compilam lambdas, chamadas de funções-valor com floats, criar enums que guardam floats e `x op= v` numa parte de um valor.
+
 ## 0.13.0 — M13: o back-end WebAssembly escrito em Kairós
 
 **O compilador da Kairós, escrito em Kairós, agora gera WebAssembly e compila a si mesmo.** [`compiler/wasmgen.krs`](kairos/compiler/wasmgen.krs) transforma o HIR de um programa num módulo WASI (`kairos run kairos/compiler/kw.krs kairos/std saida programa.krs` grava `saida/programa.wasm`), que roda em wasmtime, num navegador ou em qualquer runtime WASI, sem Rust.

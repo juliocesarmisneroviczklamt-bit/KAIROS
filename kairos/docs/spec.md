@@ -823,7 +823,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 `cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere o ponto fixo no wasmi.
 
-### 15.1 M14 (em andamento): closures, tensores, a ponte `b3`, os holdouts e o `grad`
+### 15.1 M14 (v0.14.0): closures, tensores, a ponte `b3`, os holdouts e o `grad`
 
 - **Closures** (lambdas com capturas, funções como valores) e **tensores com eixos nomeados** compilam. O runtime dos tensores é escrito em Kairós ([`rt_tensor.krs`](../compiler/rt_tensor.krs)), operação por operação como o `src/tensor.rs` do interpretador, e dá os mesmos bits.
 - **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](../compiler/rt_b3.krs), sobre [`kairos/lab`](../lab)) faz o que a ponte em Rust faz:

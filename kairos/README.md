@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.13.0**, com o roteiro M1–M13 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.14.0**, com o roteiro M1–M14 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -15,7 +15,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.13.0**, com 
 - M10: a base de dados do laboratório montada em Kairós;
 - M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs));
 - M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo;
-- M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador.
+- M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador;
+- M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -148,10 +149,15 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **O runtime dos módulos é escrito em Kairós** ([`compiler/rt.krs`](compiler/rt.krs)): floats escritos (Ryu) e lidos como no Rust, a `libm` bit a bit, Unicode, mapas, arquivos via WASI.
 - **O compilador compila a si mesmo em WebAssembly:** o `kw.wasm` que ele gera, rodando como WebAssembly, gera o mesmo `kw.wasm` byte a byte ([spec §15](docs/spec.md)).
 
+**M14 (o back-end WebAssembly completo)**
+- **Os programas do laboratório rodam como WebAssembly com os mesmos números:** o `momentum`, o modelo do M6 e o MLP dão a mesma saída e gravam o mesmo registro de testes e o mesmo livro-razão que o interpretador.
+- **A ponte `b3`, os protocolos e os holdouts escritos em Kairós** ([`compiler/rt_b3.krs`](compiler/rt_b3.krs)), com as garantias do M5.
+- **O `grad` compila:** a fita é escrita em Kairós ([`compiler/rt_diff.krs`](compiler/rt_diff.krs)), e cada função derivada ganha uma cópia que grava os nós ([spec §15.1](docs/spec.md)).
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M14 | o back-end WebAssembly completo. Já compilam closures, tensores, a ponte `b3` inteira escrita em Kairós e os protocolos com holdout de uso único: o `momentum` compilado dá os mesmos números e grava o mesmo registro e o mesmo livro-razão. O `grad` também compila, com a fita escrita em Kairós: o MLP treina com as mesmas perdas, bit a bit. Falta a rede (o WASI não tem) |
+| M15 | o interpretador escrito em Kairós: roda o HIR do front-end em Kairós com a mesma saída, os mesmos erros e os mesmos números do interpretador Rust, e roda como WebAssembly, sem Rust. Junto, um alocador que reaproveita a memória entre tamanhos |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |
