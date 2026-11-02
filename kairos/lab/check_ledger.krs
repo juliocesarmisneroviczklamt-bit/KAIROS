@@ -1,0 +1,26 @@
+// The holdout ledger written in Kairós (lab/ledger.krs) against the bridge's: the ledger read
+// and written back is the same text, its fence gives the bridge's visible months, and a program
+// that sees the data is recorded the same way (each side in a folder of its own).
+//
+//   KAIROS_RESULTS=<folder 1> kairos run kairos/lab/check_ledger.krs data <folder 2> [the lab's ledger]
+import "ledger.krs"
+
+let d = load_lab_data(args()[0])
+let nm = len(d.cal.months)
+// the bridge: its fence, and its record in KAIROS_RESULTS
+let n_rust = size(b3.monthly_returns(), month)
+// Kairós: the same rules in folder 2
+let lo = open_ledger(args()[1], 201901)
+var rows = lo.1
+let f = fence(rows)
+let n = if f.0 > 0 { cal_idx_from(d.cal, next_ym(f.0)) } else { nm }
+if n > 0 { ledger_saw(args()[1], inout rows, d.cal.months[n - 1], "program check_ledger") }
+print("visible", n, n_rust, if n == n_rust { "the same" } else { "DIFFERENT" })
+if len(args()) > 2 {
+    // the lab's ledger, read and written back
+    let real = read_text(args()[2])
+    let p = parse_ledger(real)
+    print("round trip:", if p.0 == "" and render_ledger(p.1) == real { "the same" } else { "DIFFERENT" })
+    let fr = fence(p.1)
+    print("lab fence", fr.0, fr.1.proto, "watermark", watermark(p.1), "pending", len(pending(p.1)))
+}

@@ -1,0 +1,205 @@
+// The holdout ledger (results/holdout_ledger.csv, M5) in Kairós, as src/ledger.rs keeps it:
+//
+// - `seen`: the last month of data Kairós programs have already seen;
+// - `protocol`: a protocol registered (by hash); while its holdout is pending, no program sees
+//   those months;
+// - `opened`: a holdout opened by `open_once`; `withdrawn`: a pending protocol given up.
+//
+// Pending holdouts fence the data of every program, and each program that sees data the ledger
+// had not recorded as seen is recorded. The bridge written in Kairós (programs compiled to
+// WebAssembly) keeps these rules the same as the Rust bridge.
+import "data.krs"
+
+struct LRow {
+    kind: str,              // seen, protocol, opened, withdrawn
+    proto: str,
+    sha256: str,
+    holdout_from: i64,      // YYYYMM (0: none)
+    data_until: i64,        // YYYYMM (0: none)
+    date: i64,              // YYYYMMDD
+    note: str,
+}
+
+fn two(x: i64) -> str {
+    if x < 10 { "0" + str(x) } else { str(x) }
+}
+
+fn four(x: i64) -> str {
+    var s = str(x)
+    while len(s) < 4 { s = "0" + s }
+    s
+}
+
+fn ledger_ym(ym: i64) -> str {
+    if ym == 0 { "" } else { four(ym / 100) + "-" + two(ym % 100) }
+}
+
+fn ledger_date(d: i64) -> str {
+    four(d / 10000) + "-" + two(d / 100 % 100) + "-" + two(d % 100)
+}
+
+// "2019-01" as 201901 ("" is 0); -1 when it is not a month
+fn parse_ledger_ym(s: str) -> i64 {
+    if s == "" { return 0 }
+    let p = split(s, "-")
+    if len(p) != 2 { return -1 }
+    let y = digits_of(p[0])
+    let m = digits_of(p[1])
+    if y < 1000 or m < 1 or m > 12 { return -1 }
+    y * 100 + m
+}
+
+fn parse_ledger_date(s: str) -> i64 {
+    let p = split(s, "-")
+    if len(p) != 3 { return -1 }
+    let y = digits_of(p[0])
+    let m = digits_of(p[1])
+    let d = digits_of(p[2])
+    if y < 0 or m < 1 or m > 12 or d < 1 or d > 31 { return -1 }
+    y * 10000 + m * 100 + d
+}
+
+fn next_ym(ym: i64) -> i64 {
+    if ym % 100 == 12 { (ym / 100 + 1) * 100 + 1 } else { ym + 1 }
+}
+
+fn prev_ym(ym: i64) -> i64 {
+    if ym % 100 == 1 { (ym / 100 - 1) * 100 + 12 } else { ym - 1 }
+}
+
+fn clean_field(s: str) -> str {
+    replace(replace(replace(s, ",", ";"), from_codes([10]), ";"), from_codes([13]), ";")
+}
+
+fn render_ledger(rows: List[LRow]) -> str {
+    let nl = from_codes([10])
+    var s = "kind,protocol,sha256,holdout_from,data_until,date,note" + nl
+    for r in rows { s = s + r.kind + "," + clean_field(r.proto) + "," + clean_field(r.sha256) + "," + ledger_ym(r.holdout_from) + "," + ledger_ym(r.data_until) + "," + ledger_date(r.date) + "," + clean_field(r.note) + nl }
+    s
+}
+
+// The rows of the ledger's text: (the line that does not parse, or "", the rows).
+fn parse_ledger(text: str) -> (str, List[LRow]) {
+    var rows: List[LRow] = []
+    let ls = text_lines(text)
+    for i in 1..len(ls) {
+        let line = ls[i]
+        if trim(line) == "" { continue }
+        // seven fields: the note keeps any further comma
+        let p = split(line, ",")
+        if len(p) < 7 { return ("line " + str(i + 1) + ": `" + line + "`", rows) }
+        var note = p[6]
+        for k in 7..len(p) { note = note + "," + p[k] }
+        let kinds = ["seen", "protocol", "opened", "withdrawn"]
+        let hf = parse_ledger_ym(p[3])
+        let du = parse_ledger_ym(p[4])
+        let dt = parse_ledger_date(p[5])
+        if not contains(kinds, p[0]) or hf < 0 or du < 0 or dt < 0 { return ("line " + str(i + 1) + ": `" + line + "`", rows) }
+        rows.push(LRow { kind: p[0], proto: p[1], sha256: p[2], holdout_from: hf, data_until: du, date: dt, note: note })
+    }
+    ("", rows)
+}
+
+// The last month any Kairós program (or an opening) has seen; 0 if none.
+fn watermark(rows: List[LRow]) -> i64 {
+    var w = 0
+    for r in rows {
+        if (r.kind == "seen" or r.kind == "opened") and r.data_until > w { w = r.data_until }
+    }
+    w
+}
+
+fn has_row(rows: List[LRow], kind: str, sha: str) -> bool {
+    for r in rows {
+        if r.kind == kind and r.sha256 == sha { return true }
+    }
+    false
+}
+
+// The protocols whose holdout is still reserved: registered, neither opened nor withdrawn, and
+// none of their months seen.
+fn pending(rows: List[LRow]) -> List[LRow] {
+    let w = watermark(rows)
+    var out: List[LRow] = []
+    for r in rows {
+        if r.kind == "protocol" and r.holdout_from > w and not has_row(rows, "opened", r.sha256) and not has_row(rows, "withdrawn", r.sha256) { out.push(r) }
+    }
+    out
+}
+
+// The last month programs may see while the pending holdouts stay reserved (0: no fence), and the
+// protocol that sets it (the first with the earliest holdout).
+fn fence(rows: List[LRow]) -> (i64, LRow) {
+    let none = LRow { kind: "", proto: "", sha256: "", holdout_from: 0, data_until: 0, date: 0, note: "" }
+    var best = none
+    for r in pending(rows) {
+        if best.kind == "" or r.holdout_from < best.holdout_from { best = r }
+    }
+    if best.kind == "" { (0, none) } else { (prev_ym(best.holdout_from), best) }
+}
+
+// s without the white space at its start
+fn trim_start(s: str) -> str {
+    let t = trim(s + "x")
+    substr(t, 0, len(t) - 1)
+}
+
+// The text of "key": "..." in a JSON text, as the bridge reads it (up to the next quote).
+fn seed_str(txt: str, key: str) -> (bool, str) {
+    let q = from_codes([34])
+    let k = q + key + q
+    let i = find(txt, k)
+    if i < 0 { return (false, "") }
+    var rest = trim_start(substr(txt, i + len(k), len(txt)))
+    if not starts_with(rest, ":") { return (false, "") }
+    rest = trim_start(substr(rest, 1, len(rest)))
+    if not starts_with(rest, q) { return (false, "") }
+    rest = substr(rest, 1, len(rest))
+    let j = find(rest, q)
+    if j < 0 { return (false, "") }
+    (true, substr(rest, 0, j))
+}
+
+// The ledger of a results folder: (an error, or "", the rows). Without the file, the search of
+// the lab that ran before the ledger existed (busca_resultado.json) is its first row.
+fn open_ledger(results: str, split_ym: i64) -> (str, List[LRow]) {
+    let path = results + "/holdout_ledger.csv"
+    if file_exists(path) {
+        let r = parse_ledger(read_text(path))
+        if r.0 != "" { return ("cannot read the holdout ledger " + path + ": " + r.0, r.1) }
+        return r
+    }
+    var rows: List[LRow] = []
+    let jpath = results + "/busca_resultado.json"
+    if not file_exists(jpath) { return ("", rows) }
+    let txt = read_text(jpath)
+    var date = today()
+    let ds = seed_str(txt, "data")
+    if ds.0 {
+        let d = parse_ledger_date(ds.1)
+        if d > 0 { date = d }
+    }
+    let sha = seed_str(txt, "protocolo_sha256").1
+    let why = seed_str(txt, "motivo").1
+    var until = 0
+    let mpath = results + "/busca_mensal.csv"
+    if file_exists(mpath) {
+        let ls = text_lines(read_text(mpath))
+        for i in 1..len(ls) {
+            let m = parse_ledger_ym(split(ls[i], ",")[0])
+            if m > until { until = m }
+        }
+    }
+    if until == 0 { until = date / 100 }
+    rows.push(LRow { kind: "opened", proto: "busca-de-alpha (quant-b3)", sha256: sha, holdout_from: split_ym, data_until: until, date: date, note: "results/protocolo_busca.md: " + why })
+    ("", rows)
+}
+
+// A program saw the data up to `until`: recorded when it moves the watermark.
+fn ledger_saw(results: str, inout rows: List[LRow], until: i64, who: str) {
+    if until > watermark(rows) {
+        rows.push(LRow { kind: "seen", proto: "", sha256: "", holdout_from: 0, data_until: until, date: today(), note: who })
+        make_dir(results)
+        write_text(results + "/holdout_ledger.csv", render_ledger(rows))
+    }
+}

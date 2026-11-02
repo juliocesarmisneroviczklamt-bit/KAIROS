@@ -121,21 +121,40 @@ fn run_data_check() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&rust).unwrap();
     std::fs::create_dir_all(&kairos).unwrap();
-    lab_check_with("check_record.krs", &["record: the same", "again: one trial"], Some(&rust), &kairos);
+    lab_check_with("check_record.krs", &["record: the same", "again: one trial"], Some(&rust), &[&kairos]);
     let a = std::fs::read(rust.join("registro_testes.csv")).expect("the bridge's registry");
     let b = std::fs::read(kairos.join("registro_testes.csv")).expect("the registry written in Kairós");
     assert!(a == b, "the registries differ");
+    let _ = std::fs::remove_dir_all(&tmp);
+    // the holdout ledger written in Kairós: the same visible months, the lab's ledger read and
+    // written back unchanged, and the same record of a program that saw the data
+    let tmp = std::env::temp_dir().join(format!("kairos-ledger-{}", std::process::id()));
+    let (rust, kairos) = (tmp.join("rust"), tmp.join("kairos"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&rust).unwrap();
+    std::fs::create_dir_all(&kairos).unwrap();
+    let lab_ledger = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("results").join("holdout_ledger.csv");
+    let mut want = vec!["visible", "the same"];
+    let mut extra: Vec<&Path> = vec![&kairos];
+    if lab_ledger.is_file() {
+        want.push("round trip: the same");
+        extra.push(&lab_ledger);
+    }
+    lab_check_with("check_ledger.krs", &want, Some(&rust), &extra);
+    let a = std::fs::read(rust.join("holdout_ledger.csv")).expect("the bridge's ledger");
+    let b = std::fs::read(kairos.join("holdout_ledger.csv")).expect("the ledger written in Kairós");
+    assert!(a == b, "the ledgers differ");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Runs a check of kairos/lab with the data folder as its argument: its output must have each line.
 fn lab_check(program: &str, want: &[&str]) {
     let none: Option<&Path> = None;
-    lab_check_with(program, want, none, Path::new(""));
+    lab_check_with(program, want, none, &[]);
 }
 
-/// The same with the bridge's results in `results` and a second argument `extra` (when not empty).
-fn lab_check_with(program: &str, want: &[&str], results: Option<&Path>, extra: &Path) {
+/// The same with the bridge's results in `results` and more arguments after the data folder.
+fn lab_check_with(program: &str, want: &[&str], results: Option<&Path>, extra: &[&Path]) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let data_dir = root.join("data");
     if !data_dir.join("processed").join("panel.bin").is_file() {
@@ -151,9 +170,7 @@ fn lab_check_with(program: &str, want: &[&str], results: Option<&Path>, extra: &
         host = host.with_results(r);
     }
     let mut args = vec![data_dir.to_string_lossy().into_owned()];
-    if !extra.as_os_str().is_empty() {
-        args.push(extra.to_string_lossy().into_owned());
-    }
+    args.extend(extra.iter().map(|x| x.to_string_lossy().into_owned()));
     host.set_args(args);
     host.set_program(program.trim_end_matches(".krs"));
     let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
