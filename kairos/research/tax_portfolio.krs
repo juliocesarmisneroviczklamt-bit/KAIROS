@@ -1,0 +1,214 @@
+// M6 — a portfolio learned on after-tax wealth.
+//
+// The first model of the Kairós roadmap, pre-registered in kairos/research/m6-protocol.md (its
+// SHA-256 is in the protocol's rule below). What is new is the training objective: the
+// parameters are fitted by `grad` through a simulation of the Brazilian individual investor's
+// after-tax wealth: costs, the R$ 20 thousand monthly sales exemption (a smooth step inside
+// `grad`, the exact rule outside), the 15% tax on net gains, losses carried forward, average
+// cost. The model can learn to trade slower to stay exempt, or to time the market.
+//
+// Everything is walk-forward: every January the model is refitted on all the months before it,
+// and the type checker proves (M3) that no decision uses data from its own month or later.
+// The verdict comes from the lab's realistic simulator (real costs, real IR), against the
+// same-universe equal-weight portfolio and momentum, with every evaluation counted in the
+// registry of trials (M5). The holdout is the future: from 2026-11, opened once after 24 months.
+
+protocol "tax-portfolio-v1" {
+    research: until 202610
+    holdout: from 202611
+    min_months: 24
+    rule: "kairos/research/m6-protocol.md sha256 d44da677102287d38bffda17df229a9128cc41071be3bffdf756b61e15400925: accept only if the research DSR >= 90% and the after-tax CAGR beats equal-weight, and on the holdout CAPM alpha > 0 and PSR >= 90%"
+}
+
+// ------------------------------------------------------------------ the model
+
+// Scores are linear in three cross-sectional signals (z-scores among the month's live assets):
+// feature 0 = momentum 12-2, 1 = last month's return (reversal), 2 = volatility of 12 months.
+struct Policy {
+    v: Tensor[feature; f64],   // score weights; target = softmax of the scores over live assets
+    a: f64,                    // fraction invested = sigmoid(a + b * trend); the rest earns CDI
+    b: f64,
+    c: f64,                    // trading speed = sigmoid(c): each month, trade this fraction of
+}                              // the way from the current holdings to the target
+
+// The portfolio between two months, as fractions of wealth (plus the wealth itself, in R$).
+struct Book {
+    h: Tensor[asset; f64],     // holdings after the month's returns
+    basis: Tensor[asset; f64], // their average cost
+    carry: f64,                // tax loss carried forward (R$)
+    wealth: f64,               // R$
+}
+
+fn new_book(na: i64) -> Book {
+    Book { h: zeros(asset: na), basis: zeros(asset: na), carry: 0.0, wealth: 100000.0 }
+}
+
+fn target(p: Policy, z: Tensor[asset, feature; f64], live: Tensor[asset; bool], trend: f64) -> Tensor[asset; f64] {
+    let e = where(live, exp(contract(z, p.v, over: feature)), 0.0)
+    sigmoid(p.a + p.b * trend) * e / (sum(e) + 1e-12)
+}
+
+// The weights after this month's trades (decided at the end of the previous month).
+fn trade(p: Policy, b: Book, t: Tensor[asset; f64]) -> Tensor[asset; f64] {
+    let w = b.h + sigmoid(p.c) * (t - b.h)
+    // long-only, no leverage: at most 99% invested (costs and IR are paid from the rest)
+    w * min(1.0, 0.99 / (sum(w) + 1e-12))
+}
+
+// Pays costs and the month's IR (the lab's rules) and earns the month's returns. Returns the
+// next book and the month's log growth of after-tax wealth.
+fn settle(b: Book, w: Tensor[asset; f64], r: Tensor[asset; f64], rf: f64) -> (Book, f64) {
+    let sell = relu(b.h - w)
+    let buy = relu(w - b.h)
+    let gain = sum(sell * (1.0 - b.basis / (b.h + 1e-9))) * b.wealth   // realized gain, R$
+    let sales = sum(sell) * b.wealth                                    // R$
+    // exempt when the month's sales are up to R$ 20 thousand (smooth inside `grad`)
+    let taxed = smooth_step(sales - 20000.0, scale: 500.0)
+    let net = gain - b.carry
+    let tax = taxed * 0.15 * smooth_max(net, 0.0, scale: 10.0)
+    let carry = taxed * smooth_max(-net, 0.0, scale: 10.0) + (1.0 - taxed) * (b.carry + smooth_max(-gain, 0.0, scale: 10.0))
+    let cost = 0.0025 * sum(sell + buy)                                 // 25 bps per side
+    let cash = 1.0 - sum(w) - cost - tax / b.wealth
+    let gross = w * (1.0 + r)
+    let g = sum(gross) + cash * (1.0 + rf)
+    let basis = b.basis * (1.0 - sell / (b.h + 1e-9)) + buy
+    (Book { h: gross / g, basis: basis / g, carry: carry, wealth: b.wealth * g }, ln(g))
+}
+
+// What training maximizes: mean monthly log growth of after-tax wealth over a window of months,
+// starting from cash, minus a small penalty on the score weights.
+fn growth(p: Policy, z: Tensor[month, asset, feature; f64], live: Tensor[month, asset; bool], trend: Tensor[month; f64], r: Tensor[month, asset; f64], rf: Tensor[month; f64]) -> f64 {
+    var b = new_book(size(r, asset))
+    var total = 0.0
+    let n = size(r, month)
+    for k in 0..n {
+        let w = trade(p, b, target(p, z[month: k], live[month: k], trend[month: k]))
+        let (nb, lg) = settle(b, w, r[month: k], rf[month: k])
+        b = nb
+        total = total + lg
+    }
+    total / float(n) - 0.001 * sum(p.v * p.v)
+}
+
+fn fit(p0: Policy, steps: i64, z: Tensor[month, asset, feature; f64], live: Tensor[month, asset; bool], trend: Tensor[month; f64], r: Tensor[month, asset; f64], rf: Tensor[month; f64]) -> Policy {
+    var p = p0
+    var m = zeros_like(p0)
+    var v = zeros_like(p0)
+    for t in 1..=steps {
+        let g = grad(growth)(p, z, live, trend, r, rf)
+        adam_step(inout p, -1.0 * g, inout m, inout v, t, 0.05)
+    }
+    p
+}
+
+// ------------------------------------------------------------------ data
+
+fn zscore(x: Tensor[asset; f64], live: Tensor[asset; bool]) -> Tensor[asset; f64] {
+    let y = where(live, x, nan)
+    let mu = nan_mean(y, over: asset)
+    let sd = sqrt(nan_mean((y - mu) ^ 2.0, over: asset))
+    let z = (y - mu) / (sd + 1e-12)
+    fill_nan(where(z > 3.0, 3.0, where(z < -3.0, -3.0, z)), 0.0)
+}
+
+// What each decision may use: row m is computed from the data up to the end of month m - 1.
+struct Signals {
+    live: Tensor[month, asset; bool],      // eligible, with a full 12-month history of trades
+    z: Tensor[month, asset, feature; f64],
+    trend: Tensor[month; f64],             // 12-month return of the live equal-weight portfolio minus the CDI's
+}
+
+fn signals() -> Signals {
+    let ret = b3.monthly_returns()
+    let elig = b3.eligible()
+    let rf = b3.cdi()
+    let n = size(ret, month)
+    var live = elig and false
+    var z = zeros(month: n, asset: size(ret, asset), feature: 3)
+    var trend = zeros(month: n)
+    for m in 12..n {
+        let past = ret[month: m - 12 ..= m - 1]
+        let ok = elig[month: m] and nan_count(past, over: month) == 12.0
+        if nan_count(where(ok, 1.0, nan), over: asset) < 30.0 { continue }
+        live[month: m] = ok
+        z[month: m, feature: 0] = zscore(prod(1.0 + ret[month: m - 12 ..= m - 2], over: month) - 1.0, ok)
+        z[month: m, feature: 1] = zscore(ret[month: m - 1], ok)
+        z[month: m, feature: 2] = zscore(sqrt(mean((past - mean(past, over: month)) ^ 2.0, over: month)), ok)
+        let ew = nan_mean(where(ok, prod(1.0 + past, over: month) - 1.0, nan), over: asset)
+        trend[month: m] = ew - (prod(1.0 + rf[month: m - 12 ..= m - 1], over: month) - 1.0)
+    }
+    Signals { live: live, z: z, trend: trend }
+}
+
+// ------------------------------------------------------------------ the three portfolios
+// Fixed dates: every training window begins in 2001-01, and the decisions in 2006-01.
+
+// The model, walk-forward: refitted every January on all the months since 2001-01.
+fn model_weights() -> Tensor[month, asset; f64] {
+    let s = signals()
+    let r = fill_nan(b3.monthly_returns(), 0.0)
+    let rf = b3.cdi()
+    let months = b3.months()
+    let first = b3.month_index(200101)
+    var w = zeros_like(r)
+    var p = Policy { v: zeros(feature: 3), a: 2.0, b: 0.0, c: 0.0 }
+    var fitted = false
+    var b = new_book(size(r, asset))
+    for m in b3.month_index(200601)..size(r, month) {
+        if months[m] % 100 == 1 {
+            let steps = if fitted { 60 } else { 200 }
+            p = fit(p, steps, s.z[month: first ..= m - 1], s.live[month: first ..= m - 1], s.trend[month: first ..= m - 1], r[month: first ..= m - 1], rf[month: first ..= m - 1])
+            fitted = true
+            print("refit", months[m], "v", p.v, "invested", sigmoid(p.a + p.b * s.trend[month: m]), "speed", sigmoid(p.c))
+        }
+        let wm = trade(p, b, target(p, s.z[month: m], s.live[month: m], s.trend[month: m]))
+        w[month: m] = wm
+        let (nb, _) = settle(b, wm, r[month: m], rf[month: m])
+        b = nb
+    }
+    w
+}
+
+// Equal weights on the live assets, rebalanced every month (the universe's own return).
+fn ew_weights() -> Tensor[month, asset; f64] {
+    let s = signals()
+    var w = zeros_like(b3.monthly_returns())
+    for m in b3.month_index(200601)..size(w, month) {
+        let k = nan_count(where(s.live[month: m], 1.0, nan), over: asset)
+        w[month: m] = where(s.live[month: m], 1.0 / k, 0.0)
+    }
+    w
+}
+
+// Momentum 12-2: the best third of the live assets, equal weights (the lab's MOM).
+fn mom_weights() -> Tensor[month, asset; f64] {
+    let s = signals()
+    var w = zeros_like(b3.monthly_returns())
+    for m in b3.month_index(200601)..size(w, month) {
+        let sig = where(s.live[month: m], s.z[month: m, feature: 0], nan)
+        let k = int(round(nan_count(sig, over: asset) / 3.0))
+        w[month: m] = where(top_k(sig, k, over: asset), 1.0 / float(k), 0.0)
+    }
+    w
+}
+
+// ------------------------------------------------------------------ the verdict
+
+fn show(name: str, e: Evaluation) {
+    print(name, "months", e.months, "CAGR", e.cagr, "Sharpe", e.sharpe, "maxDD", e.max_dd, "alpha", e.alpha, "t", e.t_alpha, "turnover", e.turnover, "trials", e.trials, "DSR", e.dsr)
+}
+
+// research: the lab's realistic simulator, real costs and IR, R$ 100 thousand, one session of delay
+let model = b3.evaluate(model_weights(), real_costs: true, tax: true, capital: 100000.0, lag: 1)
+let ew = b3.evaluate(ew_weights(), real_costs: true, tax: true, capital: 100000.0, lag: 1)
+let mom = b3.evaluate(mom_weights(), real_costs: true, tax: true, capital: 100000.0, lag: 1)
+show("model", model)
+show("equal-weight", ew)
+show("momentum", mom)
+print("research verdict: DSR >= 90%", model.dsr >= 0.9, "| beats equal-weight after costs and IR", model.cagr > ew.cagr)
+
+// the holdout: the future, once
+let h = b3.holdout("tax-portfolio-v1")
+let final = open_once(h, || model_weights(), real_costs: true, tax: true, capital: 100000.0, lag: 1)
+show("holdout", final)
+print("holdout verdict: alpha > 0", final.alpha > 0.0, "| PSR >= 90%", final.dsr >= 0.9)

@@ -134,6 +134,20 @@ impl Time {
             _ => self,
         }
     }
+
+    /// Replaces a function's data horizon `sym` by the time it stands for at a call.
+    fn horizon(self, sym: u32, to: At) -> Time {
+        match self.at {
+            At::End(Lin::Sym(s, c)) if s == sym => {
+                let at = match to {
+                    At::End(l) => At::End(l.add(c)),
+                    other => other,
+                };
+                Time { at, span: self.span }
+            }
+            _ => self,
+        }
+    }
 }
 
 /// Rows of a tensor over a temporal axis: row `t` is known at `end(t + lag)`.
@@ -142,6 +156,9 @@ pub struct Rows {
     pub axis: u32,
     /// None: it cannot be determined
     pub lag: Option<i64>,
+    /// the index of the last row when it is a function's data horizon (a symbol replaced, at each
+    /// call, by what the caller passed); None: the end of the data
+    pub end: Option<Lin>,
     /// where the latest rows come from (for messages)
     pub span: Option<Span>,
     /// the store that set the lag: row index and the time of the stored value (for messages)
@@ -152,14 +169,22 @@ fn join_rows(a: Option<Rows>, b: Option<Rows>) -> Option<Rows> {
     match (a, b) {
         (None, x) | (x, None) => x,
         (Some(x), Some(y)) => {
+            let end = if x.end == y.end { x.end } else { None };
             if x.axis != y.axis {
-                return Some(Rows { lag: None, ..x });
+                return Some(Rows { lag: None, end: None, ..x });
             }
-            match (x.lag, y.lag) {
-                (Some(p), Some(q)) => Some(if q > p { y } else { x }),
-                (None, _) => Some(x),
-                (_, None) => Some(y),
-            }
+            let pick = match (x.lag, y.lag) {
+                (Some(p), Some(q)) => {
+                    if q > p {
+                        y
+                    } else {
+                        x
+                    }
+                }
+                (None, _) => x,
+                (_, None) => y,
+            };
+            Some(Rows { end, ..pick })
         }
     }
 }
@@ -167,7 +192,7 @@ fn join_rows(a: Option<Rows>, b: Option<Rows>) -> Option<Rows> {
 fn same_rows(a: Option<Rows>, b: Option<Rows>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(x), Some(y)) => x.axis == y.axis && x.lag == y.lag,
+        (Some(x), Some(y)) => x.axis == y.axis && x.lag == y.lag && x.end == y.end,
         _ => false,
     }
 }
@@ -225,7 +250,25 @@ impl TV {
             Lin::Sym(s, _) if s == sym => Lin::Unknown,
             x => x,
         };
-        TV { time: self.time.map(f), rows: self.rows, int: f(self.int) }
+        let rows = self.rows.map(|r| match r.end {
+            Some(Lin::Sym(s, _)) if s == sym => Rows { end: None, ..r },
+            _ => r,
+        });
+        TV { time: self.time.map(f), rows, int: f(self.int) }
+    }
+
+    /// After a `for` loop whose variable `sym` ends at `last`: what the iterations left is known
+    /// by the time of the last one (times only grow with the loop variable).
+    fn bound(self, sym: u32, last: Lin) -> TV {
+        let f = |l: Lin| match l {
+            Lin::Sym(s, c) if s == sym => last.add(c),
+            x => x,
+        };
+        let int = match self.int {
+            Lin::Sym(s, _) if s == sym => Lin::Unknown,
+            x => x,
+        };
+        TV { time: self.time.map(f), rows: self.rows, int }
     }
 }
 
@@ -256,6 +299,9 @@ struct Summary {
     result: TV,
     /// symbol of each integer parameter
     param_syms: Vec<Option<u32>>,
+    /// the last row of the temporal parameters (one symbol for all of them: at a call it stands
+    /// for the latest of the temporal arguments)
+    horizon: Option<u32>,
 }
 
 enum ParamKind {
@@ -395,6 +441,18 @@ fn jumps(e: &HExpr, depth: u32, breaks_only: bool) -> bool {
     }
 }
 
+/// The function a call goes to, when it is known: `f(...)` through a value, `grad(f)(...)`.
+fn static_fn(c: &HExpr) -> Option<u32> {
+    match c {
+        HExpr::FnRef(id) => Some(*id),
+        HExpr::CallBuiltin(Builtin::Grad | Builtin::ValueAndGrad, a, _) => match a.first() {
+            Some(HArg::Val(HExpr::FnRef(id))) => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn root(p: &HPlace) -> usize {
     match p {
         HPlace::Local(s) => *s as usize,
@@ -469,7 +527,7 @@ impl<'a> An<'a> {
             Some(Some(s)) => return Ok(s.clone()),
             // recursion: assume the worst
             Some(None) => {
-                return Ok(Summary { result: TV { time: Time { at: At::Late, span: None }, ..TV::ALWAYS }, param_syms: Vec::new() });
+                return Ok(Summary { result: TV { time: Time { at: At::Late, span: None }, ..TV::ALWAYS }, param_syms: Vec::new(), horizon: None });
             }
             None => {}
         }
@@ -479,6 +537,8 @@ impl<'a> An<'a> {
         let body = ck.bodies[id as usize].as_ref().expect("checked body");
         let mut frame = vec![TV::ALWAYS; body.n_slots as usize];
         let mut param_syms = Vec::new();
+        let temporal = sig.params.iter().any(|(_, ty, _)| matches!(self.param_kind(ty), ParamKind::Temporal(_)));
+        let horizon = if temporal { Some(self.new_sym(&format!("the last month given to `{}`", sig.name))) } else { None };
         for (i, (name, ty, _)) in sig.params.iter().enumerate() {
             match self.param_kind(ty) {
                 ParamKind::Int => {
@@ -489,7 +549,8 @@ impl<'a> An<'a> {
                 ParamKind::Temporal(axis) => {
                     // data passed in: row t known at end(t) (checked at the call sites of
                     // annotated functions, accounted for at the others)
-                    frame[i] = TV { rows: Some(Rows { axis, lag: Some(0), span: None, store: None }), ..TV::ALWAYS };
+                    let end = horizon.map(|h| Lin::Sym(h, 0));
+                    frame[i] = TV { rows: Some(Rows { axis, lag: Some(0), end, span: None, store: None }), ..TV::ALWAYS };
                     param_syms.push(None);
                 }
                 ParamKind::Other => param_syms.push(None),
@@ -508,7 +569,7 @@ impl<'a> An<'a> {
             let bound = self.eval(ann, &mut frame)?.int;
             self.check_bound(&result, bound, &sig.name, *asp)?;
         }
-        let s = Summary { result, param_syms };
+        let s = Summary { result, param_syms, horizon };
         self.summaries.insert(id, Some(s.clone()));
         Ok(s)
     }
@@ -583,9 +644,42 @@ impl<'a> An<'a> {
         };
         let mut res = TV { time: s.result.time.map(subst), rows: s.result.rows, int: Lin::Unknown };
         if shift > 0 {
-            res.time = res.time.map(|l| l.add(shift));
+            // (times relative to the horizon already count the arguments' lag)
+            res.time = res.time.map(|l| match l {
+                Lin::Sym(x, _) if Some(x) == s.horizon => l,
+                _ => l.add(shift),
+            });
             if let Some(r) = res.rows.as_mut() {
                 r.lag = r.lag.map(|l| l + shift);
+            }
+        }
+        if let Some(h) = s.horizon {
+            // the latest temporal argument: when its last row is known
+            let mut to = At::Always;
+            let mut end: Option<Option<Lin>> = None;
+            for (i, (_, ty, _)) in sig.params.iter().enumerate() {
+                if let ParamKind::Temporal(_) = self.param_kind(ty) {
+                    let (at, e) = match vals[i].rows {
+                        Some(r) => match (r.end, r.lag) {
+                            (Some(e), Some(l)) => (At::End(e.add(l)), Some(e)),
+                            _ => (At::Late, None),
+                        },
+                        // a slice or a snapshot: all of it is known at its own time
+                        None => (vals[i].time.at, None),
+                    };
+                    to = join_at(to, at);
+                    end = Some(match end {
+                        None => e,
+                        Some(prev) if prev == e => e,
+                        Some(_) => None,
+                    });
+                }
+            }
+            res.time = res.time.horizon(h, to);
+            if let Some(r) = res.rows.as_mut() {
+                if matches!(r.end, Some(Lin::Sym(x, _)) if x == h) {
+                    r.end = end.flatten();
+                }
             }
         }
         if lost {
@@ -734,7 +828,7 @@ impl<'a> An<'a> {
                     _ => Some(None),
                 };
                 if let Some(lag) = lag {
-                    let rows = Rows { axis, lag, span: val.time.span.or(Some(sp)), store: Some((idx, val.time.at)) };
+                    let rows = Rows { axis, lag, end: None, span: val.time.span.or(Some(sp)), store: Some((idx, val.time.at)) };
                     target.rows = join_rows(target.rows, Some(rows));
                 }
                 // a stored tensor that still has a temporal axis brings its rows along
@@ -754,7 +848,12 @@ impl<'a> An<'a> {
     fn over_time(&self, x: TV, axis: Option<i64>, sp: Span) -> TV {
         match x.rows {
             Some(r) if axis.is_none_or(|a| a < 0 || a == i64::from(r.axis)) => {
-                TV { time: x.time.join(Time::new(At::Late, sp)), rows: None, int: Lin::Unknown }
+                // known when its last row is: a function's data horizon, or the end of the data
+                let at = match (r.end, r.lag) {
+                    (Some(e), Some(l)) => At::End(e.add(l)),
+                    _ => At::Late,
+                };
+                TV { time: x.time.join(Time::new(at, sp)), rows: None, int: Lin::Unknown }
             }
             _ => x.no_int(),
         }
@@ -791,7 +890,16 @@ impl<'a> An<'a> {
                 let v = self.val(&args[0], f)?;
                 Ok(v)
             }
-            B::Size | B::Zeros | B::Ones | B::ZerosLike => {
+            B::Size => {
+                // the number of rows of a temporal parameter is its horizon + 1
+                let x = self.val(&args[0], f)?;
+                let int = match (x.rows, args.get(1).and_then(axis_lit)) {
+                    (Some(r), Some(a)) if i64::from(r.axis) == a => r.end.map_or(Lin::Unknown, |e| e.add(1)),
+                    _ => Lin::Unknown,
+                };
+                Ok(TV { int, ..TV::ALWAYS })
+            }
+            B::Zeros | B::Ones | B::ZerosLike => {
                 for a in args {
                     self.val(a, f)?;
                 }
@@ -843,7 +951,7 @@ impl<'a> An<'a> {
                 let x = self.val(&args[0], f)?;
                 let axis = args.get(1).and_then(axis_lit).unwrap_or(i64::from(AX_MONTH)) as u32;
                 let lag = args.get(2).and_then(axis_lit).unwrap_or(0);
-                Ok(TV { time: x.time, rows: Some(Rows { axis, lag: Some(lag), span: Some(sp), store: None }), int: Lin::Unknown })
+                Ok(TV { time: x.time, rows: Some(Rows { axis, lag: Some(lag), end: None, span: Some(sp), store: None }), int: Lin::Unknown })
             }
             _ => {
                 // element-wise and list functions: the latest of the inputs
@@ -871,7 +979,7 @@ impl<'a> An<'a> {
         for a in args {
             vals.push(self.eval(a, f)?);
         }
-        let data = |lag: i64| TV { time: Time::ALWAYS, rows: Some(Rows { axis: AX_MONTH, lag: Some(lag), span: Some(sp), store: None }), int: Lin::Unknown };
+        let data = |lag: i64| TV { time: Time::ALWAYS, rows: Some(Rows { axis: AX_MONTH, lag: Some(lag), end: None, span: Some(sp), store: None }), int: Lin::Unknown };
         Ok(match h {
             // row t: the total return of month t, known when the month closes
             HostFn::MonthlyReturns => data(0),
@@ -939,11 +1047,11 @@ impl<'a> An<'a> {
 
     /// Runs `body` to a fixpoint. `sym`: the loop variable of a range loop, whose next value is
     /// one more (what an iteration leaves for the next is one month older).
-    fn loop_fix(&mut self, f: &mut Vec<TV>, sym: Option<u32>, slot: Option<u32>, body: &HExpr, cond: Option<&HExpr>) -> KResult<()> {
+    fn loop_fix(&mut self, f: &mut Vec<TV>, sym: Option<u32>, slot: Option<u32>, body: &HExpr, cond: Option<&HExpr>, last: Lin) -> KResult<()> {
         let entry_pc = self.pc;
         let mut head = f.clone();
         let mut head_pc = entry_pc;
-        let mut last = f.clone();
+        let mut last_frame = f.clone();
         for round in 0..MAX_ROUNDS {
             let mut st = head.clone();
             if let (Some(s), Some(slot)) = (sym, slot) {
@@ -967,7 +1075,7 @@ impl<'a> An<'a> {
             };
             let new_head = join_frames(&head, &carried);
             let new_pc = head_pc.join(carried_pc);
-            last = st;
+            last_frame = st;
             if same_frames(&new_head, &head) && new_pc.at == head_pc.at {
                 break;
             }
@@ -980,9 +1088,9 @@ impl<'a> An<'a> {
                 }
             }
         }
-        let mut out = join_frames(&head, &last);
+        let mut out = join_frames(&head, &last_frame);
         if let Some(s) = sym {
-            out = out.iter().map(|v| v.forget(s)).collect();
+            out = out.iter().map(|v| v.bound(s, last)).collect();
         }
         *f = out;
         // after the loop: a `break` (or `return`) decided by data makes what follows depend on it
@@ -1021,6 +1129,11 @@ impl<'a> An<'a> {
                 for p in s.param_syms.iter().flatten() {
                     t = t.forget(*p);
                 }
+                if let Some(h) = s.horizon {
+                    // called with who knows what: as late as the data
+                    t.time = t.time.horizon(h, At::Late);
+                    t = t.forget(h);
+                }
                 t
             }
             HExpr::List(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) => {
@@ -1043,6 +1156,12 @@ impl<'a> An<'a> {
             }
             HExpr::Host(h, args, sp) => self.host(*h, args, *sp, f)?,
             HExpr::CallFn(id, args, _) => self.call_fn(*id, args, f)?,
+            HExpr::CallValue(c, args, _) if static_fn(c).is_some() => {
+                // grad(f)(x...) depends on the data exactly as f(x...) does
+                let id = static_fn(c).expect("checked by the guard");
+                let hargs: Vec<HArg> = args.iter().map(|a| HArg::Val(a.clone())).collect();
+                self.call_fn(id, &hargs, f)?
+            }
             HExpr::CallValue(c, args, sp) => {
                 let mut t = self.eval(c, f)?;
                 for a in args {
@@ -1121,14 +1240,21 @@ impl<'a> An<'a> {
                 a.join(&b).with_time(cv.time)
             }
             HExpr::While(c, body) => {
-                self.loop_fix(f, None, None, body, Some(c))?;
+                self.loop_fix(f, None, None, body, Some(c), Lin::Unknown)?;
                 TV::ALWAYS
             }
-            HExpr::ForRange { slot, name, lo, hi, body, .. } => {
-                self.eval(lo, f)?;
-                self.eval(hi, f)?;
+            HExpr::ForRange { slot, name, lo, hi, inclusive, body } => {
+                let a = self.eval(lo, f)?;
+                let b = self.eval(hi, f)?;
                 let sym = self.new_sym(name);
-                self.loop_fix(f, Some(sym), Some(*slot), body, None)?;
+                let last = if *inclusive { b.int } else { b.int.add(-1) };
+                // how many times the body runs depends on the bounds
+                let saved = self.pc;
+                self.pc = saved.join(a.time).join(b.time);
+                self.loop_fix(f, Some(sym), Some(*slot), body, None, last)?;
+                if !jumps(body, 0, true) {
+                    self.pc = saved;
+                }
                 TV::ALWAYS
             }
             HExpr::ForList { pat, list, body } => {

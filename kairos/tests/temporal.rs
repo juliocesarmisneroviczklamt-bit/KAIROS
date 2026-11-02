@@ -203,3 +203,72 @@ fn the_repl_remembers_where_data_came_from() {
     let err = s.check("3", "for m in 1..10 { w[month: m] = fill_nan(ret[month: m], 0.0) }\nb3.evaluate(w, lag: 0)").unwrap_err();
     assert_eq!(err.code, "E0301");
 }
+
+/// A function that runs over every row of its temporal arguments (a training loop, a sum
+/// written by hand): its result is known when the last row it was given is.
+const FIT: &str = "fn fit(r: Tensor[month, asset; f64], v: f64) -> f64 {
+    var acc = v
+    for k in 0..size(r, month) {
+        acc = acc + 0.01 * mean(fill_nan(r[month: k], 0.0))
+    }
+    acc
+}
+fn loss(v: f64, r: Tensor[month, asset; f64]) -> f64 {
+    var acc = 0.0
+    for k in 0..size(r, month) {
+        acc = acc + (v - mean(fill_nan(r[month: k], 0.0))) ^ 2.0
+    }
+    acc
+}
+";
+
+#[test]
+fn walk_forward_training_on_the_past_is_proven_causal() {
+    // trained on the months before m, through a loop and through `grad`
+    ok(&format!(
+        "{FIT}{}",
+        strategy(
+            "    let v = fit(ret[month: 0 ..= m - 1], 0.0) - 0.1 * grad(loss)(0.0, ret[month: 0 ..= m - 1])
+    weights[month: m] = where(elig[month: m], 0.001 * v, 0.0)"
+        )
+    ));
+}
+
+#[test]
+fn training_that_includes_the_decision_month_is_caught() {
+    fails(
+        &format!(
+            "{FIT}{}",
+            strategy(
+                "    let v = fit(ret[month: 0 ..= m], 0.0)
+    weights[month: m] = where(elig[month: m], 0.001 * v, 0.0)"
+            )
+        ),
+        "E0301",
+        "known at end(m)",
+    );
+    // the same, hidden behind `grad`
+    fails(
+        &format!(
+            "{FIT}{}",
+            strategy(
+                "    let g = grad(loss)(0.0, ret[month: 0 ..= m])
+    weights[month: m] = where(elig[month: m], 0.001 * g, 0.0)"
+            )
+        ),
+        "E0301",
+        "known at end(m)",
+    );
+    // and training on the whole history is the full-sample mistake
+    fails(
+        &format!(
+            "{FIT}{}",
+            strategy(
+                "    let v = fit(ret, 0.0)
+    weights[month: m] = where(elig[month: m], 0.001 * v, 0.0)"
+            )
+        ),
+        "E0301",
+        "only at the end of the data",
+    );
+}
