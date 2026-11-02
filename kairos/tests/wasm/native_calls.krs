@@ -1,0 +1,57 @@
+// A value computed before a call with no arguments survives the call (M22: the native back end
+// keeps the stack's top in a register, and a call clobbers it), and comparisons with what calls
+// give, kept in the flags, decide `if`s and are stored.
+struct V {
+    kind: i64,
+    v: i64,
+}
+
+fn wt_i32() -> i64 {
+    127
+}
+
+fn width(v: V, h: i64, reg: i64, w: bool) -> str {
+    if w { "64" } else { "32" }
+}
+
+fn widths(vals: List[V], ptypes: List[i64]) {
+    let k = len(ptypes)
+    let base = len(vals) - k
+    for i in 0..k {
+        let v = vals[base + i]
+        if v.kind == 3 or v.kind == 4 {
+            print("reg", width(v, base + i, 0, ptypes[i] != wt_i32()))
+        }
+    }
+    for i in 0..k {
+        let v = vals[base + i]
+        let w = ptypes[i] != wt_i32()
+        if v.kind == 1 {
+            print("const", if w { v.v } else { bit_and(v.v, 4294967295) })
+        } else if v.kind == 0 or v.kind == 2 {
+            print("mem", width(v, base + i, 1, w), w)
+        }
+    }
+}
+
+widths([V { kind: 0, v: 0 }, V { kind: 2, v: 3 }, V { kind: 1, v: -1 }, V { kind: 3, v: 0 }], [126, 126, 127, 126])
+// out: reg 64
+// out: mem 64 true
+// out: mem 64 true
+// out: const 4294967295
+let ps = [126, 127, 124]
+for i in 0..3 {
+    let w = ps[i] != wt_i32()
+    print(i, w, if w { 64 } else { 32 })
+}
+// out: 0 true 64
+// out: 1 false 32
+// out: 2 true 64
+fn seven() -> i64 {
+    7
+}
+let xs = [10, 20, 30]
+print(xs[1] + seven(), xs[2] * seven() - seven(), xs[0] - seven() < seven())   // out: 27 203 true
+var acc = 0
+for i in 0..3 { acc = acc * seven() + xs[i] }
+print(acc)                                                                     // out: 660

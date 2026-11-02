@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.21.0**, com o roteiro M1–M21 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.22.0**, com o roteiro M1–M22 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -23,7 +23,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.21.0**, com 
 - M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações;
 - M19: os demonstrativos da CVM no ponto do tempo ([`lab/cvm.krs`](lab/cvm.krs)), e o tempo desconhecido do que vem de fora separado do tempo provado;
 - M20: o texto formatado, `f"{name}: {x / 1e9:.1} bi"`;
-- M21: o back-end nativo escrito em Kairós: executáveis do Windows em x86-64 ([`compiler/native.krs`](compiler/native.krs)), com o sistema operacional em Kairós; o compilador, como executável, compila a si mesmo.
+- M21: o back-end nativo escrito em Kairós: executáveis do Windows em x86-64 ([`compiler/native.krs`](compiler/native.krs)), com o sistema operacional em Kairós; o compilador, como executável, compila a si mesmo;
+- M22: o código nativo 2 a 3 vezes mais rápido (a pilha de valores preguiçosa e os locais em registradores).
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -201,10 +202,16 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **O sistema operacional é Kairós:** [`compiler/rt_win.krs`](compiler/rt_win.krs) implementa sobre a `kernel32.dll` as funções do WASI que o runtime usa.
 - **Conferido:** os programas de teste e os da B3 saem iguais ao interpretador. O comando `kairos` como executável é igual ao Rust, e o `kn.exe` compila a si mesmo nos mesmos bytes.
 
+**M22 (o código nativo mais rápido)**
+- **A pilha de valores preguiçosa** ([spec §23](docs/spec.md)): constantes viram imediatos, o topo segue em `rax` ou `xmm0`, uma comparação vai direto para o salto, e os valores só vão para a memória nos saltos, nos blocos e nas chamadas.
+- **Os seis locais mais usados** de cada função vivem em registradores (`rbx`, `rsi`, `rdi`, `r12`–`r14`).
+- **Medido:** o `kn.exe` se compila em 11 s (eram 31) e tem 3,1 MB (eram 5,9); o `momentum` caiu de 6,5 s para 2,2 s.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M22 | desempenho do código nativo (a pilha de valores em registradores, comparações fundidas aos saltos) e executáveis ELF para Linux |
+| M23 | executáveis ELF para Linux x86-64: o sistema operacional em Kairós sobre as chamadas do kernel, e os testes do back-end nativo também no Linux do CI |
+| depois | um compilador que otimiza (o V8 ainda faz o `momentum` em 1,7 s, contra 2,2 s) |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o custo do aluguel de ações no simulador (falta uma fonte aberta do histórico); o `t3` compactado também no WebAssembly |

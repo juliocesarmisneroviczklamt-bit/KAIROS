@@ -2,6 +2,27 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.22.0 — M22: o código nativo mais rápido
+
+**Os executáveis que o compilador escrito em Kairós gera ficaram 2 a 3 vezes mais rápidos e com metade do tamanho, com os mesmos números.** O tradutor do M21 ([`native.krs`](kairos/compiler/native.krs)) gravava cada valor na memória a cada instrução. Agora ele adia isso:
+
+- **A pilha de valores preguiçosa.** Um valor fica como constante, como o valor de um local, no topo em `rax` ou `xmm0`, ou como comparação nos flags, até uma instrução precisar dele:
+  - um operando constante vira imediato;
+  - o resultado de uma conta segue no registrador para a próxima;
+  - uma comparação vai direto para o salto (`cmp` + `jl`).
+  - Os valores só vão para a memória nos saltos, nas fronteiras de bloco e nas chamadas.
+- **Os locais em registradores.** Os seis locais mais usados de cada função (contados no código, oito vezes mais dentro de cada laço) vivem em `rbx`, `rsi`, `rdi`, `r12`, `r13` e `r14`.
+- **Medido:**
+  - o `kn.exe` compila a si mesmo e o comando `kairos` em 11 s (eram 31 s) e tem 3,1 MB (eram 5,9);
+  - o `momentum` com os dados da B3 caiu de 6,5 s para 2,2 s. O V8, que otimiza o mesmo módulo, faz 1,7 s; o interpretador Rust, com a ponte da B3 escrita em Rust, 1,5 s;
+  - um laço de inteiros e floats leva 0,12 s, contra 0,47 s no interpretador Rust com o JIT do M7.
+- **Um erro achado pelo ponto fixo:** uma chamada sem argumentos destruía o valor guardado em `rax` (`x + f()`), e os 62 programas de teste não tinham esse caso. Está corrigido e virou o teste `tests/wasm/native_calls.krs`.
+- **Conferido:**
+  - os 63 programas de `tests/wasm`, os 31 dourados que rodam e os 10 com os dados da B3 (com o mesmo registro e o mesmo livro-razão) saem iguais ao interpretador;
+  - o comando `kairos` como executável é igual ao Rust;
+  - o `kn.exe` compila a si mesmo nos mesmos bytes.
+- **Próximo (M23):** executáveis ELF para Linux.
+
 ## 0.21.0 — M21: o back-end nativo escrito em Kairós
 
 **O compilador escrito em Kairós passou a gerar executáveis do Windows:** código de máquina x86-64 que ele mesmo escreve, sem Rust e sem runtime de WebAssembly (wasmtime, node). O próprio compilador vira um executável que compila a si mesmo, nos mesmos bytes.

@@ -3,16 +3,22 @@
 // executable (pe.krs). Nothing but the module and kernel32.dll: the program's operating system
 // (the WASI functions the runtime calls) is Kairós too, compiled into the module (rt_win.krs).
 //
-// The translation is direct: each value of WebAssembly's operand stack has a slot of 8 bytes in
-// the function's frame, whose place the translator knows at each instruction (the stack's height
-// is fixed by the code), and each instruction reads its operands from their slots and writes its
-// result to a slot. The module's memory starts at r15; an address is its 32 bits, added to r15.
+// Each value of WebAssembly's operand stack has a slot of 8 bytes in the function's frame, whose
+// place the translator knows at each instruction (the stack's height is fixed by the code). A
+// value goes to its slot only when it must (M22): until an instruction needs it, the translator
+// holds it as a constant, as the value of a local, in rax or xmm0 (the stack's top), or as a
+// comparison in the flags (the top, for a branch to take directly). Before a branch, a block's start or end and
+// a call's clobbering, the values go to their slots. The locals used most (counted in the code,
+// eight times more inside each loop) live in rbx, rsi, rdi, r12, r13 and r14, which kernel32
+// keeps; a function saves the ones it uses. The module's memory starts at r15; an address is its
+// 32 bits, added to r15.
 //
 // The frame of a function (rbp at its start):
 //   [rbp + 16 + 8i]           parameter i (the caller's outgoing area)
 //   [rbp + 8], [rbp]          the return address, the caller's rbp
 //   [rbp - 8 - 8j]            the other locals (zero at the start)
-//   below them                the operand slots, then the outgoing area at rsp (the arguments of
+//   below them                the registers it saves, the operand slots, then the outgoing area
+//                             at rsp (the arguments of
 //                             the calls this function makes; for kernel32, its 32 bytes of shadow
 //                             space and the arguments after the fourth)
 // A function's first result comes back in rax (a float as its bits), the others (a function with
@@ -40,6 +46,14 @@ struct NCtl {
     has_else: bool,
 }
 
+// A value of the operand stack as the translator holds it: in its slot (kind 0), a constant (1,
+// `v` its bits), the value of the local `v` (2), in rax (3), a comparison in the flags (4, `v` its
+// condition code), or a float in xmm0 (5). Only the top may be in rax, the flags or xmm0.
+struct NVal {
+    kind: i64,
+    v: i64,
+}
+
 struct Nat {
     x: X64,
     m: WMod,
@@ -60,9 +74,11 @@ struct Nat {
     pos: i64,
     np: i64,                    // its parameters
     nl: i64,                    // its other locals
-    ltypes: List[i64],
     result: i64,                // its results
-    h: i64,                     // the operand stack's height
+    lreg: List[i64],            // each local's register (-1: its place in the frame)
+    saved: List[i64],           // the registers it uses, saved below its locals
+    vals: List[NVal],           // the operand stack
+    h: i64,                     // its height (the length of vals)
     max_h: i64,
     max_out: i64,               // the bytes of the outgoing area
     ctl: List[NCtl],
@@ -144,7 +160,17 @@ fn n_blocktype(inout n: Nat) -> i64 {
 
 // the operand slot at height s, and the local j, as displacements from rbp
 fn n_slot(n: Nat, s: i64) -> i64 {
-    -8 * (1 + n.nl + s)
+    -8 * (1 + n.nl + len(n.saved) + s)
+}
+
+// where the i-th saved register is kept
+fn n_saved_at(n: Nat, i: i64) -> i64 {
+    -8 * (1 + n.nl + i)
+}
+
+// The register that holds the value (a local's), or -1.
+fn n_reg(n: Nat, v: NVal) -> i64 {
+    if v.kind == 2 { n.lreg[v.v] } else { -1 }
 }
 
 fn n_local(n: Nat, j: i64) -> i64 {
@@ -160,25 +186,233 @@ fn n_pages_at() -> i64 {
     -8
 }
 
-fn n_push(inout n: Nat) -> i64 {
-    let d = n_slot(n, n.h)
-    n.h += 1
-    if n.h > n.max_h { n.max_h = n.h }
-    d
+fn n_out(inout n: Nat, bytes_: i64) {
+    if bytes_ > n.max_out { n.max_out = bytes_ }
 }
 
-fn n_pop(inout n: Nat) -> i64 {
-    n.h -= 1
-    n_slot(n, n.h)
-}
-
-// the top slot (without popping)
+// the top slot
 fn n_top(n: Nat) -> i64 {
     n_slot(n, n.h - 1)
 }
 
-fn n_out(inout n: Nat, bytes_: i64) {
-    if bytes_ > n.max_out { n.max_out = bytes_ }
+// a 32-bit constant as its value with the sign
+fn n_i32(v: i64) -> i64 {
+    let u = bit_and(v, 4294967295)
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+// ------------------------------------------------------------------ the operand stack
+
+fn nv(kind: i64, v: i64) -> NVal {
+    NVal { kind: kind, v: v }
+}
+
+// A value pushed as it is held (the caller has the top settled, or popped it).
+fn n_put(inout n: Nat, kind: i64, v: i64) {
+    n.vals.push(nv(kind, v))
+    n.h += 1
+    if n.h > n.max_h { n.max_h = n.h }
+}
+
+// A value pushed: the top before it goes to its slot if it is in rax or the flags.
+fn n_pushv(inout n: Nat, kind: i64, v: i64) {
+    n_settle(inout n)
+    n_put(inout n, kind, v)
+}
+
+fn n_popv(inout n: Nat) -> NVal {
+    n.h -= 1
+    n.vals.pop()
+}
+
+// The stack cut or grown to height h, the values in their slots.
+fn n_set_height(inout n: Nat, h: i64) {
+    while len(n.vals) > h { let _ = n.vals.pop() }
+    while len(n.vals) < h { n.vals.push(nv(0, 0)) }
+    n.h = h
+    if n.h > n.max_h { n.max_h = n.h }
+}
+
+// [base + disp] <- a constant, 64 bits (through rcx when it does not fit in 32 with its sign)
+fn n_store_const(inout n: Nat, base: i64, disp: i64, v: i64) {
+    if fits32(v) {
+        x_store_imm(inout n.x, base, disp, v)
+    } else {
+        x_mov_imm(inout n.x, rcx(), v)
+        x_store(inout n.x, base, disp, rcx())
+    }
+}
+
+// The top, when in rax or the flags, to its slot.
+fn n_settle(inout n: Nat) {
+    let k = n.h - 1
+    if k < 0 { return }
+    let t = n.vals[k]
+    if t.kind == 4 {
+        x_setcc(inout n.x, t.v, rax())
+        x_movzx8(inout n.x, rax())
+    }
+    if t.kind == 3 or t.kind == 4 {
+        x_store(inout n.x, rbp(), n_slot(n, k), rax())
+        n.vals[k] = nv(0, 0)
+    }
+    if t.kind == 5 {
+        x_movsd_store(inout n.x, rbp(), -1, n_slot(n, k), 0)
+        n.vals[k] = nv(0, 0)
+    }
+}
+
+// Every value to its slot. Only moves: the flags stay as they are.
+fn n_flush(inout n: Nat) {
+    n_settle(inout n)
+    for i in 0..n.h {
+        let v = n.vals[i]
+        if v.kind == 1 {
+            n_store_const(inout n, rbp(), n_slot(n, i), v.v)
+            n.vals[i] = nv(0, 0)
+        } else if v.kind == 2 {
+            n_local_to_slot(inout n, v.v, i)
+            n.vals[i] = nv(0, 0)
+        }
+    }
+}
+
+// local j's value to the slot at height i (through rcx when it is in the frame)
+fn n_local_to_slot(inout n: Nat, j: i64, i: i64) {
+    let r = n.lreg[j]
+    if r >= 0 {
+        x_store(inout n.x, rbp(), n_slot(n, i), r)
+    } else {
+        x_load(inout n.x, rcx(), rbp(), n_local(n, j))
+        x_store(inout n.x, rbp(), n_slot(n, i), rcx())
+    }
+}
+
+// The values that are local j's, to their slots (j is about to change), but the one at `keep`.
+fn n_flush_local(inout n: Nat, j: i64, keep: i64) {
+    for i in 0..n.h {
+        let v = n.vals[i]
+        if v.kind == 2 and v.v == j and i != keep {
+            n_local_to_slot(inout n, j, i)
+            n.vals[i] = nv(0, 0)
+        }
+    }
+}
+
+// Where the value at height h is in memory: (it is, its displacement from rbp).
+fn n_mem(n: Nat, v: NVal, h: i64) -> (bool, i64) {
+    if v.kind == 0 { return (true, n_slot(n, h)) }
+    if v.kind == 2 and n.lreg[v.v] < 0 { return (true, n_local(n, v.v)) }
+    (false, 0)
+}
+
+// The value at height h into reg: 64 bits (w), or 32 with the upper half cleared. The flags stay
+// as they are, unless the value is a comparison.
+fn n_get(inout n: Nat, v: NVal, h: i64, reg: i64, w: bool) {
+    let r = n_reg(n, v)
+    if r >= 0 {
+        if not w {
+            x_mov32(inout n.x, reg, r)
+        } else if reg != r {
+            x_mov(inout n.x, reg, r)
+        }
+        return
+    }
+    if v.kind == 0 or v.kind == 2 {
+        let d = if v.kind == 0 { n_slot(n, h) } else { n_local(n, v.v) }
+        if w { x_load(inout n.x, reg, rbp(), d) } else { x_load32(inout n.x, reg, rbp(), d) }
+        return
+    }
+    if v.kind == 1 {
+        x_mov_imm(inout n.x, reg, if w { v.v } else { bit_and(v.v, 4294967295) })
+        return
+    }
+    if v.kind == 5 {
+        x_movq_rx(inout n.x, reg, 0)
+        if not w { x_mov32(inout n.x, reg, reg) }
+        return
+    }
+    if v.kind == 4 {
+        x_setcc(inout n.x, v.v, rax())
+        x_movzx8(inout n.x, rax())
+    }
+    if w {
+        if reg != rax() { x_mov(inout n.x, reg, rax()) }
+    } else {
+        x_mov32(inout n.x, reg, rax())
+    }
+}
+
+// [base + disp] <- the value at height h, 64 bits (through rax: the top is the value, or none
+// is in rax).
+fn n_put_at(inout n: Nat, v: NVal, h: i64, base: i64, disp: i64) {
+    if v.kind == 1 {
+        n_store_const(inout n, base, disp, v.v)
+        return
+    }
+    if v.kind == 5 {
+        x_movsd_store(inout n.x, base, -1, disp, 0)
+        return
+    }
+    n_get(inout n, v, h, rax(), true)
+    x_store(inout n.x, base, disp, rax())
+}
+
+// rax op= the value b at height bh, an ALU operation ("reg, r/m": add or and sub xor cmp)
+fn n_alu_v(inout n: Nat, op: i64, w: bool, b: NVal, bh: i64) {
+    if b.kind == 1 and (if w { fits32(b.v) } else { true }) {
+        x_alu_i(inout n.x, (op - 3) / 8, w, rax(), if w { b.v } else { n_i32(b.v) })
+        return
+    }
+    let m = n_mem(n, b, bh)
+    if m.0 {
+        x_alu_m(inout n.x, op, w, rax(), rbp(), m.1)
+        return
+    }
+    let r = n_reg(n, b)
+    if r >= 0 {
+        x_alu(inout n.x, op, w, rax(), r)
+        return
+    }
+    n_get(inout n, b, bh, rcx(), w)
+    x_alu(inout n.x, op, w, rax(), rcx())
+}
+
+// rax *= the value b
+fn n_imul_v(inout n: Nat, w: bool, b: NVal, bh: i64) {
+    if b.kind == 1 and (if w { fits32(b.v) } else { true }) {
+        x_imul_i(inout n.x, w, rax(), rax(), if w { b.v } else { n_i32(b.v) })
+        return
+    }
+    let m = n_mem(n, b, bh)
+    if m.0 {
+        x_imul_m(inout n.x, w, rax(), rbp(), m.1)
+        return
+    }
+    let r = n_reg(n, b)
+    n_get(inout n, b, bh, rcx(), w)
+    x_rr(inout n.x, 0, w, [15, 175], rax(), if r >= 0 { r } else { rcx() })
+}
+
+// The condition a value gives (`if`, `br_if`): its condition code, with the flags set. A
+// comparison is taken as it is; any other value is tested.
+fn n_cond(inout n: Nat, c: NVal, ch: i64) -> i64 {
+    if c.kind == 4 { return c.v }
+    let r = n_reg(n, c)
+    if r >= 0 {
+        x_test(inout n.x, false, r, r)
+        return cc_ne()
+    }
+    let m = n_mem(n, c, ch)
+    if m.0 {
+        // cmp dword [mem], 0
+        x_rm(inout n.x, 0, false, [131], 7, rbp(), -1, m.1)
+        xb(inout n.x, 0)
+    } else {
+        n_get(inout n, c, ch, rax(), false)
+        x_test(inout n.x, false, rax(), rax())
+    }
+    cc_ne()
 }
 
 // ------------------------------------------------------------------ control
@@ -187,8 +421,8 @@ fn n_ctl(n: Nat, depth: i64) -> NCtl {
     n.ctl[len(n.ctl) - 1 - depth]
 }
 
-// The function's results, the top `k` values: the first to rax, the others to the caller's
-// outgoing area (above the return address and the saved rbp).
+// The function's results, the top `k` values (in their slots): the first to rax, the others to
+// the caller's outgoing area (above the return address and the saved rbp).
 fn n_results(inout n: Nat, k: i64) {
     if k == 0 { return }
     x_load(inout n.x, rax(), rbp(), n_slot(n, n.h - k))
@@ -198,7 +432,8 @@ fn n_results(inout n: Nat, k: i64) {
     }
 }
 
-// A branch to the block `depth` levels out: its value (if it takes one) to its slot, then the jump.
+// A branch to the block `depth` levels out (the values in their slots): its value (if it takes
+// one) to its slot, then the jump.
 fn n_branch(inout n: Nat, depth: i64) {
     let c = n_ctl(n, depth)
     if c.kind == 3 {
@@ -225,16 +460,19 @@ fn n_branch_moves(n: Nat, depth: i64) -> bool {
 }
 
 fn n_open(inout n: Nat, kind: i64, results: i64) {
+    var cc = -1
+    if kind == 2 {
+        // the condition, before the other values go to their slots (which keeps the flags)
+        let c = n_popv(inout n)
+        cc = n_cond(inout n, c, n.h)
+    }
+    n_flush(inout n)
     let l = x_label(inout n.x)
     if kind == 1 { x_bind(inout n.x, l) }
     var e = -1
     if kind == 2 {
-        // the condition
-        let d = n_pop(inout n)
-        x_load32(inout n.x, rax(), rbp(), d)
-        x_test(inout n.x, false, rax(), rax())
         e = x_label(inout n.x)
-        x_jcc(inout n.x, cc_e(), e)
+        x_jcc(inout n.x, bit_xor(cc, 1), e)
     }
     n.ctl.push(NCtl { kind: kind, label: l, else_l: e, height: n.h, results: results, has_else: false })
 }
@@ -242,10 +480,13 @@ fn n_open(inout n: Nat, kind: i64, results: i64) {
 fn n_else(inout n: Nat) {
     let k = len(n.ctl) - 1
     let c = n.ctl[k]
-    if not n.dead { x_jmp(inout n.x, c.label) }
+    if not n.dead {
+        n_flush(inout n)
+        x_jmp(inout n.x, c.label)
+    }
     x_bind(inout n.x, c.else_l)
     n.ctl[k].has_else = true
-    n.h = c.height
+    n_set_height(inout n, c.height)
     n.dead = false
 }
 
@@ -253,19 +494,20 @@ fn n_else(inout n: Nat) {
 fn n_end(inout n: Nat) -> bool {
     let k = len(n.ctl) - 1
     let c = n.ctl[k]
+    if not n.dead { n_flush(inout n) }
     if c.kind == 3 {
         if not n.dead { n_results(inout n, c.results) }
         x_bind(inout n.x, c.label)
+        for i in 0..len(n.saved) { x_load(inout n.x, n.saved[i], rbp(), n_saved_at(n, i)) }
         x_leave(inout n.x)
         x_ret(inout n.x)
-        n.ctl.pop()
+        let _ = n.ctl.pop()
         return true
     }
     if c.kind == 2 and not c.has_else { x_bind(inout n.x, c.else_l) }
     if c.kind != 1 { x_bind(inout n.x, c.label) }
-    n.ctl.pop()
-    n.h = c.height + c.results
-    if n.h > n.max_h { n.max_h = n.h }
+    let _ = n.ctl.pop()
+    n_set_height(inout n, c.height + c.results)
     n.dead = false
     false
 }
@@ -317,26 +559,49 @@ fn n_skip(inout n: Nat, op: i64) {
 
 // ------------------------------------------------------------------ calls
 
-// The arguments of a call to a function of `ptypes`, from the slots to the outgoing area (a 32-bit
-// one zero-extended: WASI's functions written in Kairós take i64).
+// The arguments of a call to a function of `ptypes`, to the outgoing area (a 32-bit one
+// zero-extended: WASI's functions written in Kairós take i64), popped.
 fn n_args(inout n: Nat, ptypes: List[i64]) {
     let k = len(ptypes)
-    n.h -= k
+    // with no arguments, the top is no argument: the call would lose it from rax or the flags
+    if k == 0 { n_settle(inout n) }
+    let base = n.h - k
+    // the last one may be in rax or the flags: it goes first
     for i in 0..k {
-        let d = n_slot(n, n.h + i)
-        if ptypes[i] == wt_i32() { x_load32(inout n.x, rax(), rbp(), d) } else { x_load(inout n.x, rax(), rbp(), d) }
-        x_store(inout n.x, rsp(), 8 * i, rax())
+        let v = n.vals[base + i]
+        if v.kind == 3 or v.kind == 4 {
+            n_get(inout n, v, base + i, rax(), ptypes[i] != wt_i32())
+            x_store(inout n.x, rsp(), 8 * i, rax())
+        }
+        if v.kind == 5 { x_movsd_store(inout n.x, rsp(), -1, 8 * i, 0) }
     }
+    for i in 0..k {
+        let v = n.vals[base + i]
+        let w = ptypes[i] != wt_i32()
+        if v.kind == 1 {
+            n_store_const(inout n, rsp(), 8 * i, if w { v.v } else { bit_and(v.v, 4294967295) })
+        } else if v.kind == 0 or v.kind == 2 {
+            n_get(inout n, v, base + i, rcx(), w)
+            x_store(inout n.x, rsp(), 8 * i, rcx())
+        }
+    }
+    n_set_height(inout n, base)
     n_out(inout n, 8 * k)
 }
 
-// The results of a call, to the slots: the first from rax, the others from the outgoing area.
+// The results of a call: the first in rax, the others from the outgoing area to their slots.
 fn n_take_results(inout n: Nat, k: i64) {
     if k == 0 { return }
-    x_store(inout n.x, rbp(), n_push(inout n), rax())
+    if k == 1 {
+        n_put(inout n, 3, 0)
+        return
+    }
+    x_store(inout n.x, rbp(), n_slot(n, n.h), rax())
+    n_put(inout n, 0, 0)
     for i in 1..k {
         x_load(inout n.x, rcx(), rsp(), 8 * (i - 1))
-        x_store(inout n.x, rbp(), n_push(inout n), rcx())
+        x_store(inout n.x, rbp(), n_slot(n, n.h), rcx())
+        n_put(inout n, 0, 0)
     }
     n_out(inout n, 8 * (k - 1))
 }
@@ -367,16 +632,16 @@ fn n_call(inout n: Nat, f: i64) {
 fn n_call_indirect(inout n: Nat, ti: i64) {
     let ptypes = n.m.tparams[ti]
     let results = len(n.m.tresults[ti])
-    let at = n_pop(inout n)
+    // the table's entry (it may be in rax or the flags: first), checked, times 5
+    let at = n_popv(inout n)
+    n_get(inout n, at, n.h, rdx(), false)
     n_args(inout n, ptypes)
-    // the table's entry: its index (checked), times 5
-    x_load32(inout n.x, rax(), rbp(), at)
-    x_alu_i(inout n.x, 7, false, rax(), len(n.m.table))
+    x_alu_i(inout n.x, 7, false, rdx(), len(n.m.table))
     x_jcc(inout n.x, cc_ae(), n.trap_l)
-    x_imul_i(inout n.x, false, rax(), rax(), 5)
+    x_imul_i(inout n.x, false, rdx(), rdx(), 5)
     x_lea_label(inout n.x, rcx(), n.table_l)
-    x_alu(inout n.x, op_add(), true, rax(), rcx())
-    x_call_r(inout n.x, rax())
+    x_alu(inout n.x, op_add(), true, rdx(), rcx())
+    x_call_r(inout n.x, rdx())
     n_take_results(inout n, results)
 }
 
@@ -387,32 +652,78 @@ fn n_int_cc(k: i64) -> i64 {
     [4, 5, 12, 2, 15, 7, 14, 6, 13, 3][k]
 }
 
-// an integer comparison (w: 64 bits)
+// an integer comparison (w: 64 bits): its result stays in the flags
 fn n_compare(inout n: Nat, w: bool, cc: i64) {
-    let b = n_pop(inout n)
-    let a = n_top(n)
-    if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
-    x_alu_m(inout n.x, op_cmp(), w, rax(), rbp(), b)
-    x_setcc(inout n.x, cc, rax())
-    x_movzx8(inout n.x, rax())
-    x_store(inout n.x, rbp(), a, rax())
+    let b = n_popv(inout n)
+    let bh = n.h
+    let a = n_popv(inout n)
+    let ah = n.h
+    if b.kind == 3 or b.kind == 4 {
+        n_get(inout n, b, bh, rcx(), w)
+        n_get(inout n, a, ah, rax(), w)
+        x_alu(inout n.x, op_cmp(), w, rax(), rcx())
+    } else {
+        n_get(inout n, a, ah, rax(), w)
+        n_alu_v(inout n, op_cmp(), w, b, bh)
+    }
+    n_put(inout n, 4, cc)
 }
 
+// eqz: the negated comparison, or a test
 fn n_eqz(inout n: Nat, w: bool) {
-    let a = n_top(n)
-    if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
-    x_test(inout n.x, w, rax(), rax())
-    x_setcc(inout n.x, cc_e(), rax())
-    x_movzx8(inout n.x, rax())
-    x_store(inout n.x, rbp(), a, rax())
+    let a = n_popv(inout n)
+    let ah = n.h
+    if a.kind == 4 {
+        n_put(inout n, 4, bit_xor(a.v, 1))
+        return
+    }
+    let r = n_reg(n, a)
+    if r >= 0 {
+        x_test(inout n.x, w, r, r)
+        n_put(inout n, 4, cc_e())
+        return
+    }
+    let m = n_mem(n, a, ah)
+    if m.0 {
+        x_rm(inout n.x, 0, w, [131], 7, rbp(), -1, m.1)
+        xb(inout n.x, 0)
+    } else {
+        n_get(inout n, a, ah, rax(), w)
+        x_test(inout n.x, w, rax(), rax())
+    }
+    n_put(inout n, 4, cc_e())
+}
+
+// The float value at height h into xmm (a constant through rcx).
+fn n_getx(inout n: Nat, v: NVal, h: i64, xmm: i64) {
+    let m = n_mem(n, v, h)
+    if m.0 {
+        x_movsd_load(inout n.x, xmm, rbp(), -1, m.1)
+    } else if v.kind == 1 {
+        x_mov_imm(inout n.x, rcx(), v.v)
+        x_movq_xr(inout n.x, xmm, rcx())
+    } else if n_reg(n, v) >= 0 {
+        x_movq_xr(inout n.x, xmm, n_reg(n, v))
+    } else if v.kind == 5 {
+        if xmm != 0 { x_movsd_rr(inout n.x, xmm, 0) }
+    } else {
+        x_movq_xr(inout n.x, xmm, rax())
+    }
+}
+
+// xmm0 as the result
+fn n_fresult(inout n: Nat) {
+    n_put(inout n, 5, 0)
 }
 
 // a float comparison: eq ne lt gt le ge (k 0..5)
 fn n_fcompare(inout n: Nat, k: i64) {
-    let b = n_pop(inout n)
-    let a = n_top(n)
-    x_movsd_load(inout n.x, 0, rbp(), -1, a)
-    x_movsd_load(inout n.x, 1, rbp(), -1, b)
+    let b = n_popv(inout n)
+    let bh = n.h
+    let a = n_popv(inout n)
+    let ah = n.h
+    n_getx(inout n, b, bh, 1)
+    n_getx(inout n, a, ah, 0)
     if k == 0 or k == 1 {
         x_ucomisd(inout n.x, 0, 1)
         if k == 0 {
@@ -424,42 +735,40 @@ fn n_fcompare(inout n: Nat, k: i64) {
             x_setcc(inout n.x, cc_p(), rcx())
             x_alu(inout n.x, op_or(), false, rax(), rcx())
         }
+        x_movzx8(inout n.x, rax())
+        n_put(inout n, 3, 0)
     } else if k == 2 or k == 4 {
         // a < b is b > a (false on NaN: "above" needs CF = 0)
         x_ucomisd(inout n.x, 1, 0)
-        x_setcc(inout n.x, if k == 2 { cc_a() } else { cc_ae() }, rax())
+        n_put(inout n, 4, if k == 2 { cc_a() } else { cc_ae() })
     } else {
         x_ucomisd(inout n.x, 0, 1)
-        x_setcc(inout n.x, if k == 3 { cc_a() } else { cc_ae() }, rax())
+        n_put(inout n, 4, if k == 3 { cc_a() } else { cc_ae() })
     }
-    x_movzx8(inout n.x, rax())
-    x_store(inout n.x, rbp(), a, rax())
 }
 
 // integer arithmetic: add sub mul div_s div_u rem_s rem_u and or xor shl shr_s shr_u rotl rotr (k 0..14)
 fn n_arith(inout n: Nat, w: bool, k: i64) {
-    let b = n_pop(inout n)
-    let a = n_top(n)
-    if k == 0 or k == 1 or k == 7 or k == 8 or k == 9 {
-        let op = [op_add(), op_sub(), 0, 0, 0, 0, 0, op_and(), op_or(), op_xor()][k]
-        x_load(inout n.x, rax(), rbp(), a)
-        x_alu_m(inout n.x, op, w, rax(), rbp(), b)
-        x_store(inout n.x, rbp(), a, rax())
-        return
-    }
-    if k == 2 {
-        x_load(inout n.x, rax(), rbp(), a)
-        x_imul_m(inout n.x, w, rax(), rbp(), b)
-        x_store(inout n.x, rbp(), a, rax())
-        return
-    }
+    let b = n_popv(inout n)
+    let bh = n.h
+    let a = n_popv(inout n)
+    let ah = n.h
+    let b_in_rax = b.kind == 3 or b.kind == 4
     if k >= 3 and k <= 6 {
-        // division: by zero traps; rem_s by -1 is 0 (idiv would fault on the most negative)
-        if w { x_load(inout n.x, rcx(), rbp(), b) } else { x_load32(inout n.x, rcx(), rbp(), b) }
-        x_test(inout n.x, w, rcx(), rcx())
-        x_jcc(inout n.x, cc_e(), n.trap_l)
-        if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
-        let signed = k == 3 or k == 5
+        // division: the divisor in rcx, the dividend in rax; by zero traps; rem_s by -1 is 0
+        // (idiv would fault on the most negative)
+        if b_in_rax {
+            n_get(inout n, b, bh, rcx(), w)
+            n_get(inout n, a, ah, rax(), w)
+        } else {
+            n_get(inout n, a, ah, rax(), w)
+            n_get(inout n, b, bh, rcx(), w)
+        }
+        let zero_free = b.kind == 1 and bit_and(b.v, if w { -1 } else { 4294967295 }) != 0
+        if not zero_free {
+            x_test(inout n.x, w, rcx(), rcx())
+            x_jcc(inout n.x, cc_e(), n.trap_l)
+        }
         let done = x_label(inout n.x)
         if k == 5 {
             let go = x_label(inout n.x)
@@ -469,7 +778,7 @@ fn n_arith(inout n: Nat, w: bool, k: i64) {
             x_jmp(inout n.x, done)
             x_bind(inout n.x, go)
         }
-        if signed {
+        if k == 3 or k == 5 {
             x_cqo(inout n.x, w)
             x_div(inout n.x, 7, w, rcx())
         } else {
@@ -477,95 +786,151 @@ fn n_arith(inout n: Nat, w: bool, k: i64) {
             x_div(inout n.x, 6, w, rcx())
         }
         x_bind(inout n.x, done)
-        x_store(inout n.x, rbp(), a, if k == 3 or k == 4 { rax() } else { rdx() })
+        if k == 5 or k == 6 { x_mov(inout n.x, rax(), rdx()) }
+        n_put(inout n, 3, 0)
         return
     }
-    // shifts and rotations: the count in cl (the processor takes it modulo the width, as WebAssembly)
-    let ext = [4, 7, 5, 0, 1][k - 10]
-    x_load(inout n.x, rcx(), rbp(), b)
-    x_load(inout n.x, rax(), rbp(), a)
-    x_shift_cl(inout n.x, ext, w, rax())
-    x_store(inout n.x, rbp(), a, rax())
+    if k >= 10 {
+        // shifts and rotations: the count modulo the width, as WebAssembly
+        let ext = [4, 7, 5, 0, 1][k - 10]
+        if b.kind == 1 {
+            n_get(inout n, a, ah, rax(), w)
+            x_shift_i(inout n.x, ext, w, rax(), bit_and(b.v, if w { 63 } else { 31 }))
+        } else {
+            if b_in_rax {
+                n_get(inout n, b, bh, rcx(), w)
+                n_get(inout n, a, ah, rax(), w)
+            } else {
+                n_get(inout n, a, ah, rax(), w)
+                n_get(inout n, b, bh, rcx(), w)
+            }
+            x_shift_cl(inout n.x, ext, w, rax())
+        }
+        n_put(inout n, 3, 0)
+        return
+    }
+    let commutes = k == 0 or k == 2 or k == 7 or k == 8 or k == 9
+    var x = b
+    var xh = bh
+    if b_in_rax {
+        n_get(inout n, b, bh, rax(), w)
+        if commutes {
+            x = a
+            xh = ah
+        } else {
+            // a - b, with b in rax
+            x_mov(inout n.x, rcx(), rax())
+            n_get(inout n, a, ah, rax(), w)
+            x_alu(inout n.x, op_sub(), w, rax(), rcx())
+            n_put(inout n, 3, 0)
+            return
+        }
+    } else {
+        n_get(inout n, a, ah, rax(), w)
+    }
+    if k == 2 {
+        n_imul_v(inout n, w, x, xh)
+    } else {
+        n_alu_v(inout n, [op_add(), op_sub(), 0, 0, 0, 0, 0, op_and(), op_or(), op_xor()][k], w, x, xh)
+    }
+    n_put(inout n, 3, 0)
 }
 
 // clz ctz popcnt (k 0..2)
 fn n_count(inout n: Nat, w: bool, k: i64) {
-    let a = n_top(n)
-    x_load(inout n.x, rcx(), rbp(), a)
+    let a = n_popv(inout n)
+    n_get(inout n, a, n.h, rcx(), w)
     x_bitcount(inout n.x, [189, 188, 184][k], w, rax(), rcx())
-    x_store(inout n.x, rbp(), a, rax())
+    n_put(inout n, 3, 0)
 }
 
 // float arithmetic: abs neg ceil floor trunc nearest sqrt add sub mul div min max copysign (k 0..13)
 fn n_farith(inout n: Nat, k: i64) {
     if k <= 6 {
-        let a = n_top(n)
+        let a = n_popv(inout n)
+        let ah = n.h
         if k <= 1 {
-            x_load(inout n.x, rax(), rbp(), a)
+            n_get(inout n, a, ah, rax(), true)
             x_bit_i(inout n.x, if k == 0 { 6 } else { 7 }, rax(), 63)
-            x_store(inout n.x, rbp(), a, rax())
+            n_put(inout n, 3, 0)
             return
         }
-        x_movsd_load(inout n.x, 0, rbp(), -1, a)
+        n_getx(inout n, a, ah, 0)
         if k == 6 { x_sse(inout n.x, 81, 0, 0) } else { x_roundsd(inout n.x, 0, 0, [10, 9, 11, 8][k - 2]) }
-        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        n_fresult(inout n)
         return
     }
-    let b = n_pop(inout n)
-    let a = n_top(n)
+    let b = n_popv(inout n)
+    let bh = n.h
+    let a = n_popv(inout n)
+    let ah = n.h
     if k <= 10 {
-        x_movsd_load(inout n.x, 0, rbp(), -1, a)
-        x_sse_m(inout n.x, [88, 92, 89, 94][k - 7], 0, rbp(), b)
-        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        let op = [88, 92, 89, 94][k - 7]
+        let m = n_mem(n, b, bh)
+        if m.0 {
+            n_getx(inout n, a, ah, 0)
+            x_sse_m(inout n.x, op, 0, rbp(), m.1)
+        } else {
+            n_getx(inout n, b, bh, 1)
+            n_getx(inout n, a, ah, 0)
+            x_sse(inout n.x, op, 0, 1)
+        }
+        n_fresult(inout n)
         return
     }
     if k == 13 {
         // copysign: a's magnitude, b's sign
-        x_load(inout n.x, rax(), rbp(), a)
+        if b.kind == 3 {
+            n_get(inout n, b, bh, rcx(), true)
+            n_get(inout n, a, ah, rax(), true)
+        } else {
+            n_get(inout n, a, ah, rax(), true)
+            n_get(inout n, b, bh, rcx(), true)
+        }
         x_bit_i(inout n.x, 6, rax(), 63)
-        x_load(inout n.x, rcx(), rbp(), b)
         x_shift_i(inout n.x, 5, true, rcx(), 63)
         x_shift_i(inout n.x, 4, true, rcx(), 63)
         x_alu(inout n.x, op_or(), true, rax(), rcx())
-        x_store(inout n.x, rbp(), a, rax())
+        n_put(inout n, 3, 0)
         return
     }
     // min and max: NaN if either is; -0 below +0
     let nan = x_label(inout n.x)
     let diff = x_label(inout n.x)
     let done = x_label(inout n.x)
-    x_movsd_load(inout n.x, 0, rbp(), -1, a)
-    x_movsd_load(inout n.x, 1, rbp(), -1, b)
+    n_getx(inout n, b, bh, 1)
+    n_getx(inout n, a, ah, 0)
     x_ucomisd(inout n.x, 0, 1)
     x_jcc(inout n.x, cc_p(), nan)
     x_jcc(inout n.x, cc_ne(), diff)
     // equal (or zeros of either sign): the bits or-ed (min) or and-ed (max)
-    x_load(inout n.x, rax(), rbp(), a)
-    x_alu_m(inout n.x, if k == 11 { op_or() } else { op_and() }, true, rax(), rbp(), b)
-    x_store(inout n.x, rbp(), a, rax())
+    x_movq_rx(inout n.x, rax(), 0)
+    x_movq_rx(inout n.x, rcx(), 1)
+    x_alu(inout n.x, if k == 11 { op_or() } else { op_and() }, true, rax(), rcx())
     x_jmp(inout n.x, done)
     x_bind(inout n.x, diff)
     x_sse(inout n.x, if k == 11 { 93 } else { 95 }, 0, 1)
-    x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    x_movq_rx(inout n.x, rax(), 0)
     x_jmp(inout n.x, done)
     x_bind(inout n.x, nan)
     x_sse(inout n.x, 88, 0, 1)
-    x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    x_movq_rx(inout n.x, rax(), 0)
     x_bind(inout n.x, done)
+    n_put(inout n, 3, 0)
 }
 
 // i32/i64.trunc_f64_s: toward zero, trapping on NaN and out of range
 fn n_trunc(inout n: Nat, w: bool) {
-    let a = n_top(n)
+    let a = n_popv(inout n)
+    n_getx(inout n, a, n.h, 0)
     let ok = x_label(inout n.x)
-    x_movsd_load(inout n.x, 0, rbp(), -1, a)
     if w {
         x_cvttsd2si(inout n.x, true, rax(), 0)
         // 2^63 marks an invalid one, unless the float is exactly -2^63
-        x_imm(inout n.x, rcx(), -9223372036854775807 - 1)
+        x_mov_imm(inout n.x, rcx(), -9223372036854775807 - 1)
         x_alu(inout n.x, op_cmp(), true, rax(), rcx())
         x_jcc(inout n.x, cc_ne(), ok)
-        x_imm(inout n.x, rdx(), to_bits(-9223372036854775808.0))
+        x_mov_imm(inout n.x, rdx(), to_bits(-9223372036854775808.0))
         x_movq_xr(inout n.x, 1, rdx())
         x_ucomisd(inout n.x, 0, 1)
         x_jcc(inout n.x, cc_p(), n.trap_l)
@@ -580,38 +945,183 @@ fn n_trunc(inout n: Nat, w: bool) {
         x_jcc(inout n.x, cc_p(), n.trap_l)
     }
     x_bind(inout n.x, ok)
-    x_store(inout n.x, rbp(), a, rax())
+    n_put(inout n, 3, 0)
+}
+
+// The address of a memory access: (a constant one, its value), or else in rax (32 bits) with
+// the offset in the result's second part.
+fn n_address(inout n: Nat, a: NVal, ah: i64, off: i64) -> (bool, i64) {
+    if a.kind == 1 and bit_and(a.v, 4294967295) + off <= 2147483647 {
+        return (true, bit_and(a.v, 4294967295) + off)
+    }
+    n_get(inout n, a, ah, rax(), false)
+    if off > 2147483647 {
+        x_mov_imm(inout n.x, rdx(), off)
+        x_alu(inout n.x, op_add(), true, rax(), rdx())
+        return (false, 0)
+    }
+    (false, off)
 }
 
 fn n_load(inout n: Nat, op: i64) {
     let _ = n_u(inout n)
-    var off = n_u(inout n)
-    let a = n_top(n)
-    x_load32(inout n.x, rax(), rbp(), a)
-    if off > 2147483647 {
-        x_imm(inout n.x, rcx(), off)
-        x_alu(inout n.x, op_add(), true, rax(), rcx())
-        off = 0
+    let off = n_u(inout n)
+    let a = n_popv(inout n)
+    let at = n_address(inout n, a, n.h, off)
+    let kind = [4, 6, 4, 6, 1, 0, 3, 2, 1, 0, 3, 2, 5, 4][op - 40]
+    let w = op == 48 or op == 50
+    if at.0 {
+        x_load_kind(inout n.x, kind, w, rax(), r15(), -1, at.1)
+    } else {
+        x_load_kind(inout n.x, kind, w, rax(), r15(), rax(), at.1)
     }
-    let k = op - 40
-    let kind = [4, 6, 4, 6, 1, 0, 3, 2, 1, 0, 3, 2, 5, 4][k]
-    x_load_kind(inout n.x, kind, op == 48 or op == 50, rax(), r15(), rax(), off)
-    x_store(inout n.x, rbp(), a, rax())
+    n_put(inout n, 3, 0)
 }
 
 fn n_store(inout n: Nat, op: i64) {
     let _ = n_u(inout n)
-    var off = n_u(inout n)
-    let v = n_pop(inout n)
-    let a = n_pop(inout n)
-    x_load32(inout n.x, rax(), rbp(), a)
-    if off > 2147483647 {
-        x_imm(inout n.x, rcx(), off)
-        x_alu(inout n.x, op_add(), true, rax(), rcx())
-        off = 0
+    let off = n_u(inout n)
+    let v = n_popv(inout n)
+    let vh = n.h
+    let a = n_popv(inout n)
+    let ah = n.h
+    let size = [4, 8, 4, 8, 1, 2, 1, 2, 4][op - 54]
+    // the value: an immediate, xmm0, or rcx (taken first: it may be in rax)
+    let imm = v.kind == 1 and (size < 8 or fits32(v.v))
+    let in_xmm = v.kind == 5 and (op == 57 or op == 56)
+    if not imm and not in_xmm { n_get(inout n, v, vh, rcx(), true) }
+    let at = n_address(inout n, a, ah, off)
+    let index = if at.0 { -1 } else { rax() }
+    if in_xmm {
+        if op == 57 { x_movsd_store(inout n.x, r15(), index, at.1, 0) } else { x_movss_store(inout n.x, r15(), index, at.1, 0) }
+    } else if imm {
+        x_store_imm_n(inout n.x, size, r15(), index, at.1, v.v)
+    } else {
+        x_store_n(inout n.x, size, rcx(), r15(), index, at.1)
     }
-    x_load(inout n.x, rcx(), rbp(), v)
-    x_store_n(inout n.x, [4, 8, 4, 8, 1, 2, 1, 2, 4][op - 54], rcx(), r15(), rax(), off)
+}
+
+// select: v1 if the condition holds, else v2
+fn n_select(inout n: Nat) {
+    let c = n_popv(inout n)
+    let ch = n.h
+    let v2 = n_popv(inout n)
+    let v2h = n.h
+    let v1 = n_popv(inout n)
+    let v1h = n.h
+    if c.kind == 1 {
+        // known now
+        let v = if bit_and(c.v, 4294967295) != 0 { v1 } else { v2 }
+        n_get(inout n, v, if bit_and(c.v, 4294967295) != 0 { v1h } else { v2h }, rax(), true)
+        n_put(inout n, 3, 0)
+        return
+    }
+    if c.kind == 3 { x_mov32(inout n.x, rdx(), rax()) }
+    // (moves only: a comparison's flags stay)
+    n_get(inout n, v2, v2h, rcx(), true)
+    n_get(inout n, v1, v1h, rax(), true)
+    var cc = 0
+    if c.kind == 4 {
+        cc = c.v
+    } else if c.kind == 3 {
+        x_test(inout n.x, false, rdx(), rdx())
+        cc = cc_ne()
+    } else if n_reg(n, c) >= 0 {
+        x_test(inout n.x, false, n_reg(n, c), n_reg(n, c))
+        cc = cc_ne()
+    } else {
+        let m = n_mem(n, c, ch)
+        x_rm(inout n.x, 0, false, [131], 7, rbp(), -1, m.1)
+        xb(inout n.x, 0)
+        cc = cc_ne()
+    }
+    x_cmov(inout n.x, bit_xor(cc, 1), rax(), rcx())
+    n_put(inout n, 3, 0)
+}
+
+// local.set (or local.tee: the value stays on the stack)
+fn n_set_local(inout n: Nat, j: i64, tee: bool) {
+    if tee {
+        let k = n.h - 1
+        let v = n.vals[k]
+        if v.kind == 2 and v.v == j { return }
+        n_flush_local(inout n, j, k)
+        if v.kind == 4 {
+            n_get(inout n, v, k, rax(), true)
+            n.vals[k] = nv(3, 0)
+        }
+        n_to_local(inout n, n.vals[k], k, j)
+        return
+    }
+    let v = n_popv(inout n)
+    let vh = n.h
+    if v.kind == 2 and v.v == j { return }
+    n_flush_local(inout n, j, -1)
+    n_to_local(inout n, v, vh, j)
+}
+
+// local j <- the value at height h
+fn n_to_local(inout n: Nat, v: NVal, h: i64, j: i64) {
+    let r = n.lreg[j]
+    if r >= 0 {
+        n_get(inout n, v, h, r, true)
+    } else {
+        n_put_at(inout n, v, h, rbp(), n_local(n, j))
+    }
+}
+
+// How much each local is used: its gets, sets and tees, 8 times more in each loop around them
+// (up to 8^5), with no instruction translated.
+fn n_weights(inout n: Nat) -> List[i64] {
+    var w: List[i64] = []
+    for j in 0..n.np + n.nl { w.push(0) }
+    var open: List[i64] = []
+    var loops = 0
+    n.pos = 0
+    let depth0 = n.dead_depth
+    while n.pos < len(n.code) {
+        let op = n_byte(inout n)
+        if op == 11 {
+            if len(open) == 0 { break }
+            let k = open.pop()
+            if k == 3 { loops -= 1 }
+        } else if op == 32 or op == 33 or op == 34 {
+            let j = n_u(inout n)
+            var add = 1
+            for i in 0..min(loops, 5) { add = add * 8 }
+            if j < len(w) { w[j] = w[j] + add }
+        } else {
+            if op == 2 or op == 3 or op == 4 {
+                open.push(op)
+                if op == 3 { loops += 1 }
+            }
+            n_skip(inout n, op)
+        }
+    }
+    n.dead_depth = depth0
+    n.pos = 0
+    w
+}
+
+// The registers of the locals used most (at least 3 times, by weight): up to six.
+fn n_alloc_regs(inout n: Nat) {
+    let total = n.np + n.nl
+    n.lreg = []
+    n.saved = []
+    for j in 0..total { n.lreg.push(-1) }
+    let w = n_weights(inout n)
+    let regs = [rbx(), rsi(), rdi(), 12, 13, 14]
+    var taken = 0
+    while taken < len(regs) {
+        var best = -1
+        for j in 0..total {
+            if n.lreg[j] < 0 and w[j] >= 3 and (best < 0 or w[j] > w[best]) { best = j }
+        }
+        if best < 0 { break }
+        n.lreg[best] = regs[taken]
+        n.saved.push(regs[taken])
+        taken += 1
+    }
 }
 
 // One instruction (its opcode read). True at the function's end.
@@ -643,31 +1153,33 @@ fn n_inst(inout n: Nat, op: i64) -> bool {
     } else if op == 11 {
         return n_end(inout n)
     } else if op == 12 {
+        n_flush(inout n)
         n_branch(inout n, n_u(inout n))
         n.dead = true
     } else if op == 13 {
         let depth = n_u(inout n)
-        let d = n_pop(inout n)
-        x_load32(inout n.x, rax(), rbp(), d)
-        x_test(inout n.x, false, rax(), rax())
+        let c = n_popv(inout n)
+        let cc = n_cond(inout n, c, n.h)
+        n_flush(inout n)
         if n_branch_moves(n, depth) {
             let skip = x_label(inout n.x)
-            x_jcc(inout n.x, cc_e(), skip)
+            x_jcc(inout n.x, bit_xor(cc, 1), skip)
             n_branch(inout n, depth)
             x_bind(inout n.x, skip)
         } else {
-            let c = n_ctl(n, depth)
-            x_jcc(inout n.x, cc_ne(), c.label)
+            let t = n_ctl(n, depth)
+            x_jcc(inout n.x, cc, t.label)
         }
     } else if op == 14 {
         let k = n_u(inout n)
         var ds: List[i64] = []
         for i in 0..k + 1 { ds.push(n_u(inout n)) }
-        let d = n_pop(inout n)
+        let c = n_popv(inout n)
+        n_get(inout n, c, n.h, rdx(), false)
+        n_flush(inout n)
         for i in 0..k {
             let next = x_label(inout n.x)
-            x_load32(inout n.x, rax(), rbp(), d)
-            x_alu_i(inout n.x, 7, false, rax(), i)
+            x_alu_i(inout n.x, 7, false, rdx(), i)
             x_jcc(inout n.x, cc_ne(), next)
             n_branch(inout n, ds[i])
             x_bind(inout n.x, next)
@@ -675,6 +1187,7 @@ fn n_inst(inout n: Nat, op: i64) -> bool {
         n_branch(inout n, ds[k])
         n.dead = true
     } else if op == 15 {
+        n_flush(inout n)
         n_branch(inout n, len(n.ctl) - 1)
         n.dead = true
     } else if op == 16 {
@@ -684,63 +1197,51 @@ fn n_inst(inout n: Nat, op: i64) -> bool {
         let _ = n_u(inout n)
         n_call_indirect(inout n, ti)
     } else if op == 26 {
-        let _ = n_pop(inout n)
+        let _ = n_popv(inout n)
     } else if op == 27 or op == 28 {
         if op == 28 {
             let k = n_u(inout n)
             n.pos += k
         }
-        let c = n_pop(inout n)
-        let v2 = n_pop(inout n)
-        let v1 = n_top(n)
-        x_load32(inout n.x, rcx(), rbp(), c)
-        x_load(inout n.x, rax(), rbp(), v1)
-        x_test(inout n.x, false, rcx(), rcx())
-        x_cmov_m(inout n.x, cc_e(), rax(), rbp(), v2)
-        x_store(inout n.x, rbp(), v1, rax())
+        n_select(inout n)
     } else if op == 32 {
-        let j = n_u(inout n)
-        x_load(inout n.x, rax(), rbp(), n_local(n, j))
-        x_store(inout n.x, rbp(), n_push(inout n), rax())
+        n_pushv(inout n, 2, n_u(inout n))
     } else if op == 33 {
-        let j = n_u(inout n)
-        x_load(inout n.x, rax(), rbp(), n_pop(inout n))
-        x_store(inout n.x, rbp(), n_local(n, j), rax())
+        n_set_local(inout n, n_u(inout n), false)
     } else if op == 34 {
-        let j = n_u(inout n)
-        x_load(inout n.x, rax(), rbp(), n_top(n))
-        x_store(inout n.x, rbp(), n_local(n, j), rax())
+        n_set_local(inout n, n_u(inout n), true)
     } else if op == 35 {
         let g = n_u(inout n)
+        n_settle(inout n)
         x_load(inout n.x, rax(), r15(), n_global(g))
-        x_store(inout n.x, rbp(), n_push(inout n), rax())
+        n_put(inout n, 3, 0)
     } else if op == 36 {
         let g = n_u(inout n)
-        x_load(inout n.x, rax(), rbp(), n_pop(inout n))
-        x_store(inout n.x, r15(), n_global(g), rax())
+        let v = n_popv(inout n)
+        n_put_at(inout n, v, n.h, r15(), n_global(g))
     } else if op >= 40 and op <= 53 {
         n_load(inout n, op)
     } else if op >= 54 and op <= 62 {
         n_store(inout n, op)
     } else if op == 63 {
         n.pos += 1
+        n_settle(inout n)
         x_load(inout n.x, rax(), r15(), n_pages_at())
-        x_store(inout n.x, rbp(), n_push(inout n), rax())
+        n_put(inout n, 3, 0)
     } else if op == 64 {
         n.pos += 1
-        let a = n_top(n)
-        x_load32(inout n.x, rcx(), rbp(), a)
+        let a = n_popv(inout n)
+        n_get(inout n, a, n.h, rcx(), false)
         x_call(inout n.x, n.grow_l)
-        x_store(inout n.x, rbp(), a, rax())
-    } else if op == 65 or op == 66 or op == 67 or op == 68 {
-        let v = if op == 65 or op == 66 { n_s(inout n) } else { n_fixed(inout n, if op == 67 { 4 } else { 8 }) }
-        let d = n_push(inout n)
-        if fits32(v) {
-            x_store_imm(inout n.x, rbp(), d, v)
-        } else {
-            x_imm(inout n.x, rax(), v)
-            x_store(inout n.x, rbp(), d, rax())
-        }
+        n_put(inout n, 3, 0)
+    } else if op == 65 {
+        n_pushv(inout n, 1, n_i32(n_s(inout n)))
+    } else if op == 66 {
+        n_pushv(inout n, 1, n_s(inout n))
+    } else if op == 67 {
+        n_pushv(inout n, 1, n_fixed(inout n, 4))
+    } else if op == 68 {
+        n_pushv(inout n, 1, n_fixed(inout n, 8))
     } else if op == 69 {
         n_eqz(inout n, false)
     } else if op >= 70 and op <= 79 {
@@ -761,42 +1262,74 @@ fn n_inst(inout n: Nat, op: i64) -> bool {
         n_arith(inout n, true, op - 124)
     } else if op >= 153 and op <= 166 {
         n_farith(inout n, op - 153)
-    } else if op == 167 or op == 188 or op == 189 or op == 190 or op == 191 {
-        // wrap and the reinterpretations: the same bits
+    } else if op == 167 {
+        // wrap: the low 32 bits (a constant keeps them with their sign)
+        let k = n.h - 1
+        let v = n.vals[k]
+        if v.kind == 1 { n.vals[k] = nv(1, n_i32(v.v)) }
+    } else if op == 188 or op == 189 or op == 190 or op == 191 {
+        // the reinterpretations: the same bits (a float's from xmm0 to rax)
+        let k = n.h - 1
+        if n.vals[k].kind == 5 {
+            x_movq_rx(inout n.x, rax(), 0)
+            n.vals[k] = nv(3, 0)
+        }
     } else if op == 170 {
         n_trunc(inout n, false)
     } else if op == 176 {
         n_trunc(inout n, true)
     } else if op == 172 or op == 196 {
-        let a = n_top(n)
-        x_load32s(inout n.x, rax(), rbp(), a)
-        x_store(inout n.x, rbp(), a, rax())
+        let a = n_popv(inout n)
+        let ah = n.h
+        if a.kind == 1 {
+            n_put(inout n, 1, n_i32(a.v))
+        } else {
+            let m = n_mem(n, a, ah)
+            if m.0 {
+                x_load32s(inout n.x, rax(), rbp(), m.1)
+            } else {
+                n_get(inout n, a, ah, rax(), false)
+                x_movsxd(inout n.x, rax(), rax())
+            }
+            n_put(inout n, 3, 0)
+        }
     } else if op == 173 {
-        let a = n_top(n)
-        x_load32(inout n.x, rax(), rbp(), a)
-        x_store(inout n.x, rbp(), a, rax())
+        let a = n_popv(inout n)
+        if a.kind == 1 {
+            n_put(inout n, 1, bit_and(a.v, 4294967295))
+        } else {
+            n_get(inout n, a, n.h, rax(), false)
+            n_put(inout n, 3, 0)
+        }
     } else if op >= 192 and op <= 195 {
         // extend8_s, extend16_s of i32 and i64
-        let a = n_top(n)
+        let a = n_popv(inout n)
         let w = op >= 194
-        let kind = if op == 192 or op == 194 { 1 } else { 3 }
-        x_load_kind(inout n.x, kind, w, rax(), rbp(), -1, a)
-        x_store(inout n.x, rbp(), a, rax())
+        n_get(inout n, a, n.h, rax(), w)
+        x_movsx_r(inout n.x, op == 192 or op == 194, w, rax())
+        n_put(inout n, 3, 0)
     } else if op == 183 or op == 184 or op == 185 {
-        let a = n_top(n)
-        if op == 183 { x_load32s(inout n.x, rax(), rbp(), a) } else if op == 184 { x_load32(inout n.x, rax(), rbp(), a) } else { x_load(inout n.x, rax(), rbp(), a) }
+        let a = n_popv(inout n)
+        let ah = n.h
+        if op == 183 {
+            n_get(inout n, a, ah, rax(), false)
+            x_movsxd(inout n.x, rax(), rax())
+        } else {
+            n_get(inout n, a, ah, rax(), op == 185)
+        }
         x_cvtsi2sd(inout n.x, 0, rax())
-        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        n_fresult(inout n)
     } else if op == 182 {
-        let a = n_top(n)
-        x_movsd_load(inout n.x, 0, rbp(), -1, a)
+        let a = n_popv(inout n)
+        n_getx(inout n, a, n.h, 0)
         x_cvtsd2ss(inout n.x, 0, 0)
-        x_movss_store(inout n.x, rbp(), -1, a, 0)
+        n_fresult(inout n)
     } else if op == 187 {
-        let a = n_top(n)
-        x_movss_load(inout n.x, 0, rbp(), -1, a)
+        let a = n_popv(inout n)
+        n_get(inout n, a, n.h, rax(), false)
+        x_movq_xr(inout n.x, 0, rax())
         x_cvtss2sd(inout n.x, 0, 0)
-        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        n_fresult(inout n)
     } else {
         n_fail(inout n, "the instruction " + to_hex(op, 2))
     }
@@ -840,6 +1373,8 @@ fn n_func(inout n: Nat, k: i64) {
     }
     n.code = f.code
     n.pos = 0
+    n_alloc_regs(inout n)
+    n.vals = []
     n.h = 0
     n.max_h = 0
     n.max_out = 0
@@ -852,9 +1387,16 @@ fn n_func(inout n: Nat, k: i64) {
     x_rr(inout n.x, 0, true, [129], 5, rsp())
     n.frame_at = len(n.x.code)
     x_i32(inout n.x, 0)
+    for i in 0..len(n.saved) { x_store(inout n.x, rbp(), n_saved_at(n, i), n.saved[i]) }
+    for j in 0..n.np {
+        if n.lreg[j] >= 0 { x_load(inout n.x, n.lreg[j], rbp(), n_local(n, j)) }
+    }
     if n.nl > 0 {
         x_imm(inout n.x, rax(), 0)
-        for j in 0..n.nl { x_store(inout n.x, rbp(), -8 * (1 + j), rax()) }
+        for j in 0..n.nl {
+            let r = n.lreg[n.np + j]
+            if r >= 0 { x_imm(inout n.x, r, 0) } else { x_store(inout n.x, rbp(), -8 * (1 + j), rax()) }
+        }
     }
     var done = false
     while not done and not n.failed {
@@ -864,7 +1406,7 @@ fn n_func(inout n: Nat, k: i64) {
         }
         done = n_inst(inout n, n_byte(inout n))
     }
-    let frame = (8 * (n.nl + n.max_h) + n.max_out + 15) / 16 * 16
+    let frame = (8 * (n.nl + len(n.saved) + n.max_h) + n.max_out + 15) / 16 * 16
     x_patch32(inout n.x, n.frame_at, frame)
 }
 
@@ -924,7 +1466,7 @@ fn native_exe(m: WMod) -> (bool, Bytes, str) {
     var n = Nat {
         x: x64_new(), m: m, nimp: len(m.imports), labels: [], impl_of: [], k32: [], k32_of: [:], base_fn: -1,
         grow_l: 0, trap_l: 0, table_l: 0, iat_at: 0, failed: false, msg: "",
-        code: [], pos: 0, np: 0, nl: 0, ltypes: [], result: 0, h: 0, max_h: 0, max_out: 0, ctl: [], dead: false, dead_depth: 0, frame_at: 0,
+        code: [], pos: 0, np: 0, nl: 0, result: 0, lreg: [], saved: [], vals: [], h: 0, max_h: 0, max_out: 0, ctl: [], dead: false, dead_depth: 0, frame_at: 0,
     }
     let total = n.nimp + len(m.funcs)
     for i in 0..total { n.labels.push(if i < n.nimp { -1 } else { x_label(inout n.x) }) }

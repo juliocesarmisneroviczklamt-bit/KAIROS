@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.21.0 (M21)
+## Estado: v0.22.0 (M22)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -46,7 +46,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo | ✅ 42 mil entregas (2010–2026) num painel mês a mês ao lado do da B3 ([`lab/cvm.krs`](kairos/lab/cvm.krs)): cada número só vale do dia em que a CVM recebeu a versão que o traz; 0 de 142.648 valores fora da regra; a linguagem distingue o tempo que prova do que não conhece (o que vem de arquivo leva uma marca que só `observed` tira, sem apagar um uso do futuro provado) |
 | M20 | texto formatado: `f"{name} {ym}: {equity / 1e9:.1} bi"` | ✅ o léxico o escreve como a concatenação (`str` e `format_fixed`), e o resto do compilador não muda; os dois léxicos dão os mesmos tokens e erros, e as três implementações a mesma saída |
 | M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 ([`native.krs`](kairos/compiler/native.krs)) e gravado como executável do Windows, com o sistema operacional também em Kairós ([`rt_win.krs`](kairos/compiler/rt_win.krs), sobre a `kernel32.dll`) | ✅ os programas de teste (inclusive os 10 com os dados da B3, com o mesmo registro e o mesmo livro-razão) saem iguais ao interpretador; o comando `kairos` como executável é igual ao Rust; o compilador nativo (`kn.exe`) compila a si mesmo nos mesmos bytes, sem Rust e sem runtime de WebAssembly |
-| M22 | desempenho do código nativo (a pilha de valores em registradores) e executáveis ELF para Linux | meta: o `momentum` nativo mais rápido que o interpretador Rust (hoje 6,5 s contra 1,5 s) |
+| M22 | desempenho do código nativo: a pilha de valores preguiçosa (constantes, locais, o topo em `rax`/`xmm0`, comparações direto nos saltos) e os locais mais usados em registradores | ✅ os mesmos números; o compilador nativo se compila em 11 s (eram 31) com metade do tamanho; o `momentum` caiu de 6,5 s para 2,2 s (V8: 1,7 s); laços puros 4× mais rápidos que o interpretador Rust com JIT |
+| M23 | executáveis ELF para Linux x86-64, com o sistema operacional em Kairós sobre as chamadas do kernel | próximo |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

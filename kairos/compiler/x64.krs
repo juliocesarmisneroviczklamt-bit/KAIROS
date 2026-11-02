@@ -162,6 +162,48 @@ fn x_imm(inout x: X64, reg: i64, v: i64) {
     }
 }
 
+// reg <- a constant, leaving the flags as they are (no xor)
+fn x_mov_imm(inout x: X64, reg: i64, v: i64) {
+    if v >= 0 and v <= 4294967295 {
+        x_rex(inout x, false, 0, 0, reg, false)
+        xb(inout x, 184 + bit_and(reg, 7))
+        x_i32(inout x, v)
+    } else if fits32(v) {
+        x_rr(inout x, 0, true, [199], 0, reg)
+        x_i32(inout x, v)
+    } else {
+        x_rex(inout x, true, 0, 0, reg, false)
+        xb(inout x, 184 + bit_and(reg, 7))
+        x_i64(inout x, v)
+    }
+}
+
+// [base + index + disp] <- the low `bytes` (1, 2, 4 or 8) of a constant (8: one that fits in 32
+// bits with its sign)
+fn x_store_imm_n(inout x: X64, bytes_: i64, base: i64, index: i64, disp: i64, v: i64) {
+    if bytes_ == 1 {
+        x_rm(inout x, 0, false, [198], 0, base, index, disp)
+        xb(inout x, v)
+    } else if bytes_ == 2 {
+        x_rm(inout x, 102, false, [199], 0, base, index, disp)
+        xb(inout x, v)
+        xb(inout x, shr(v, 8))
+    } else {
+        x_rm(inout x, 0, bytes_ == 8, [199], 0, base, index, disp)
+        x_i32(inout x, v)
+    }
+}
+
+// dst <- src when the condition holds, 64 bits
+fn x_cmov(inout x: X64, cc: i64, dst: i64, src: i64) {
+    x_rr(inout x, 0, true, [15, 64 + cc], dst, src)
+}
+
+// reg <- its low 8 (byte) or 16 bits with their sign (w: to 64 bits)
+fn x_movsx_r(inout x: X64, byte: bool, w: bool, reg: i64) {
+    x_rr(inout x, 0, w, [15, if byte { 190 } else { 191 }], reg, reg)
+}
+
 // [base + disp] <- a constant that fits in 32 bits with its sign, 64 bits
 fn x_store_imm(inout x: X64, base: i64, disp: i64, v: i64) {
     x_rm(inout x, 0, true, [199], 0, base, -1, disp)
@@ -319,6 +361,11 @@ fn x_movsd_load(inout x: X64, xmm: i64, base: i64, index: i64, disp: i64) {
 
 fn x_movsd_store(inout x: X64, base: i64, index: i64, disp: i64, xmm: i64) {
     x_rm(inout x, 242, false, [15, 17], xmm, base, index, disp)
+}
+
+// dst <- src, the low 64 bits of an xmm register (movsd xmm, xmm)
+fn x_movsd_rr(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 242, false, [15, 16], dst, src)
 }
 
 // 32-bit floats (movss)

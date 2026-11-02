@@ -764,7 +764,8 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo (§20) | ✅ 42 mil entregas num painel mês a mês; 0 de 142.648 valores fora da regra; o tempo desconhecido do que vem de fora separado do tempo provado |
 | M20 | texto formatado `f"..."` (§21) | ✅ o léxico o escreve como a concatenação, e o resto do compilador não muda; os mesmos tokens e erros nos dois léxicos e a mesma saída nas três implementações; o relatório da CVM, reescrito com ele, sai igual |
 | M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 e gravado como executável do Windows, com a camada do sistema operacional em Kairós (§22) | ✅ os programas de teste (62 + 31 + 10 com os dados da B3) saem iguais ao interpretador, inclusive o registro e o livro-razão; o comando `kairos` nativo é igual ao Rust; o compilador nativo compila a si mesmo nos mesmos bytes |
-| M22 | desempenho do código nativo (pilha de valores em registradores) e executáveis ELF para Linux | o `momentum` nativo mais rápido que o interpretador Rust, com os mesmos números |
+| M22 | desempenho do código nativo: a pilha de valores preguiçosa e os locais em registradores (§23) | ✅ os mesmos números em todos os programas; o compilador nativo se compila em 11 s (eram 24), com metade do tamanho; o `momentum` cai de 6,5 s para 2,2 s (o V8 faz 1,7 s, e o interpretador Rust, com a ponte da B3 em Rust, 1,5 s); laços puros 4× mais rápidos que o interpretador Rust com seu JIT |
+| M23 | executáveis ELF para Linux x86-64, com o sistema operacional em Kairós sobre as chamadas do kernel | os programas de teste saem iguais no Linux do CI, e o compilador se compila lá num ponto fixo |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -1149,6 +1150,41 @@ O próprio compilador vira executável (`kn.krs` → `kn.exe`, 5,9 MB). Daí em 
 - **os testes:** `tests/native_x64.rs` (só no Windows x86-64 e em release) e o job `native-x64` do CI. As releases trazem `kairos-selfhost.exe`.
 
 **Limites:**
-- **Desempenho:** o código ainda é o de base, e cada valor passa pela memória. O `momentum` leva 6,5 s, contra 1,5 s no interpretador Rust (§13, M22).
-- **Plataforma:** só Windows x86-64 por enquanto. O processador precisa de SSE4.1.
+- **Desempenho:** no M21, o código era o de base, e cada valor passava pela memória. O `momentum` levava 6,5 s, contra 1,5 s no interpretador Rust. O M22 (§23) baixou para 2,2 s.
+- **Plataforma:** só Windows x86-64 por enquanto (Linux: M23). O processador precisa de SSE4.1.
 - **Rede:** não há, como no WebAssembly.
+
+## 23. O código nativo mais rápido (M22, v0.22.0)
+
+O tradutor do M21 punha cada valor da pilha do WebAssembly no seu lugar do quadro, e cada instrução lia e gravava a memória. Agora ele adia isso.
+
+**A pilha de valores preguiçosa.** Até uma instrução precisar dele, o tradutor guarda cada valor como uma de cinco coisas:
+- uma constante;
+- o valor de um local;
+- o topo da pilha em `rax`, ou em `xmm0` se for um float;
+- uma comparação nos flags, que vai direto para o salto de `br_if` e `if` (`cmp` + `jl`, sem `setcc`).
+
+O resultado de uma conta fica no registrador para a seguinte. Um operando constante vira imediato, e um local vira operando de memória ou de registrador. Os valores vão para os seus lugares só quando é preciso:
+- antes de um salto e no começo e no fim de um bloco, para que todos os caminhos se encontrem no mesmo estado;
+- quando outro valor ocupa o topo;
+- antes de uma chamada, que destrói os registradores.
+
+**Os locais em registradores.** Os seis locais mais usados de cada função vivem em `rbx`, `rsi`, `rdi`, `r12`, `r13` e `r14`, que a `kernel32` preserva. Cada uso conta, e conta oito vezes mais dentro de cada laço. Uma função guarda no prólogo os registradores que usa e os devolve no fim.
+
+**Medido** (Windows x86-64, os mesmos números em todos os casos):
+
+| programa | M21 | M22 | referência |
+|---|---|---|---|
+| `kn.exe` compila a si mesmo e o comando `kairos` | 31 s | 11 s | o `kn.krs` no interpretador Rust: 3 min |
+| tamanho do `kn.exe` | 5,9 MB | 3,1 MB | |
+| `momentum` (`examples/momentum.krs`, dados da B3) | 6,5 s | 2,2 s | V8 (node) com o mesmo módulo: 1,7 s; interpretador Rust: 1,5 s |
+| o mais lento de `tests/wasm_b3` (`protocol.krs`) | 8,1 s | 3,1 s | interpretador Rust: 1,1 s |
+| laço de inteiros e floats (`for`, `+=`, `*`) | | 0,12 s | interpretador Rust com o JIT do M7: 0,47 s |
+
+**O que falta.** No `momentum`, o interpretador Rust ainda ganha porque a ponte da B3 dele (ler o `panel.bin`, os tensores) é código Rust, enquanto o executável roda a ponte e os tensores escritos em Kairós. O V8, com um compilador que otimiza o mesmo módulo, faz 1,7 s: é a distância até um compilador otimizador.
+
+**Conferido:**
+- **o ponto fixo**, como no M21: o `kn.exe` compila a si mesmo nos mesmos bytes. Ele achou um erro que os 62 programas de teste não pegavam: uma chamada sem argumentos destruía o topo guardado em `rax` (`x + f()`). O erro está corrigido e virou o teste `tests/wasm/native_calls.krs`;
+- **os programas:** os 63 de `tests/wasm`, os 31 dourados que rodam e os 10 com os dados da B3 saem iguais ao interpretador, com o mesmo registro e o mesmo livro-razão;
+- **o comando:** o `kairos` como executável é igual ao Rust nas 62 linhas e sessões.
+
