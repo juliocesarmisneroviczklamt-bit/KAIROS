@@ -22,6 +22,8 @@ pub const STD: &[(&str, &str)] = &[
     ("std/csv.krs", include_str!("../std/csv.krs")),
     ("std/dates.krs", include_str!("../std/dates.krs")),
     ("std/base64.krs", include_str!("../std/base64.krs")),
+    ("std/stats.krs", include_str!("../std/stats.krs")),
+    ("std/sim.krs", include_str!("../std/sim.krs")),
 ];
 
 pub struct Session {

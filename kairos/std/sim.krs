@@ -1,0 +1,361 @@
+// The lab's realistic simulator, written in Kairós (it was quant-b3's src/backtest.rs):
+// `b3.evaluate` and `b3.simulate` check the weights and the holdout, then run it.
+//
+// - The cost of each trade: B3's fees + half the real spread (the median of the last 21
+//   sessions, from the best bid and ask at the close) + market impact k·σ·√(order / daily volume).
+// - An optional delay of execution (`lag`, in sessions).
+// - Capacity: the largest position is cap_adv × the median daily volume.
+// - The individual investor's income tax (today's rules, over the whole period): 15% of the
+//   month's net gain on stocks; exempt when the month's sales add up to R$ 20 thousand or less;
+//   losses carried forward; average purchase cost; 15% withheld on JCP; dividends exempt.
+// - What is not in stocks earns the CDI.
+//
+// The sums run in the order Rust ran them (positions by asset), so the results are the same bits.
+import "std/stats.krs"
+
+// The panel compactly, as the runtime gives it: the sessions each asset traded, asset after
+// asset (the rows of asset t are first[t] .. first[t + 1]), up to where the program may see.
+struct PanelDays {
+    first: List[i64],
+    di: List[i64],      // the session (index in the calendar)
+    r: List[f64],       // total return since the asset's previous session
+    vol: List[f64],     // traded volume (R$)
+    div: List[f64],     // the part of r from dividends
+    jcp: List[f64],     // the part of r from JCP (gross)
+    spr: List[f64],     // relative bid-ask spread at the close (NaN without both)
+    px: List[f64],      // unadjusted close
+}
+
+struct Calendar {
+    dates: List[i64],        // YYYYMMDD of every session
+    month_first: List[i64],  // the first session of every month
+    cdi: List[f64],          // the CDI of every session (fraction)
+}
+
+struct SimCfg {
+    capital: f64,       // in R$ of the start
+    lag: i64,           // sessions between the decision (a month's last close) and the trade
+    real_costs: bool,
+    cost_bps: f64,      // when not real_costs
+    tax: bool,
+    cap_adv: f64,       // 0: no capacity limit
+}
+
+struct SimRun {
+    mi: List[i64],          // the months simulated
+    ret: List[f64],         // the month's return of the whole wealth, after costs and tax
+    turnover: List[f64],
+    exposure: List[f64],
+    cost_paid: f64,
+    traded: f64,
+    tax_paid: f64,
+    jcp_withheld: f64,
+    final_value: f64,
+    liq_value: f64,         // the final value selling everything and paying the tax on the gain
+    exempt_months: i64,
+    taxed_months: i64,
+    capped_frac: f64,       // the part of the target value cut for lack of liquidity
+}
+
+struct Liq {
+    half_spread: f64,
+    sigma: f64,
+    adv: f64,
+}
+
+// The first row of asset t at session `s` or later.
+fn sim_row(p: PanelDays, t: i64, s: i64) -> i64 {
+    var lo = p.first[t]
+    var hi = p.first[t + 1]
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if p.di[mid] < s { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+// the upper median (the middle value, sorted)
+fn sim_median(v: List[f64]) -> f64 {
+    var xs = v
+    xs.sort()
+    xs[len(xs) / 2]
+}
+
+// The asset's liquidity with data up to session s - 1 (nothing from the future).
+fn sim_liq(p: PanelDays, t: i64, s: i64) -> Liq {
+    let hi = sim_row(p, t, s)
+    var vols = []
+    var rs = []
+    for k in max(hi - 63, p.first[t])..hi {
+        vols.push(p.vol[k])
+        rs.push(p.r[k])
+    }
+    let adv = if len(vols) == 0 { 0.0 } else { sim_median(vols) }
+    let sigma = stat_sd(rs)
+    var sprs = []
+    for k in max(hi - 21, p.first[t])..hi {
+        let v = p.spr[k]
+        if not is_nan(v - v) and v >= 0.0 { sprs.push(v) }
+    }
+    // without bid and ask: a 4% spread (conservative)
+    let spr = if len(sprs) == 0 { 0.04 } else { sim_median(sprs) }
+    Liq {
+        half_spread: min(max(spr, 0.0002) / 2.0, 0.10),
+        sigma: if is_nan(sigma - sigma) { 0.03 } else { min(sigma, 0.20) },
+        adv: max(adv, 1.0),
+    }
+}
+
+fn sim_liq_cached(inout cache: Map[i64, Liq], p: PanelDays, t: i64, s: i64) -> Liq {
+    let key = t * 1000000 + s
+    if not contains(cache, key) { cache[key] = sim_liq(p, t, s) }
+    cache[key]
+}
+
+fn sim_cost(cfg: SimCfg, l: Liq, amt: f64) -> f64 {
+    if cfg.real_costs { amt * (0.0003 + l.half_spread + 0.5 * l.sigma * sqrt(amt / l.adv)) } else { amt * cfg.cost_bps / 10000.0 }
+}
+
+// the value of the positions, by asset
+fn sim_held_value(held: List[i64], val: Map[i64, f64]) -> f64 {
+    var s = 0.0
+    for t in held { s += val[t] }
+    s
+}
+
+// Monthly plans (month, assets, weights; a weight is a fraction of the wealth, what is left earns
+// the CDI) through the market, session by session.
+fn sim_run(p: PanelDays, cal: Calendar, plan_m: List[i64], plan_t: List[List[i64]], plan_w: List[List[f64]], cfg: SimCfg) -> SimRun {
+    let nd = len(cal.dates)
+    let nm = len(cal.month_first)
+    var cache: Map[i64, Liq] = [:]
+    var cash = cfg.capital
+    var held: List[i64] = []            // the assets in the portfolio, in order
+    var val: Map[i64, f64] = [:]
+    var basis: Map[i64, f64] = [:]
+    var carry = 0.0                     // losses to offset
+    var capped = 0.0
+    var targeted = 0.0
+    var mis = []
+    var rets = []
+    var turns = []
+    var exps = []
+    var cost_paid = 0.0
+    var traded_all = 0.0
+    var tax_paid = 0.0
+    var jcp_withheld = 0.0
+    var exempt_months = 0
+    var taxed_months = 0
+    for k in 0..len(plan_m) {
+        let mi = plan_m[k]
+        let raw_s = cal.month_first[mi] + cfg.lag
+        if raw_s == 0 or raw_s > nd { break }
+        let s = min(raw_s, nd)
+        let e = min(if mi + 1 < nm { cal.month_first[mi + 1] + cfg.lag } else { nd }, nd)
+        let v0 = cash + sim_held_value(held, val)
+        if v0 <= 0.0 { break }
+        // the targets (with the capacity limit)
+        var target: Map[i64, f64] = [:]
+        for j in 0..len(plan_t[k]) {
+            let t = plan_t[k][j]
+            var tv = plan_w[k][j] * v0
+            targeted += tv
+            if cfg.cap_adv > 0.0 {
+                let cap = cfg.cap_adv * sim_liq_cached(inout cache, p, t, s).adv
+                if tv > cap {
+                    capped += tv - cap
+                    tv = cap
+                }
+            }
+            target[t] = get(target, t, 0.0) + tv
+        }
+        var ts = keys(target)
+        ts.sort()
+        // the sales first
+        var sales = 0.0
+        var realized = 0.0
+        var traded = 0.0
+        let eps = 0.0000001 * v0
+        for t in held {
+            let tv = get(target, t, 0.0)
+            let l = sim_liq_cached(inout cache, p, t, s)
+            if val[t] > tv + eps {
+                let sell = val[t] - tv
+                let c = sim_cost(cfg, l, sell)
+                let b_out = basis[t] * sell / val[t]
+                realized += sell - c - b_out
+                basis[t] = basis[t] - b_out
+                val[t] = val[t] - sell
+                cash += sell - c
+                cost_paid += c
+                sales += sell
+                traded += sell
+            }
+        }
+        var kept = []
+        for t in held {
+            if val[t] > eps {
+                kept.push(t)
+            } else {
+                remove(inout val, t)
+                remove(inout basis, t)
+            }
+        }
+        held = kept
+        // the purchases, limited to the cash there is
+        var buys = []
+        for t in ts {
+            let cur = get(val, t, 0.0)
+            let tv = target[t]
+            if tv > cur + eps {
+                let amt = tv - cur
+                buys.push((t, amt, sim_cost(cfg, sim_liq_cached(inout cache, p, t, s), amt)))
+            }
+        }
+        var need = 0.0
+        for b in buys { need += b.1 + b.2 }
+        let scale = if need > cash { max(cash / need, 0.0) } else { 1.0 }
+        for b in buys {
+            let t = b.0
+            let amt = b.1 * scale
+            let c = b.2 * scale
+            if amt <= 0.0 { continue }
+            cash -= amt + c
+            cost_paid += c
+            traded += amt
+            if not contains(val, t) {
+                val[t] = 0.0
+                basis[t] = 0.0
+                held.push(t)
+            }
+            val[t] = val[t] + amt
+            basis[t] = basis[t] + (amt + c)
+        }
+        held.sort()
+        // the portfolio through [s, e), session by session: the price moves the position, the
+        // dividends become cash
+        var cur_k = []
+        var end_k = []
+        for t in held {
+            cur_k.push(sim_row(p, t, s))
+            end_k.push(sim_row(p, t, e))
+        }
+        for di in s..e {
+            var income = 0.0
+            for h in 0..len(held) {
+                let k2 = cur_k[h]
+                if k2 < end_k[h] and p.di[k2] == di {
+                    cur_k[h] = k2 + 1
+                    let t = held[h]
+                    let dv = p.div[k2]
+                    let jc = p.jcp[k2]
+                    let jcp_net = if cfg.tax { 0.85 * jc } else { jc }
+                    if cfg.tax { jcp_withheld += val[t] * 0.15 * jc }
+                    income += val[t] * (dv + jcp_net)
+                    val[t] = val[t] * (1.0 + (p.r[k2] - dv - jc))
+                }
+            }
+            cash = cash * (1.0 + cal.cdi[di]) + income
+        }
+        // the income tax of the month of the sales
+        if cfg.tax and sales > 0.0 {
+            if sales <= 20000.0 {
+                exempt_months += 1
+                if realized < 0.0 { carry -= realized }
+            } else {
+                taxed_months += 1
+                let net = realized - carry
+                if net > 0.0 {
+                    let tax = 0.15 * net
+                    cash -= tax
+                    tax_paid += tax
+                    carry = 0.0
+                } else {
+                    carry = -net
+                }
+            }
+        }
+        if e > s {
+            let v1 = cash + sim_held_value(held, val)
+            mis.push(mi)
+            rets.push(v1 / v0 - 1.0)
+            turns.push(traded / v0)
+            var x = 0.0
+            for w in plan_w[k] { x += w }
+            exps.push(x)
+        }
+        traded_all += traded
+    }
+    let final_value = cash + sim_held_value(held, val)
+    var unreal = 0.0
+    for t in held { unreal += val[t] - basis[t] }
+    SimRun {
+        mi: mis,
+        ret: rets,
+        turnover: turns,
+        exposure: exps,
+        cost_paid: cost_paid,
+        traded: traded_all,
+        tax_paid: tax_paid,
+        jcp_withheld: jcp_withheld,
+        final_value: final_value,
+        liq_value: if cfg.tax { final_value - 0.15 * max(unreal - carry, 0.0) } else { final_value },
+        exempt_months: exempt_months,
+        taxed_months: taxed_months,
+        capped_frac: if targeted > 0.0 { capped / targeted } else { 0.0 },
+    }
+}
+
+struct SimEval {
+    cagr: f64,
+    vol: f64,
+    sharpe: f64,        // over the CDI
+    max_dd: f64,
+    beta: f64,          // CAPM against NEFIN's value-weighted market (NaN with less than 24 months)
+    alpha: f64,         // a year
+    t_alpha: f64,       // Newey-West
+    turnover: f64,      // a year
+    cost_bps: f64,      // per real traded
+}
+
+// The statistics of a simulation, as the lab computes them.
+fn sim_eval(run: SimRun) -> SimEval {
+    let cdi = b3.cdi()
+    var ex = []
+    for k in 0..len(run.mi) { ex.push(run.ret[k] - cdi[month: run.mi[k]]) }
+    // CAPM: the months with both of NEFIN's series
+    let rm = b3.nefin("rm_rf", vw: true)
+    let rf = b3.nefin("rf", vw: true)
+    let rf_ew = b3.nefin("rf")
+    var y = []
+    var x = []
+    for k in 0..len(run.mi) {
+        let m = run.mi[k]
+        if not is_nan(rf[month: m]) and not is_nan(rf_ew[month: m]) {
+            y.push(run.ret[k] - rf[month: m])
+            x.push(rm[month: m])
+        }
+    }
+    var beta = nan
+    var alpha = nan
+    var t_alpha = nan
+    if len(y) >= 24 {
+        let o = ols_nw(y, [x], nw_lags(len(y)))
+        if o.ok {
+            alpha = o.coef[0] * 12.0
+            beta = o.coef[1]
+            t_alpha = o.t[0]
+        }
+    }
+    SimEval {
+        cagr: stat_cagr(run.ret, 12.0),
+        vol: stat_sd(run.ret) * sqrt(12.0),
+        sharpe: stat_mean(ex) / stat_sd(ex) * sqrt(12.0),
+        max_dd: stat_max_dd(run.ret),
+        beta: beta,
+        alpha: alpha,
+        t_alpha: t_alpha,
+        turnover: stat_mean(run.turnover) * 12.0,
+        cost_bps: if run.traded > 0.0 { run.cost_paid / run.traded * 10000.0 } else { 0.0 },
+    }
+}

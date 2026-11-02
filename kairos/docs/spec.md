@@ -678,7 +678,18 @@ Opções de `b3.evaluate` e `b3.simulate`:
 
 Uma estratégia é uma tentativa: os mesmos pesos executados de novo, com outro custo, atraso, capital ou IR, não contam outra vez.
 
-**Ainda em Rust**, para os próximos marcos: o paper trading (`paper`), a coleta e a montagem dos dados e o simulador.
+**O simulador é escrito em Kairós (M11).** [`std/sim.krs`](../std/sim.krs) é carregado com o prelúdio, junto com [`std/stats.krs`](../std/stats.krs). `b3.evaluate` e `b3.simulate` dividem o trabalho em três partes:
+1. **O runtime confere:** holdout aberto, cerca dos dados, pesos válidos.
+2. **O simulador Kairós roda:** `sim_run`, com custos, impacto, atraso, capacidade e IR, e depois `sim_eval`, com CAGR, Sharpe sobre o CDI, maxDD e alpha CAPM com t de Newey-West.
+3. **O runtime registra a tentativa.**
+
+Detalhes:
+- **Dados:** o simulador recebe o painel em forma compacta, só os pregões em que cada ativo negociou, já cortado pela cerca.
+- **Resultados:** as somas seguem a ordem do simulador Rust, então os resultados são os mesmos bits.
+- **Testes:** um mercado sintético confere custo fixo e real, atrasos, limite de capacidade, meses isentos e tributados, prejuízo compensado e JCP retido em todos os ambientes do CI. Os cinco estudos do laboratório imprimem os mesmos relatórios.
+- **Referência:** `KAIROS_RUST_SIM=1` usa o simulador Rust antigo, só para comparação.
+
+**Ainda em Rust**, para os próximos marcos: o registro de tentativas e o livro-razão (garantias do runtime) e o paper trading (`paper`).
 
 ## 11. Reprodutibilidade e procedência
 

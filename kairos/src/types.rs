@@ -249,6 +249,16 @@ impl Checker {
         }
     }
 
+    /// A function of the program (or of the prelude) by name.
+    pub fn fn_id(&self, name: &str) -> Option<u32> {
+        self.fn_ids.get(name).copied()
+    }
+
+    /// A struct of the program (or of the prelude) by name.
+    pub fn struct_id(&self, name: &str) -> Option<u32> {
+        self.struct_ids.get(name).copied()
+    }
+
     pub fn main_slots(&self) -> u32 {
         self.main.n_slots
     }

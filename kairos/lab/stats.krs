@@ -1,224 +1,34 @@
-// The lab's statistics, written in Kairós: quant-b3's src/stats.rs (which this file replaces),
-// with the same operations in the same order, so the results are the same bits.
+// The lab's statistics: Kairós's standard library (std/stats.krs) under the lab's names.
+import "std/stats.krs"
 
 fn avg(x: List[f64]) -> f64 {
-    if len(x) == 0 { return nan }
-    var s = 0.0
-    for v in x { s += v }
-    s / float(len(x))
+    stat_mean(x)
 }
 
 // Sample standard deviation (n - 1).
 fn sd(x: List[f64]) -> f64 {
-    let n = len(x)
-    if n < 2 { return nan }
-    let m = avg(x)
-    var s = 0.0
-    for v in x { s += (v - m) * (v - m) }
-    sqrt(s / float(n - 1))
+    stat_sd(x)
 }
 
 fn corr(x: List[f64], y: List[f64]) -> f64 {
-    let n = min(len(x), len(y))
-    if n < 3 { return nan }
-    var sx = 0.0
-    var sy = 0.0
-    for i in 0..n {
-        sx += x[i]
-        sy += y[i]
-    }
-    let mx = sx / float(n)
-    let my = sy / float(n)
-    var sxy = 0.0
-    var sxx = 0.0
-    var syy = 0.0
-    for i in 0..n {
-        let a = x[i] - mx
-        let b = y[i] - my
-        sxy += a * b
-        sxx += a * a
-        syy += b * b
-    }
-    sxy / sqrt(sxx * syy)
+    stat_corr(x, y)
 }
 
 // The pairs where both are finite.
 fn corr_finite(x: List[f64], y: List[f64]) -> (f64, i64) {
-    var a = []
-    var b = []
-    for i in 0..min(len(x), len(y)) {
-        if not is_nan(x[i] - x[i]) and not is_nan(y[i] - y[i]) {
-            a.push(x[i])
-            b.push(y[i])
-        }
-    }
-    (corr(a, b), len(a))
+    stat_corr_finite(x, y)
 }
 
 // Compound annual growth; `ppy`: periods per year.
 fn cagr(x: List[f64], ppy: f64) -> f64 {
-    if len(x) == 0 { return nan }
-    var w = 1.0
-    for r in x { w *= 1.0 + r }
-    w ^ (ppy / float(len(x))) - 1.0
+    stat_cagr(x, ppy)
 }
 
 fn max_dd(x: List[f64]) -> f64 {
-    var w = 1.0
-    var peak = 1.0
-    var mdd = 0.0
-    for r in x {
-        w *= 1.0 + r
-        peak = max(peak, w)
-        mdd = min(mdd, w / peak - 1.0)
-    }
-    mdd
-}
-
-// Newey-West's rule of thumb for the number of lags.
-fn nw_lags(n: i64) -> i64 {
-    int(floor(4.0 * (float(n) / 100.0) ^ (2.0 / 9.0)))
-}
-
-// y = a + X b + e, with Newey-West t statistics. `ok` is false when it cannot be estimated.
-struct Ols {
-    coef: List[f64],   // [intercept, betas...]
-    t: List[f64],
-    r2: f64,
-    ok: bool,
-}
-
-// Gauss-Jordan with partial pivoting (the last row of the largest pivot, as Rust's `max_by`).
-// `m`: k x k, row by row. Empty when singular.
-fn invert(m: List[f64], k: i64) -> List[f64] {
-    let w = 2 * k
-    var a = []
-    for i in 0..k {
-        for j in 0..k { a.push(m[i * k + j]) }
-        for j in 0..k { a.push(if i == j { 1.0 } else { 0.0 }) }
-    }
-    for c in 0..k {
-        var piv = c
-        for r in c + 1..k {
-            if abs(a[r * w + c]) >= abs(a[piv * w + c]) { piv = r }
-        }
-        if abs(a[piv * w + c]) < 1e-14 { return [] }
-        if piv != c {
-            for j in 0..w {
-                let t = a[c * w + j]
-                a[c * w + j] = a[piv * w + j]
-                a[piv * w + j] = t
-            }
-        }
-        let d = a[c * w + c]
-        for j in 0..w { a[c * w + j] = a[c * w + j] / d }
-        for r in 0..k {
-            if r == c { continue }
-            let f = a[r * w + c]
-            if f != 0.0 {
-                for j in 0..w {
-                    let t = a[c * w + j]
-                    a[r * w + j] = a[r * w + j] - f * t
-                }
-            }
-        }
-    }
-    var out = []
-    for i in 0..k {
-        for j in 0..k { out.push(a[i * w + k + j]) }
-    }
-    out
-}
-
-fn matmul(a: List[f64], b: List[f64], k: i64) -> List[f64] {
-    var c = []
-    for i in 0..k * k { c.push(0.0) }
-    for i in 0..k {
-        for l in 0..k {
-            for j in 0..k {
-                c[i * k + j] = c[i * k + j] + a[i * k + l] * b[l * k + j]
-            }
-        }
-    }
-    c
-}
-
-fn ols_nw(y: List[f64], xs: List[List[f64]], lags: i64) -> Ols {
-    let n = len(y)
-    let k = len(xs) + 1
-    let fail = Ols { coef: [], t: [], r2: nan, ok: false }
-    if n <= k + 2 { return fail }
-    for x in xs {
-        if len(x) != n { return fail }
-    }
-    // the rows of X, with the intercept first
-    var rows = []
-    for i in 0..n {
-        rows.push(1.0)
-        for x in xs { rows.push(x[i]) }
-    }
-    var xtx = []
-    for i in 0..k * k { xtx.push(0.0) }
-    var xty = []
-    for i in 0..k { xty.push(0.0) }
-    for i in 0..n {
-        for a in 0..k {
-            xty[a] = xty[a] + rows[i * k + a] * y[i]
-            for b in 0..k {
-                xtx[a * k + b] = xtx[a * k + b] + rows[i * k + a] * rows[i * k + b]
-            }
-        }
-    }
-    let inv = invert(xtx, k)
-    if len(inv) == 0 { return fail }
-    var beta = []
-    for a in 0..k {
-        var s = 0.0
-        for b in 0..k { s += inv[a * k + b] * xty[b] }
-        beta.push(s)
-    }
-    var u = []
-    for i in 0..n {
-        var s = 0.0
-        for a in 0..k { s += rows[i * k + a] * beta[a] }
-        u.push(y[i] - s)
-    }
-    var s = []
-    for i in 0..k * k { s.push(0.0) }
-    for i in 0..n {
-        for a in 0..k {
-            for b in 0..k {
-                s[a * k + b] = s[a * k + b] + u[i] * u[i] * rows[i * k + a] * rows[i * k + b]
-            }
-        }
-    }
-    for l in 1..=min(lags, n - 1) {
-        let w = 1.0 - float(l) / (float(lags) + 1.0)
-        for i in l..n {
-            let uu = u[i] * u[i - l]
-            for a in 0..k {
-                for b in 0..k {
-                    s[a * k + b] = s[a * k + b] + w * uu * (rows[i * k + a] * rows[(i - l) * k + b] + rows[(i - l) * k + a] * rows[i * k + b])
-                }
-            }
-        }
-    }
-    let v = matmul(matmul(inv, s, k), inv, k)
-    var t = []
-    for a in 0..k { t.push(beta[a] / sqrt(v[a * k + a])) }
-    let ym = avg(y)
-    var sst = 0.0
-    var sse = 0.0
-    for v in y { sst += (v - ym) * (v - ym) }
-    for e in u { sse += e * e }
-    Ols { coef: beta, t: t, r2: 1.0 - sse / sst, ok: true }
+    stat_max_dd(x)
 }
 
 // (annual mean, annual volatility, Newey-West t of the mean, Sharpe) of monthly returns.
 fn annual(x: List[f64]) -> (f64, f64, f64, f64) {
-    let m = avg(x)
-    let s = sd(x)
-    let o = ols_nw(x, [], nw_lags(len(x)))
-    let t = if o.ok { o.t[0] } else { nan }
-    (m * 12.0, s * sqrt(12.0), t, m / s * sqrt(12.0))
+    stat_annual(x)
 }

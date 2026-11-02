@@ -634,3 +634,133 @@ fn the_cache_names_in_kairos_are_the_rust_ones() {
         assert_eq!(got, want);
     })
 }
+
+/// A market for the simulator: dividends and JCP, missing quotes, spreads with and without bid
+/// and ask, illiquid assets (capacity binds), crashes (losses carried forward).
+fn sim_market() -> Rc<Data> {
+    let mut dates = Vec::new();
+    for y in 2001..=2004u32 {
+        for m in 1..=12u32 {
+            for d in 1..=(19 + (m + y) % 4) {
+                dates.push(y * 10000 + m * 100 + d);
+            }
+        }
+    }
+    let mut rng = Rng(0x51_3D_5EED_C0FF_EE11);
+    let mut tks = Vec::new();
+    for i in 0..15usize {
+        let liquid = if i % 5 == 0 { 0.6 } else { 0.93 };
+        let scale = if i == 0 { 4e3 } else { 2e5 * (1.0 + i as f64) };
+        let mut days = Vec::new();
+        for (di, _) in dates.iter().enumerate() {
+            if rng.unit() > liquid {
+                continue;
+            }
+            let u = rng.unit();
+            let jump = if u < 0.01 { -0.25 } else if u > 0.995 { 0.3 } else { 0.0 };
+            let div = if rng.unit() < 0.03 { 0.012 } else { 0.0 };
+            let jcp = if rng.unit() < 0.02 { 0.006 } else { 0.0 };
+            let spr = if rng.unit() < 0.1 { f32::NAN } else { (0.0005 + 0.03 * rng.unit()) as f32 };
+            days.push(Day {
+                di: di as u32,
+                r: 0.04 * (rng.unit() - 0.48) + jump + div + jcp,
+                vol: scale * (0.2 + rng.unit()),
+                div: div as f32,
+                jcp: jcp as f32,
+                spr,
+                px: (5.0 + 20.0 * rng.unit()) as f32,
+            });
+        }
+        let t = format!("S{i:03}3");
+        let (first, last) = (dates[days[0].di as usize], dates[days[days.len() - 1].di as usize]);
+        tks.push(Tk { ticker: t.clone(), issuer: t[..4].into(), class: "ON".into(), first, last, days });
+    }
+    let cdi: BTreeMap<u32, f64> = dates.iter().map(|&d| (d, 0.0004)).collect();
+    let mut ff = BTreeMap::new();
+    for y in 2001..=2004u32 {
+        for m in 1..=12u32 {
+            ff.insert(y * 100 + m, Factors { rm_rf: 0.01 * ((m % 5) as f64 - 2.0), smb: 0.0, hml: 0.0, wml: 0.0, iml: 0.0, rf: 0.008 });
+        }
+    }
+    Rc::new(Data::build(Panel { dates, tks }, &cdi, &ff, &ff.clone(), BTreeMap::new()))
+}
+
+/// The simulator written in Kairós (std/sim.krs, run by `b3.simulate`) gives the Rust lab's
+/// simulator's results bit for bit: fixed and real costs, delays, capacity limits, and the
+/// individual investor's income tax (exempt months, losses carried forward, JCP withheld).
+#[test]
+fn the_simulator_in_kairos_is_the_rust_one() {
+    on_big_stack(|| {
+        use quant_b3::backtest::{self, Costs, Plan, SimCfg};
+        let d = sim_market();
+        let (nm, na) = (d.cal.months.len(), d.panel.tks.len());
+        let wt = |m: usize, t: usize| if (m * 7 + t * 3) % 4 == 0 { 0.05 + 0.01 * ((m + t) % 5) as f64 } else { 0.0 };
+        // from the second month (an order at session 0 has no close before it)
+        let plans: Vec<Plan> = (1..nm)
+            .filter_map(|m| {
+                let w: Vec<(usize, f64)> = (0..na).filter(|&t| wt(m, t) > 0.0).map(|t| (t, wt(m, t))).collect();
+                (!w.is_empty()).then_some(Plan { mi: m, w })
+            })
+            .collect();
+        // (cost_bps or real costs, lag, cap_adv, tax, capital)
+        let cases = [
+            (Some(25.0), 0usize, 0.0, false, 1e6),
+            (None, 1, 0.0, false, 1e6),
+            (None, 1, 0.5, true, 5e4),
+            (None, 3, 0.2, true, 1e6),
+            (Some(10.0), 2, 0.0, true, 2e5),
+        ];
+        for (bps, lag, cap, tax, capital) in cases {
+            let costs = match bps {
+                Some(b) => Costs::Fixed { bps: b },
+                None => quant_b3::search::REAL,
+            };
+            let cfg = SimCfg { capital0: capital, lag, costs, tax, cap_adv: (cap > 0.0).then_some(cap) };
+            let out = backtest::simulate(&d, &plans, &cfg);
+            assert!(out.ret.len() > 30, "the simulation runs");
+            let src = format!(
+                "var w = zeros_like(b3.monthly_returns())
+for m in 1..size(w, month) {{
+    for t in 0..size(w, asset) {{
+        if (m * 7 + t * 3) % 4 == 0 {{ w[month: m, asset: t] = 0.05 + 0.01 * float((m + t) % 5) }}
+    }}
+}}
+let o = b3.simulate(w, cost_bps: {}, lag: {lag}, capital: {capital:?}, real_costs: {}, tax: {tax}, cap_adv: {cap:?}, trial: false)
+print(o.final_value, o.liq_value, o.tax_paid, o.capped, o.exempt_months, o.taxed_months, o.cost_bps)
+for m in 0..size(o.ret, month) {{
+    if not is_nan(o.ret[month: m]) {{ print(m, o.ret[month: m], o.turnover[month: m], o.exposure[month: m]) }}
+}}
+",
+                format!("{:?}", bps.unwrap_or(25.0)),
+                bps.is_none()
+            );
+            let text = run(&d, &src);
+            let mut lines = text.lines();
+            let head: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+            let f = |s: &str| s.parse::<f64>().unwrap();
+            let case = format!("{bps:?} lag {lag} cap {cap} tax {tax} capital {capital}");
+            assert_eq!(f(head[0]).to_bits(), out.final_value.to_bits(), "final value, {case}");
+            assert_eq!(f(head[1]).to_bits(), out.liq_value.to_bits(), "liquidation value, {case}");
+            assert_eq!(f(head[2]).to_bits(), out.tax_paid.to_bits(), "tax paid, {case}");
+            assert_eq!(f(head[3]).to_bits(), out.capped_frac.to_bits(), "capped, {case}");
+            assert_eq!(head[4].parse::<usize>().unwrap(), out.exempt_months, "exempt months, {case}");
+            assert_eq!(head[5].parse::<usize>().unwrap(), out.taxed_months, "taxed months, {case}");
+            assert_eq!(f(head[6]).to_bits(), out.avg_cost_bps().to_bits(), "cost, {case}");
+            let rows: Vec<Vec<&str>> = lines.map(|l| l.split_whitespace().collect()).collect();
+            assert_eq!(rows.len(), out.ret.len(), "months, {case}");
+            for (k, row) in rows.iter().enumerate() {
+                assert_eq!(row[0].parse::<usize>().unwrap(), out.mi[k], "month {k}, {case}");
+                assert_eq!(f(row[1]).to_bits(), out.ret[k].to_bits(), "return of month {k}, {case}");
+                assert_eq!(f(row[2]).to_bits(), out.turnover[k].to_bits(), "turnover of month {k}, {case}");
+                assert_eq!(f(row[3]).to_bits(), out.exposure[k].to_bits(), "exposure of month {k}, {case}");
+            }
+            // the rules are exercised: capacity, exempt and taxed months
+            assert!(cap == 0.0 || out.capped_frac > 0.0, "capacity binds, {case}");
+            if tax {
+                // small capital: months of sales under R$ 20 thousand; large: taxed months
+                assert!(capital > 5e4 || out.exempt_months > 0, "exempt months, {case}");
+                assert!(capital < 1e6 || out.taxed_months > 0, "taxed months, {case}");
+            }
+        }
+    })
+}

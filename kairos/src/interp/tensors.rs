@@ -418,8 +418,9 @@ impl Interp<'_> {
 
     /// `b3.f(...)`: data and the realistic simulator of the quant-b3 lab.
     pub(super) fn host_call(&mut self, hf: HostFn, v: Vec<Value>, sp: Span) -> R<Value> {
-        // the simulator has no gradient (yet): it sees plain values
-        let v: Vec<Value> = v.iter().map(|x| self.deep_fwd(x)).collect();
+        // the simulator has no gradient (yet): it sees plain values (nothing is tracked outside
+        // `grad`, so nothing to look for there)
+        let v: Vec<Value> = if self.tracking() { v.iter().map(|x| self.deep_fwd(x)).collect() } else { v };
         let host = self.host;
         let ck = self.ck;
         // the program's protocols fence the data it sees (M5)
@@ -451,7 +452,7 @@ impl Interp<'_> {
             }
             HostFn::MonthIndex => Value::Int(host.month_index(as_int(v[0].clone()), protos).map_err(herr)?),
             HostFn::Evaluate { result } => {
-                let ev = host.evaluate(tensor_of(&v[0]), &cfg_of(&v[1..]), protos).map_err(herr)?;
+                let (ev, _) = self.run_simulation(tensor_of(&v[0]), &cfg_of(&v[1..]), sp)?;
                 self.evaluation(result, &ev, sp)?
             }
             HostFn::Daily { field } => Value::Tensor(host.daily(field, protos).map_err(herr)?),
@@ -468,7 +469,7 @@ impl Interp<'_> {
             HostFn::NefinDaily { factor } => Value::Tensor(host.nefin_daily(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
             HostFn::SessionDates => Value::Tensor(host.session_dates(protos).map_err(herr)?),
             HostFn::Simulate { result } => {
-                let (ev, sim) = host.simulate_series(tensor_of(&v[0]), &cfg_of(&v[1..]), protos).map_err(herr)?;
+                let (ev, sim) = self.run_simulation(tensor_of(&v[0]), &cfg_of(&v[1..]), sp)?;
                 let def = &self.ck.structs[result as usize];
                 let series = |xs: &[f64]| {
                     let mut t = vec![f64::NAN; sim.months];
@@ -557,6 +558,103 @@ impl Interp<'_> {
     }
 
     /// The prelude's `Evaluation`, field by field.
+    /// `b3.evaluate`/`b3.simulate`: the runtime checks the weights and the holdout and records the
+    /// trial; the simulator itself is std/sim.krs, written in Kairós (`KAIROS_RUST_SIM=1`: the
+    /// lab's simulator in Rust, the reference it is tested against).
+    fn run_simulation(&mut self, w: &TensorVal, cfg: &EvalCfg, sp: Span) -> R<(EvalOut, crate::bridge::SimSeries)> {
+        let host = self.host;
+        let ck = self.ck;
+        let protos = &ck.protocols;
+        let herr = |e: HostErr| {
+            let mut d = Diag::new(e.code, sp, e.msg);
+            if let Some(h) = e.hint {
+                d = d.hint(h);
+            }
+            Ctl::Err(d)
+        };
+        if std::env::var("KAIROS_RUST_SIM").is_ok_and(|x| x == "1") {
+            return host.simulate_series(w, cfg, protos).map_err(herr);
+        }
+        let prep = host.sim_prepare(w, cfg, protos).map_err(herr)?;
+        let (panel, cal) = match host.sim_inputs(prep.n) {
+            Some(x) => x,
+            None => {
+                let sd = host.sim_data(prep.n).map_err(herr)?;
+                let ints = |v: Vec<i64>| Value::List(Rc::new(v.into_iter().map(Value::Int).collect()));
+                let floats = |v: Vec<f64>| Value::List(Rc::new(v.into_iter().map(Value::Float).collect()));
+                let pid = ck.struct_id("PanelDays").expect("std/sim.krs is loaded with the prelude");
+                let cid = ck.struct_id("Calendar").expect("std/sim.krs is loaded with the prelude");
+                let panel = Value::Struct(
+                    pid,
+                    Rc::new(vec![ints(sd.first), ints(sd.di), floats(sd.r), floats(sd.vol), floats(sd.div), floats(sd.jcp), floats(sd.spr), floats(sd.px)]),
+                );
+                let cal = Value::Struct(cid, Rc::new(vec![ints(sd.dates), ints(sd.month_first), floats(sd.cdi)]));
+                host.keep_sim_inputs(prep.n, panel.clone(), cal.clone());
+                (panel, cal)
+            }
+        };
+        let pm = Value::List(Rc::new(prep.plans.iter().map(|p| Value::Int(p.mi as i64)).collect()));
+        let pt = Value::List(Rc::new(
+            prep.plans.iter().map(|p| Value::List(Rc::new(p.w.iter().map(|&(t, _)| Value::Int(t as i64)).collect()))).collect(),
+        ));
+        let pw = Value::List(Rc::new(
+            prep.plans.iter().map(|p| Value::List(Rc::new(p.w.iter().map(|&(_, x)| Value::Float(x)).collect()))).collect(),
+        ));
+        let sid = ck.struct_id("SimCfg").expect("std/sim.krs is loaded with the prelude");
+        let cfgv = Value::Struct(
+            sid,
+            Rc::new(vec![
+                Value::Float(cfg.capital),
+                Value::Int(cfg.lag),
+                Value::Bool(cfg.real_costs),
+                Value::Float(cfg.cost_bps),
+                Value::Bool(cfg.tax),
+                Value::Float(cfg.cap_adv),
+            ]),
+        );
+        let call = |me: &mut Self, name: &str, args: Vec<Value>| -> R<Value> {
+            let f = ck.fn_id(name).expect("std/sim.krs is loaded with the prelude");
+            me.call_value(&Value::Func(Rc::new(crate::value::FuncVal::User(f))), args, sp)
+        };
+        let run = call(self, "sim_run", vec![panel, cal, pm, pt, pw, cfgv])?;
+        let ev = call(self, "sim_eval", vec![run.clone()])?;
+        let field = |v: &Value, name: &str| -> Value {
+            let Value::Struct(id, fs) = v else { unreachable!("a struct") };
+            let k = ck.structs[*id as usize].fields.iter().position(|(n, _)| n == name).expect("a field of std/sim.krs");
+            fs[k].clone()
+        };
+        let fl = |v: &Value, name: &str| float_of(&field(v, name));
+        let list = |v: &Value, name: &str| -> Vec<Value> {
+            match field(v, name) {
+                Value::List(xs) => xs.to_vec(),
+                other => unreachable!("a list, got {other:?}"),
+            }
+        };
+        let floats = |v: &Value, name: &str| list(v, name).iter().map(float_of).collect::<Vec<f64>>();
+        let x = crate::bridge::SimNumbers {
+            mi: list(&run, "mi").into_iter().map(|m| as_int(m) as usize).collect(),
+            ret: floats(&run, "ret"),
+            exposure: floats(&run, "exposure"),
+            turnover: floats(&run, "turnover"),
+            tax_paid: fl(&run, "tax_paid"),
+            final_value: fl(&run, "final_value"),
+            liq_value: fl(&run, "liq_value"),
+            capped: fl(&run, "capped_frac"),
+            exempt_months: as_int(field(&run, "exempt_months")),
+            taxed_months: as_int(field(&run, "taxed_months")),
+            cagr: fl(&ev, "cagr"),
+            vol: fl(&ev, "vol"),
+            sharpe: fl(&ev, "sharpe"),
+            max_dd: fl(&ev, "max_dd"),
+            beta: fl(&ev, "beta"),
+            alpha: fl(&ev, "alpha"),
+            t_alpha: fl(&ev, "t_alpha"),
+            turnover_year: fl(&ev, "turnover"),
+            cost_bps: fl(&ev, "cost_bps"),
+        };
+        host.sim_finish(w, cfg, prep.n, x).map_err(herr)
+    }
+
     fn evaluation(&self, result: u32, ev: &EvalOut, sp: Span) -> R<Value> {
         let def = &self.ck.structs[result as usize];
         let mut fields = Vec::with_capacity(def.fields.len());

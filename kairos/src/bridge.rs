@@ -78,6 +78,53 @@ pub struct EvalOut {
 }
 
 /// The month-by-month result of `b3.simulate`.
+/// What `b3.evaluate`/`b3.simulate` checked before simulating: the months the program sees and
+/// the monthly plans (validated weights).
+pub struct SimPrep {
+    pub n: usize,
+    pub plans: Vec<Plan>,
+}
+
+/// The panel and the calendar for the simulator written in Kairós (std/sim.krs), cut where the
+/// program may see: every asset's traded sessions, asset after asset.
+#[derive(Default)]
+pub struct SimData {
+    pub first: Vec<i64>,
+    pub di: Vec<i64>,
+    pub r: Vec<f64>,
+    pub vol: Vec<f64>,
+    pub div: Vec<f64>,
+    pub jcp: Vec<f64>,
+    pub spr: Vec<f64>,
+    pub px: Vec<f64>,
+    pub dates: Vec<i64>,
+    pub month_first: Vec<i64>,
+    pub cdi: Vec<f64>,
+}
+
+/// What the simulator gives back (std/sim.krs `sim_run` and `sim_eval`).
+pub struct SimNumbers {
+    pub mi: Vec<usize>,
+    pub ret: Vec<f64>,
+    pub exposure: Vec<f64>,
+    pub turnover: Vec<f64>,
+    pub tax_paid: f64,
+    pub final_value: f64,
+    pub liq_value: f64,
+    pub capped: f64,
+    pub exempt_months: i64,
+    pub taxed_months: i64,
+    pub cagr: f64,
+    pub vol: f64,
+    pub sharpe: f64,
+    pub max_dd: f64,
+    pub beta: f64,
+    pub alpha: f64,
+    pub t_alpha: f64,
+    pub turnover_year: f64,
+    pub cost_bps: f64,
+}
+
 pub struct SimSeries {
     /// months of the data the program sees
     pub months: usize,
@@ -134,6 +181,8 @@ pub struct Host {
     fence_noted: Cell<bool>,
     /// the program's arguments (`args()`)
     args: RefCell<Vec<String>>,
+    /// the simulator's inputs, built once (months seen, the panel, the calendar)
+    sim_inputs: RefCell<Option<(usize, crate::value::Value, crate::value::Value)>>,
 }
 
 /// The hash that identifies a protocol in the ledger: changing any term makes another protocol.
@@ -678,9 +727,6 @@ impl Host {
 
     fn simulate(&self, d: &Data, plans: &[Plan], cfg: &EvalCfg) -> Result<(SimOut, EvalOut, Vec<f64>), HostErr> {
         let costs = if cfg.real_costs { search::REAL } else { Costs::Fixed { bps: cfg.cost_bps } };
-        if !(cfg.cap_adv >= 0.0 && cfg.cap_adv.is_finite()) {
-            return Err(herr("R0102", format!("`cap_adv` must be >= 0 (0: no limit), got {:?}", cfg.cap_adv)));
-        }
         let cap_adv = (cfg.cap_adv > 0.0).then_some(cfg.cap_adv);
         let sim = SimCfg { capital0: cfg.capital, lag: cfg.lag as usize, costs, tax: cfg.tax, cap_adv };
         let out = backtest::simulate(d, plans, &sim);
@@ -716,9 +762,33 @@ impl Host {
         self.simulate_series(w, cfg, protos).map(|(e, _)| e)
     }
 
-    /// `b3.evaluate`, plus the simulation month by month (`b3.simulate`). Either way the
-    /// evaluation is a trial in the registry.
+    /// `b3.evaluate`, plus the simulation month by month (`b3.simulate`), with the simulator in
+    /// Rust (quant-b3's backtest): the reference the one written in Kairós is checked against
+    /// (`KAIROS_RUST_SIM=1`). Either way the evaluation is a trial in the registry.
     pub fn simulate_series(&self, w: &TensorVal, cfg: &EvalCfg, protos: &[ProtocolDef]) -> Result<(EvalOut, SimSeries), HostErr> {
+        let prep = self.sim_prepare(w, cfg, protos)?;
+        let d = self.data()?;
+        let (out, e, excess) = self.simulate(d, &prep.plans, cfg)?;
+        let e = self.sim_record(w, cfg, prep.n, &out.mi, e, &excess)?;
+        let series = SimSeries {
+            months: prep.n,
+            mi: out.mi,
+            ret: out.ret,
+            exposure: out.exposure,
+            turnover: out.turnover,
+            tax_paid: out.tax_paid,
+            final_value: out.final_value,
+            liq_value: out.liq_value,
+            capped: out.capped_frac,
+            exempt_months: out.exempt_months as i64,
+            taxed_months: out.taxed_months as i64,
+        };
+        Ok((e, series))
+    }
+
+    /// The checks before any simulation: no holdout open, the months the program sees, valid
+    /// weights (long-only fractions of wealth), the plans of the months it may trade.
+    pub fn sim_prepare(&self, w: &TensorVal, cfg: &EvalCfg, protos: &[ProtocolDef]) -> Result<SimPrep, HostErr> {
         if let Some(k) = self.opening.get() {
             return Err(herr("R0504", format!("`b3.evaluate` cannot run while the holdout of protocol \"{}\" is open", protos[k].name))
                 .hint("the function given to `open_once` only computes the weights; `open_once` evaluates them"));
@@ -728,8 +798,94 @@ impl Host {
         let nm = d.cal.months.len();
         let cut = if n < nm { " visible to this program (see the note above)" } else { "" };
         let plans = self.plans(d, w, cfg, n, 0, cut)?;
-        let (out, mut e, excess) = self.simulate(d, &plans, cfg)?;
-        let (Some(&first), Some(&last)) = (out.mi.first(), out.mi.last()) else { unreachable!("the simulation produced months") };
+        if !(cfg.cap_adv >= 0.0 && cfg.cap_adv.is_finite()) {
+            return Err(herr("R0102", format!("`cap_adv` must be >= 0 (0: no limit), got {:?}", cfg.cap_adv)));
+        }
+        Ok(SimPrep { n, plans })
+    }
+
+    /// The panel and the calendar for std/sim.krs, up to the sessions of the first `n` months.
+    pub fn sim_data(&self, n: usize) -> Result<SimData, HostErr> {
+        let d = self.data()?;
+        let end = d.month_start(n);
+        let mut sd = SimData::default();
+        for tk in &d.panel.tks {
+            sd.first.push(sd.di.len() as i64);
+            for x in &tk.days {
+                if x.di as usize >= end {
+                    break;
+                }
+                sd.di.push(i64::from(x.di));
+                sd.r.push(x.r);
+                sd.vol.push(x.vol);
+                sd.div.push(f64::from(x.div));
+                sd.jcp.push(f64::from(x.jcp));
+                sd.spr.push(f64::from(x.spr));
+                sd.px.push(f64::from(x.px));
+            }
+        }
+        sd.first.push(sd.di.len() as i64);
+        sd.dates = d.panel.dates[..end].iter().map(|&x| i64::from(x)).collect();
+        sd.month_first = d.cal.mrange[..n].iter().map(|r| r.0 as i64).collect();
+        sd.cdi = d.cdi_d[..end].to_vec();
+        Ok(sd)
+    }
+
+    /// The simulator's inputs already built for `n` months, if any.
+    pub fn sim_inputs(&self, n: usize) -> Option<(crate::value::Value, crate::value::Value)> {
+        match &*self.sim_inputs.borrow() {
+            Some((m, p, c)) if *m == n => Some((p.clone(), c.clone())),
+            _ => None,
+        }
+    }
+
+    pub fn keep_sim_inputs(&self, n: usize, panel: crate::value::Value, cal: crate::value::Value) {
+        *self.sim_inputs.borrow_mut() = Some((n, panel, cal));
+    }
+
+    /// After the simulator written in Kairós: the evaluation, a trial in the registry.
+    pub fn sim_finish(&self, w: &TensorVal, cfg: &EvalCfg, n: usize, x: SimNumbers) -> Result<(EvalOut, SimSeries), HostErr> {
+        if x.ret.is_empty() {
+            return Err(herr("R0102", "the simulation produced no months").hint("are the weights only in the first month or after the end of the data?"));
+        }
+        let d = self.data()?;
+        let excess: Vec<f64> = x.ret.iter().zip(&x.mi).map(|(r, &m)| r - d.cdi_m[m]).collect();
+        let e = EvalOut {
+            months: x.ret.len() as i64,
+            cagr: x.cagr,
+            vol: x.vol,
+            sharpe: x.sharpe,
+            max_dd: x.max_dd,
+            beta: x.beta,
+            alpha: x.alpha,
+            t_alpha: x.t_alpha,
+            turnover: x.turnover_year,
+            cost_bps: x.cost_bps,
+            trials: 0,
+            dsr: f64::NAN,
+        };
+        let e = self.sim_record(w, cfg, n, &x.mi, e, &excess)?;
+        let series = SimSeries {
+            months: n,
+            mi: x.mi,
+            ret: x.ret,
+            exposure: x.exposure,
+            turnover: x.turnover,
+            tax_paid: x.tax_paid,
+            final_value: x.final_value,
+            liq_value: x.liq_value,
+            capped: x.capped,
+            exempt_months: x.exempt_months,
+            taxed_months: x.taxed_months,
+        };
+        Ok((e, series))
+    }
+
+    /// Records the trial (or deflates it against the registry): the evaluation with its number
+    /// of trials and its DSR.
+    fn sim_record(&self, w: &TensorVal, cfg: &EvalCfg, n: usize, mi: &[usize], mut e: EvalOut, excess: &[f64]) -> Result<EvalOut, HostErr> {
+        let d = self.data()?;
+        let (Some(&first), Some(&last)) = (mi.first(), mi.last()) else { unreachable!("the simulation produced months") };
         let periodo = format!("{}..{}", util::fmt_ym(d.cal.months[first]), util::fmt_ym(d.cal.months[last]));
         let costs = if cfg.real_costs { "custo real".to_string() } else { format!("custo {} bps", cfg.cost_bps) };
         let ir = if cfg.tax { "com IR" } else { "sem IR" };
@@ -739,20 +895,7 @@ impl Host {
         let (trials, dsr) = if cfg.trial { self.record(t, &wsha)? } else { self.deflated(&t) };
         e.trials = trials;
         e.dsr = dsr;
-        let series = SimSeries {
-            months: n,
-            mi: out.mi.clone(),
-            ret: out.ret.clone(),
-            exposure: out.exposure.clone(),
-            turnover: out.turnover.clone(),
-            tax_paid: out.tax_paid,
-            final_value: out.final_value,
-            liq_value: out.liq_value,
-            capped: out.capped_frac,
-            exempt_months: out.exempt_months as i64,
-            taxed_months: out.taxed_months as i64,
-        };
-        Ok((e, series))
+        Ok(e)
     }
 
     /// `b3.record_trial(study, name, params, period, excess)`: a trial in the lab's registry, as

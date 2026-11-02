@@ -2,6 +2,10 @@
 // Loaded into every session before user code.
 // (`mean`, `sum` and `prod` are builtins: they work on lists and on tensors.)
 
+// statistics and the lab's simulator (b3.evaluate and b3.simulate run it), written in Kairós
+import "std/stats.krs"
+import "std/sim.krs"
+
 // sample variance (n - 1)
 fn variance(xs: List[f64]) -> f64 {
     assert(len(xs) > 1, "variance needs at least two values")
