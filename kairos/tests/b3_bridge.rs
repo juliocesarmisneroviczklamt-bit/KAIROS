@@ -93,3 +93,41 @@ fn run() {
         println!("{k:<9} Kairós {g:<22?} Rust {w:<22?} identical");
     }
 }
+
+/// The lab's data written in Kairós (lab/data.krs: the panel, its calendar, the monthly returns
+/// and the NEFIN liquid universe) gives what the runtime's `b3.*` (Rust) gives, value for value.
+/// Skipped when the data folder is not there.
+#[test]
+fn the_lab_data_in_kairos_is_the_rust_one() {
+    match std::thread::Builder::new().stack_size(256 << 20).spawn(run_data_check) {
+        Ok(h) => {
+            if let Err(panic) = h.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(_) => run_data_check(),
+    }
+}
+
+fn run_data_check() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let data_dir = root.join("data");
+    if !data_dir.join("processed").join("panel.bin").is_file() {
+        eprintln!("skipped: no B3 data in {}", data_dir.display());
+        return;
+    }
+    let d = Rc::new(Data::load(&Paths::new(&data_dir, &root.join("results"))).expect("B3 data"));
+    let path = root.join("kairos").join("lab").join("check_data.krs");
+    let src = std::fs::read_to_string(&path).expect("lab/check_data.krs");
+    let buf = Rc::new(RefCell::new(Vec::new()));
+    let host = Host::with_data(d);
+    host.set_args(vec![data_dir.to_string_lossy().into_owned()]);
+    let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
+    if let Err(e) = s.run(&path.to_string_lossy(), &src) {
+        panic!("{}", s.render(&e));
+    }
+    let text = String::from_utf8(buf.borrow().clone()).expect("utf-8");
+    for what in ["monthly returns: the same", "eligible: the same"] {
+        assert!(text.contains(what), "`{what}` missing from the output:\n{text}");
+    }
+}

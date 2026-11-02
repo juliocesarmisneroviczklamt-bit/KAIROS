@@ -1,0 +1,206 @@
+// The lab's data in Kairós (quant-b3 common::Data): the panel (processed/panel.bin, as
+// lab/panel.krs writes it), its calendar of months and the monthly return of each stock. What
+// the runtime's `b3.*` gives, computed here in the same order, so the values are the same bits.
+import "panel.krs"
+
+// The calendar: the months (AAAAMM) of the sessions, the sessions of each month [from, to), and
+// the month of each session.
+struct Cal {
+    months: List[i64],
+    mfrom: List[i64],
+    mto: List[i64],
+    date_month: List[i64],
+}
+
+struct LabData {
+    dates: List[i64],
+    tks: List[Tk],
+    cal: Cal,
+    mret: List[List[f64]],      // [stock][month]: compounded daily returns (0 where it did not trade)
+    traded: List[List[bool]],
+}
+
+fn get_text(b: Bytes, at: i64) -> (str, i64) {
+    let n = get_u64(b, at)
+    (get_str(b, at + 8, n), at + 8 + n)
+}
+
+// panel.bin (bincode): the calendar, then every stock and its sessions
+fn decode_panel(b: Bytes) -> (List[i64], List[Tk]) {
+    var at = 0
+    let nd = get_u64(b, at)
+    at += 8
+    var dates: List[i64] = []
+    for i in 0..nd {
+        dates.push(get_u32(b, at))
+        at += 4
+    }
+    let nt = get_u64(b, at)
+    at += 8
+    var tks: List[Tk] = []
+    for t in 0..nt {
+        let tk = get_text(b, at)
+        let is = get_text(b, tk.1)
+        let cl = get_text(b, is.1)
+        at = cl.1
+        let first = get_u32(b, at)
+        let last = get_u32(b, at + 4)
+        let n = get_u64(b, at + 8)
+        at += 16
+        var days: List[Day] = []
+        for k in 0..n {
+            days.push(Day { di: get_u32(b, at), r: get_f64(b, at + 4), vol: get_f64(b, at + 12), div: get_f32(b, at + 20), jcp: get_f32(b, at + 24), spr: get_f32(b, at + 28), px: get_f32(b, at + 32) })
+            at += 36
+        }
+        tks.push(Tk { ticker: tk.0, issuer: is.0, class: cl.0, first: first, last: last, days: days })
+    }
+    (dates, tks)
+}
+
+fn new_cal(dates: List[i64]) -> Cal {
+    var c = Cal { months: [], mfrom: [], mto: [], date_month: [] }
+    for i in 0..len(dates) {
+        let m = dates[i] / 100
+        if len(c.months) == 0 or c.months[len(c.months) - 1] != m {
+            c.months.push(m)
+            c.mfrom.push(i)
+            c.mto.push(i + 1)
+        } else {
+            c.mto[len(c.mto) - 1] = i + 1
+        }
+        c.date_month.push(len(c.months) - 1)
+    }
+    c
+}
+
+// The first month at or after ym (as Cal::idx_from).
+fn cal_idx_from(c: Cal, ym: i64) -> i64 {
+    var lo = 0
+    var hi = len(c.months)
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if c.months[mid] < ym { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+fn load_lab_data(dir: str) -> LabData {
+    let p = decode_panel(read_bytes(dir + "/processed/panel.bin"))
+    let cal = new_cal(p.0)
+    let nm = len(cal.months)
+    var mret: List[List[f64]] = []
+    var traded: List[List[bool]] = []
+    for tk in p.1 {
+        var r: List[f64] = []
+        var tr: List[bool] = []
+        for m in 0..nm {
+            r.push(0.0)
+            tr.push(false)
+        }
+        for d in tk.days {
+            let m = cal.date_month[d.di]
+            r[m] = (1.0 + r[m]) * (1.0 + d.r) - 1.0
+            tr[m] = true
+        }
+        mret.push(r)
+        traded.push(tr)
+    }
+    LabData { dates: p.0, tks: p.1, cal: cal, mret: mret, traded: traded }
+}
+
+// b3.monthly_returns(): Tensor[month, asset; f64], NaN where the stock did not trade
+fn data_monthly_returns(d: LabData) -> Tensor[month, asset; f64] {
+    let nm = len(d.cal.months)
+    let nt = len(d.tks)
+    var v: List[f64] = []
+    for m in 0..nm {
+        for t in 0..nt { v.push(if d.traded[t][m] { d.mret[t][m] } else { nan }) }
+    }
+    var out = zeros(month: nm, asset: nt)
+    for m in 0..nm {
+        var row: List[f64] = []
+        for t in 0..nt { row.push(v[m * nt + t]) }
+        out[month: m] = tensor(row, asset)
+    }
+    out
+}
+
+// The first index of a sorted list at or above x.
+fn first_at_least(xs: List[i64], x: i64) -> i64 {
+    var lo = 0
+    var hi = len(xs)
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if xs[mid] < x { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+// The first session of a stock at or after calendar index a.
+fn first_day_from(days: List[Day], a: i64) -> i64 {
+    var lo = 0
+    var hi = len(days)
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if days[mid].di < a { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+// The NEFIN liquid universe of year y (quant-b3 universe::eligible, the rule of days, R$ 500
+// thousand): of each company its most traded class in y - 1 (a tie to the first), listed before
+// December of y - 1, not an ETF, liquid in more than 80% of its sessions of y - 1.
+fn data_eligible_year(d: LabData, y: i64) -> List[i64] {
+    let py = y - 1
+    let a = first_at_least(d.dates, py * 10000 + 101)
+    let b = first_at_least(d.dates, (py + 1) * 10000 + 101)
+    var out: List[i64] = []
+    if a == b { return out }
+    let dec1 = py * 10000 + 1201
+    var best: Map[str, (i64, f64)] = [:]
+    var liquid: Map[i64, bool] = [:]
+    for t in 0..len(d.tks) {
+        let tk = d.tks[t]
+        if tk.first >= dec1 or tk.class == "CI" { continue }
+        let lo = first_day_from(tk.days, a)
+        let hi = first_day_from(tk.days, b)
+        if lo == hi { continue }
+        var vol = -0.0
+        var n_liq = 0
+        for k in lo..hi {
+            vol = vol + tk.days[k].vol
+            if tk.days[k].vol > 500000.0 { n_liq += 1 }
+        }
+        let start = max(a, first_at_least(d.dates, tk.first))
+        let n_window = max(b - start, 0)
+        liquid[t] = n_window > 0 and float(n_liq) / float(n_window) > 0.8
+        if not contains(best, tk.issuer) {
+            best[tk.issuer] = (t, vol)
+        } else if vol > best[tk.issuer].1 or (vol == best[tk.issuer].1 and t < best[tk.issuer].0) {
+            best[tk.issuer] = (t, vol)
+        }
+    }
+    for x in values(best) {
+        if liquid[x.0] { out.push(x.0) }
+    }
+    out
+}
+
+// b3.eligible(): Tensor[month, asset; bool], the universe of each month's year
+fn data_eligible(d: LabData) -> Tensor[month, asset; bool] {
+    let nm = len(d.cal.months)
+    let nt = len(d.tks)
+    var by_year: Map[i64, List[bool]] = [:]
+    var out = zeros(month: nm, asset: nt) > 1.0
+    for m in 0..nm {
+        let y = d.cal.months[m] / 100
+        if not contains(by_year, y) {
+            var row: List[bool] = []
+            for t in 0..nt { row.push(false) }
+            for t in data_eligible_year(d, y) { row[t] = true }
+            by_year[y] = row
+        }
+        out[month: m] = tensor(by_year[y], asset)
+    }
+    out
+}

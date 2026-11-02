@@ -1,0 +1,17 @@
+// The lab's data written in Kairós (lab/data.krs) against the runtime's `b3.*` (Rust): the same
+// months and the same monthly returns, value for value, as far as the program may see them.
+//
+//   kairos run kairos/lab/check_data.krs data        (from the quant-b3 folder)
+import "data.krs"
+
+let d = load_lab_data(args()[0])
+let rr = b3.monthly_returns()
+let n = size(rr, month)
+let mr = data_monthly_returns(d)[month: 0 .. n]
+print("stocks", len(d.tks), size(rr, asset), "months", len(d.cal.months), "visible", n)
+let diff = sum(abs(fill_nan(mr, 0.0) - fill_nan(rr, 0.0)))
+let gaps = count(is_nan(mr) != is_nan(rr))
+print("monthly returns:", if diff == 0.0 and gaps == 0.0 { "the same" } else { "DIFFERENT " + str(diff) + " " + str(gaps) })
+let ee = b3.eligible()
+let me = data_eligible(d)[month: 0 .. n]
+print("eligible:", if count(ee != me) == 0.0 { "the same" } else { "DIFFERENT " + str(count(ee != me)) }, count(ee))
