@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.15.0**, com o roteiro M1–M15 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.16.0**, com o roteiro M1–M16 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -17,7 +17,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.15.0**, com 
 - M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo;
 - M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador;
 - M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador;
-- M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust.
+- M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust;
+- M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -36,6 +37,9 @@ wasmtime --dir=. saida/arquivo.wasm          # roda o módulo em qualquer runtim
 kairos ledger                                # o livro-razão de holdouts
 kairos repl                                  # sessão interativa (ou só `kairos`)
 cargo test -p kairos                         # testes dourados + teste de aceitação com os dados reais
+kairos run kairos/compiler/kw.krs kairos/std saida kairos/compiler/kairos.krs
+wasmtime --dir=. saida/kairos.wasm run arquivo.krs
+                                             # o comando inteiro, escrito em Kairós, sem Rust
 ```
 
 ## O que já funciona
@@ -155,10 +159,20 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **A ponte `b3`, os protocolos e os holdouts escritos em Kairós** ([`compiler/rt_b3.krs`](compiler/rt_b3.krs)), com as garantias do M5.
 - **O `grad` compila:** a fita é escrita em Kairós ([`compiler/rt_diff.krs`](compiler/rt_diff.krs)), e cada função derivada ganha uma cópia que grava os nós ([spec §15.1](docs/spec.md)).
 
+**M15 (o interpretador em Kairós)**
+- **[`compiler/interp.krs`](compiler/interp.krs) roda o HIR do front-end em Kairós** com a saída, os erros e os números do interpretador Rust, inclusive tensores, `grad`, a ponte `b3` e os holdouts ([spec §16](docs/spec.md)).
+- **Sem Rust:** compilado para WebAssembly, o `ki.wasm` roda os 158 programas de teste como o interpretador Rust.
+
+**M16 (o comando `kairos` em Kairós)**
+- **[`compiler/kairos.krs`](compiler/kairos.krs) é o comando inteiro:** `run`, `check`, `exec`, `repl`, `ledger`, `tokens`, `ast`, `types`, `hir` e `--version`, com a mesma saída, os mesmos erros e o mesmo código de saída do executável Rust ([spec §17](docs/spec.md)).
+- **A biblioteca padrão vai dentro do programa** ([`compiler/std_embed.krs`](compiler/std_embed.krs), gerado por [`compiler/gen_std.krs`](compiler/gen_std.krs)).
+- **`read_line()` e `print_raw(s)`:** entrada padrão e escrita sem quebra de linha, para o REPL e para qualquer programa.
+- **Nas releases:** `kairos-selfhost.wasm`, o comando escrito em Kairós e compilado pelo compilador em Kairós, para qualquer runtime WASI.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M16 | o comando `kairos` escrito em Kairós: os subcomandos (`check`, `tokens`, `ast`, `types`, `hir`, `ledger`) e o REPL, em WebAssembly, sem Rust; e um alocador que reaproveita a memória entre tamanhos |
+| M17 | memória: um alocador que reaproveita blocos entre tamanhos (o `momentum` em WebAssembly ocupa hoje 1,5 GB) |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

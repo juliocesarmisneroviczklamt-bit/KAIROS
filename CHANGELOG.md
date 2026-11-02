@@ -2,6 +2,34 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.16.0 — M16: o comando `kairos` escrito em Kairós
+
+**O comando `kairos` inteiro agora também existe em Kairós.** [`compiler/kairos.krs`](kairos/compiler/kairos.krs) faz o que o executável Rust faz, com a mesma saída, os mesmos erros e o mesmo código de saída. Compilado para WebAssembly pelo compilador em Kairós, vira um `kairos.wasm` sem nenhuma linha de Rust, que roda em qualquer runtime WASI. Esta release traz esse arquivo pronto (`kairos-0.16.0-selfhost-wasm.tar.gz`).
+
+- **Os subcomandos:**
+  - `run`, `check` e o atalho `kairos programa.krs`, que também serve a scripts com `#!/usr/bin/env kairos`;
+  - `repl` (e `kairos` sozinho), o REPL;
+  - `exec`, que roda a imagem gravada pelo `kc.krs`. A leitura da imagem foi escrita em Kairós ([`compiler/image_read.krs`](kairos/compiler/image_read.krs)), com as mensagens de erro do leitor Rust;
+  - `ledger` e `ledger withdraw`, o livro-razão dos holdouts;
+  - `tokens`, `ast`, `types` e `hir`;
+  - `--version`.
+- **A biblioteca padrão vai dentro do programa**, como no executável Rust. [`compiler/gen_std.krs`](kairos/compiler/gen_std.krs) gera [`compiler/std_embed.krs`](kairos/compiler/std_embed.krs) a partir de `kairos/std` e da versão do `Cargo.toml`, e um teste avisa quando o arquivo fica velho.
+- **O REPL** é igual ao do Rust:
+  - o prompt `kai> ` e a continuação `...  ` enquanto houver `(`, `[` ou `{` aberto;
+  - `:help` e `:q`;
+  - cada entrada é verificada contra tudo o que veio antes e roda no mesmo quadro de variáveis;
+  - o valor de uma expressão aparece como `= valor`;
+  - uma entrada com erro de verificação deixa a sessão como estava;
+  - os `import` de uma entrada são verificados e rodados antes dela.
+- **Builtins novos na linguagem:** `read_line()` lê uma linha da entrada padrão, com a quebra de linha (`""` no fim da entrada). `print_raw(s)` escreve sem quebra de linha.
+- **Testes:**
+  - `cargo test --release -p kairos --test wasm the_command_written` compila o comando para WebAssembly e o compara com o executável Rust. Cobre os subcomandos sobre programas de teste, o `exec` de imagens (inclusive malformadas) e sessões de REPL dadas pela entrada padrão;
+  - o hospedeiro WASI dos testes ganhou entrada padrão;
+  - no CI, este teste e o do interpretador em Kairós rodam num job próprio em release (`selfhost`), que também roda o comando escrito em Kairós no wasmtime. Em debug eles demoravam demais.
+- **Limites conhecidos:**
+  - o hospedeiro precisa de uma pilha funda para programas que recursam fundo;
+  - a memória do WebAssembly continua grande com os dados da B3. O alocador que reaproveita memória entre tamanhos passou para o M17.
+
 ## 0.15.0 — M15: o interpretador escrito em Kairós
 
 **A Kairós agora tem um interpretador escrito nela mesma.** [`compiler/interp.krs`](kairos/compiler/interp.krs) roda o HIR do front-end em Kairós como o interpretador Rust roda o seu. A saída, os erros com as mesmas mensagens, os números e o código de saída são os mesmos. [`compiler/ki.krs`](kairos/compiler/ki.krs) é o equivalente de `kairos run`. Compilado para WebAssembly pelo compilador em Kairós, o `ki.wasm` roda programas Kairós sem nenhum Rust: junto com o `kw.wasm`, que compila (e compila a si mesmo), a linguagem se basta.

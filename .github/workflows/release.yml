@@ -154,12 +154,50 @@ jobs:
           name: vscode
           path: kairos-vscode-*.vsix
 
+  # the `kairos` command written in Kairós, compiled to WebAssembly by the compiler written in
+  # Kairós: no Rust inside, for any WASI runtime (`wasmtime run --dir=. kairos-selfhost.wasm run
+  # program.krs`). It never blocks a release.
+  selfhost:
+    name: build (kairos-selfhost.wasm, written in Kairós)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - name: build
+        run: |
+          cargo build --release --locked -p kairos
+          ./target/release/kairos run kairos/compiler/kw.krs kairos/std out kairos/compiler/kairos.krs
+      - name: try it
+        run: |
+          k="wasmtime run -W max-wasm-stack=4194304 --dir=. out/kairos.wasm"
+          $k --version
+          $k run kairos/examples/finance.krs > /dev/null
+      - name: package
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' kairos/Cargo.toml | head -n 1)
+          dir="kairos-${version}-selfhost-wasm"
+          mkdir -p "$dir/examples" "$dir/docs"
+          cp out/kairos.wasm "$dir/kairos-selfhost.wasm"
+          cp LICENSE kairos/README.md "$dir/"
+          cp kairos/docs/spec.md "$dir/docs/"
+          cp kairos/examples/*.krs "$dir/examples/"
+          tar czf "$dir.tar.gz" "$dir"
+          ls -l kairos-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-wasm
+          path: kairos-*.tar.gz
+
   publish:
     name: publish
-    # experimental targets and the BSD VMs never block a release: their packages go in when they
-    # build; the step below refuses to publish if any non-experimental package is missing
+    # experimental targets, the BSD VMs and the self-hosted module never block a release: their
+    # packages go in when they build; the step below refuses to publish if any non-experimental
+    # package is missing
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.vscode.result == 'success'
-    needs: [build, bsd, vscode]
+    needs: [build, bsd, vscode, selfhost]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

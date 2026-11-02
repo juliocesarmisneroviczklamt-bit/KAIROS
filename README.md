@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.15.0 (M15)
+## Estado: v0.16.0 (M16)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -40,7 +40,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M13 | o back-end em Kairós: o compilador escrito em Kairós gera código (WebAssembly) | ✅ [`kw.krs`](kairos/compiler/kw.krs) gera módulos WASI com a saída e os erros do interpretador; o compilador inteiro vira WebAssembly e, assim, compila a si mesmo no mesmo módulo, byte a byte; o runtime dos módulos é escrito em Kairós ([`rt.krs`](kairos/compiler/rt.krs)): contagem de referências, floats escritos e lidos como no Rust, a `libm`, Unicode e arquivos |
 | M14 | o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad` | ✅ o `momentum`, o modelo do M6 e o MLP compilados para WebAssembly dão os mesmos números e gravam o mesmo registro de testes e o mesmo livro-razão que o interpretador; a ponte `b3` ([`rt_b3.krs`](kairos/compiler/rt_b3.krs)) e a fita do `grad` ([`rt_diff.krs`](kairos/compiler/rt_diff.krs)) são escritas em Kairós |
 | M15 | o interpretador escrito em Kairós | ✅ [`interp.krs`](kairos/compiler/interp.krs) roda o HIR do front-end em Kairós com a saída, os erros e os números do interpretador Rust, inclusive tensores, `grad`, a ponte `b3` e os holdouts; compilado para WebAssembly (`ki.wasm`), roda programas Kairós sem nenhum Rust: os 158 programas de teste saem iguais |
-| M16 | o comando `kairos` escrito em Kairós | subcomandos e REPL em WebAssembly, sem Rust; um alocador que reaproveita a memória |
+| M16 | o comando `kairos` escrito em Kairós | ✅ [`kairos.krs`](kairos/compiler/kairos.krs) faz tudo o que o executável Rust faz (`run`, `check`, `exec`, `repl`, `ledger`, `tokens`, `ast`, `types`, `hir`), com a mesma saída, os mesmos erros e o mesmo código de saída; compilado para WebAssembly, é o comando inteiro sem nenhum Rust (`kairos-selfhost.wasm` nas releases) |
+| M17 | memória: um alocador que reaproveita blocos entre tamanhos | o `momentum` compilado para WebAssembly ocupa hoje 1,5 GB; a meta é uma fração disso, com os mesmos números |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

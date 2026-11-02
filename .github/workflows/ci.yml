@@ -3,6 +3,7 @@
 # - 32-bit: Windows i686, Linux i686 and ARMv7
 # - other architectures: RISC-V 64, PowerPC64 LE and s390x (big-endian), under QEMU
 # - WebAssembly (WASI), under wasmtime
+# - the toolchain written in Kairós (release build), and the `kairos` command it compiles, under wasmtime
 name: CI
 
 on:
@@ -94,6 +95,27 @@ jobs:
           cargo build -p kairos --locked --target wasm32-wasip1
           wasmtime run --dir=. target/wasm32-wasip1/debug/kairos.wasm run kairos/examples/finance.krs
           wasmtime run target/wasm32-wasip1/debug/kairos.wasm --version
+
+  # the toolchain written in Kairós, compiled to WebAssembly by the compiler written in Kairós:
+  # the interpreter and the `kairos` command against the Rust ones (release only: compiling them
+  # in a debug build takes too long), then the command itself in wasmtime
+  selfhost:
+    name: test (the toolchain written in Kairós, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - name: tests
+        run: cargo test --release -p kairos --locked --test wasm
+      - name: the command written in Kairós, in wasmtime
+        run: |
+          ./target/release/kairos run kairos/compiler/kw.krs kairos/std out kairos/compiler/kairos.krs
+          ls -l out/kairos.wasm
+          k="wasmtime run -W max-wasm-stack=4194304 --dir=. out/kairos.wasm"
+          $k --version
+          $k run kairos/examples/finance.krs
+          printf '1 + 2\nlet x = [1, 2, 3]\nx\n' | $k repl
 
   freebsd:
     name: test (freebsd-x86_64)

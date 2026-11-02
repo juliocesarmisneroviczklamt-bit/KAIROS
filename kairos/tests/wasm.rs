@@ -568,10 +568,11 @@ fn the_compiler_in_webassembly_compiles_itself() {
 /// M15: the interpreter written in Kairós (compiler/ki.krs), compiled to WebAssembly by the
 /// compiler written in Kairós, runs the test programs as the Rust interpreter does: the same
 /// output, the same errors (of the checker too) and the same exit code. What it does not run yet
-/// stops with K0001 and is counted apart.
+/// stops with K0001 and is counted apart. Only in a release build (compiling the whole interpreter
+/// in a debug one takes too long; the CI runs it in its `selfhost` job).
 #[test]
 fn the_interpreter_written_in_kairos_runs_like_the_rust_one() {
-    if cfg!(target_family = "wasm") {
+    if cfg!(target_family = "wasm") || cfg!(debug_assertions) {
         return;
     }
     on_big_stack(|| {
@@ -694,10 +695,10 @@ fn the_standard_library_the_command_in_kairos_carries_is_up_to_date() {
 /// M16: the `kairos` command written in Kairós (compiler/kairos.krs), compiled to WebAssembly by
 /// the compiler written in Kairós, does what the Rust command does: each subcommand gives the same
 /// output, the same errors and the same exit code, and a REPL session given on its standard input
-/// goes the same way.
+/// goes the same way. Only in a release build, as the test above.
 #[test]
 fn the_command_written_in_kairos_runs_like_the_rust_one() {
-    if cfg!(target_family = "wasm") {
+    if cfg!(target_family = "wasm") || cfg!(debug_assertions) {
         return;
     }
     on_big_stack(|| {

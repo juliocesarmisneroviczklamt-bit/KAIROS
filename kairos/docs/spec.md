@@ -755,6 +755,10 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M11 | o simulador em Kairós (custos, impacto, IR) | ✅ `std/sim.krs` dá os mesmos bits do simulador Rust (mercado sintético no CI; os 5 relatórios do laboratório iguais) |
 | M12 | auto-hospedagem: o compilador escrito em Kairós (§14) | ✅ léxico, parser, verificador, HIR e análise temporal iguais ao Rust nó a nó nos 529 arquivos do repositório; o compilador compila a si mesmo e a imagem é um ponto fixo; os programas dourados rodam das imagens com `kairos exec` |
 | M13 | o back-end escrito em Kairós: WebAssembly (§15) | ✅ os programas de `tests/wasm` dão a saída, os erros e as mensagens do interpretador; o runtime dos módulos, escrito em Kairós, dá os bits do Rust e da `libm`; o compilador compila a si mesmo em WebAssembly, num ponto fixo |
+| M14 | o back-end WebAssembly completo: closures, tensores, `b3`, holdouts, `grad` (§15) | ✅ o `momentum`, o modelo do M6 e o MLP compilados dão os mesmos números e gravam o mesmo registro e o mesmo livro-razão |
+| M15 | o interpretador escrito em Kairós (§16) | ✅ os 158 programas de teste (55 com `b3`) saem iguais pelo `ki.wasm` |
+| M16 | o comando `kairos` escrito em Kairós (§17) | ✅ subcomandos, `exec` e REPL iguais aos do executável Rust, em WebAssembly sem Rust |
+| M17 | memória: um alocador que reaproveita blocos entre tamanhos | o `momentum` em WebAssembly com uma fração dos 1,5 GB de hoje, com os mesmos números |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -924,3 +928,37 @@ kairos run kairos/compiler/ki.krs kairos/std programa.krs [argumentos...]
 - **Conferido:** os 55 programas de teste que usam `b3` (os de `tests/wasm_b3`, `tests/temporal`, `tests/programs` e `examples`) dão, pelo `ki.wasm`, a mesma saída, as mesmas notas e erros, o mesmo registro de testes e o mesmo livro-razão do interpretador Rust. O `cargo test --release -p kairos --test wasm the_interpreter_written_in_kairos_runs_b3` confere quatro deles quando os dados existem.
 
 O interpretador escrito em Kairós roda tudo o que as suítes de teste cobrem. As únicas diferenças vêm do hospedeiro WebAssembly: o texto de um erro do sistema, e o `list_dir`, que o node no Windows não implementa.
+
+## 17. O comando `kairos` escrito em Kairós (M16, v0.16.0)
+
+[`compiler/kairos.krs`](../compiler/kairos.krs) é o comando `kairos` inteiro escrito em Kairós: os subcomandos de `src/main.rs`, com a mesma saída, os mesmos erros e o mesmo código de saída. Compilado para WebAssembly pelo compilador em Kairós, vira um `kairos.wasm` sem nenhuma linha de Rust (as releases o trazem pronto, como `kairos-selfhost.wasm`):
+
+```
+kairos run kairos/compiler/kw.krs kairos/std saida kairos/compiler/kairos.krs
+wasmtime run -W max-wasm-stack=4194304 --dir=. saida/kairos.wasm run programa.krs
+```
+
+(Um programa que recursa fundo pede uma pilha maior ao runtime: o interpretador recursa junto com ele.)
+
+- **Subcomandos:**
+  - `run`, `check` e o atalho `kairos programa.krs`, que também serve a scripts com `#!/usr/bin/env kairos`;
+  - `repl` (e `kairos` sozinho);
+  - `exec`, a imagem gravada pelo `kc.krs`;
+  - `ledger` e `ledger withdraw <protocolo>`;
+  - `tokens`, `ast`, `types` e `hir`;
+  - `--version`.
+
+  O que eles têm em comum fica em [`compiler/cli.krs`](../compiler/cli.krs), que o `ki.krs` também usa.
+- **A biblioteca padrão vai dentro do programa**, como no executável Rust. [`compiler/gen_std.krs`](../compiler/gen_std.krs) gera [`compiler/std_embed.krs`](../compiler/std_embed.krs) com o texto de cada arquivo de `kairos/std` e a versão do `Cargo.toml`. O checker a recebe pronta (`std_srcs`) em vez de lê-la de uma pasta.
+- **O REPL** segue o do Rust:
+  - o prompt é `kai> `, e a continuação `...  ` vale enquanto houver `(`, `[` ou `{` aberto, fora de textos e comentários;
+  - `:help` (ou `:h`) e `:q` (ou `:quit`, `:exit`);
+  - cada entrada se chama `<repl:n>`, é verificada contra tudo o que veio antes e roda no mesmo quadro de variáveis do nível de cima;
+  - o valor da última expressão aparece como `= valor` (exceto `()`);
+  - uma entrada com erro de verificação deixa a sessão exatamente como estava; um erro de execução mantém o que a entrada já declarou e atribuiu;
+  - os `import` de uma entrada são verificados e rodados antes do resto dela, cada arquivo uma vez.
+- **O `exec`** lê a imagem ([`compiler/image_read.krs`](../compiler/image_read.krs)) e a roda no interpretador escrito em Kairós. Uma imagem malformada dá as mensagens do leitor Rust (`line N: ...`). Os nós da HIR são lidos como foram escritos: o interpretador não precisa dos tipos que a imagem omite.
+- **Builtins novos:**
+  - `read_line() -> str`: uma linha da entrada padrão, com a quebra de linha; `""` no fim da entrada (ou se a linha não for UTF-8);
+  - `print_raw(s: str)`: escreve o texto na saída padrão sem quebra de linha, de imediato.
+- **Conferido:** `cargo test --release -p kairos --test wasm the_command_written` compila o comando para WebAssembly e o compara com o executável Rust. Cobre os subcomandos sobre programas de teste, o `exec` de imagens (inclusive malformadas) e sessões de REPL dadas pela entrada padrão. As únicas diferenças vêm do hospedeiro: o texto de um erro do sistema, e o `list_dir`, que o node no Windows não implementa.
