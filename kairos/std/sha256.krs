@@ -1,0 +1,89 @@
+// SHA-256 (FIPS 180-4) in Kairós: the hash the lab uses to name strategies (the weights of an
+// evaluation) and files. Words of 32 bits are kept in i64, masked to 32 bits.
+
+fn sha_k() -> List[i64] {
+    [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221,
+        3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580,
+        3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986,
+        2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895,
+        666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037,
+        2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344,
+        430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779,
+        1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298]
+}
+
+fn sha_rotr(x: i64, n: i64) -> i64 {
+    bit_and(bit_or(shr(x, n), shl(x, 32 - n)), 4294967295)
+}
+
+fn sha_add(a: i64, b: i64) -> i64 {
+    bit_and(a + b, 4294967295)
+}
+
+// The hash of the bytes of b, in lowercase hexadecimal (64 digits).
+fn sha256_hex(b: Bytes) -> str {
+    let k = sha_k()
+    var h = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]
+    let n = len(b)
+    // the message, then 0x80, zeros, and its length in bits (64 bits, big-endian)
+    var msg: List[i64] = []
+    for i in 0..n { msg.push(get_u8(b, i)) }
+    msg.push(128)
+    while len(msg) % 64 != 56 { msg.push(0) }
+    let bits = n * 8
+    var s = 56
+    while s >= 0 {
+        msg.push(bit_and(shr(bits, s), 255))
+        s -= 8
+    }
+    var w: List[i64] = []
+    for i in 0..64 { w.push(0) }
+    var at = 0
+    while at < len(msg) {
+        for i in 0..16 {
+            let j = at + 4 * i
+            w[i] = bit_or(bit_or(shl(msg[j], 24), shl(msg[j + 1], 16)), bit_or(shl(msg[j + 2], 8), msg[j + 3]))
+        }
+        for i in 16..64 {
+            let s0 = bit_xor(bit_xor(sha_rotr(w[i - 15], 7), sha_rotr(w[i - 15], 18)), shr(w[i - 15], 3))
+            let s1 = bit_xor(bit_xor(sha_rotr(w[i - 2], 17), sha_rotr(w[i - 2], 19)), shr(w[i - 2], 10))
+            w[i] = sha_add(sha_add(w[i - 16], s0), sha_add(w[i - 7], s1))
+        }
+        var a = h[0]
+        var bb = h[1]
+        var c = h[2]
+        var d = h[3]
+        var e = h[4]
+        var f = h[5]
+        var g = h[6]
+        var hh = h[7]
+        for i in 0..64 {
+            let s1 = bit_xor(bit_xor(sha_rotr(e, 6), sha_rotr(e, 11)), sha_rotr(e, 25))
+            let ch = bit_xor(bit_and(e, f), bit_and(bit_xor(e, 4294967295), g))
+            let t1 = sha_add(sha_add(sha_add(hh, s1), sha_add(ch, k[i])), w[i])
+            let s0 = bit_xor(bit_xor(sha_rotr(a, 2), sha_rotr(a, 13)), sha_rotr(a, 22))
+            let maj = bit_xor(bit_xor(bit_and(a, bb), bit_and(a, c)), bit_and(bb, c))
+            let t2 = sha_add(s0, maj)
+            hh = g
+            g = f
+            f = e
+            e = sha_add(d, t1)
+            d = c
+            c = bb
+            bb = a
+            a = sha_add(t1, t2)
+        }
+        h[0] = sha_add(h[0], a)
+        h[1] = sha_add(h[1], bb)
+        h[2] = sha_add(h[2], c)
+        h[3] = sha_add(h[3], d)
+        h[4] = sha_add(h[4], e)
+        h[5] = sha_add(h[5], f)
+        h[6] = sha_add(h[6], g)
+        h[7] = sha_add(h[7], hh)
+        at += 64
+    }
+    var out = ""
+    for x in h { out = out + to_hex(x, 8) }
+    out
+}

@@ -2,6 +2,7 @@
 // std/sim.krs): the plans of the weights, checked as the bridge checks them, the panel and the
 // calendar the simulator reads, the simulation and its statistics.
 import "data.krs"
+import "std/sha256.krs"
 
 fn fmt_ym(ym: i64) -> str {
     let m = ym % 100
@@ -117,4 +118,16 @@ fn kairos_evaluate(d: LabData, cdi_d: List[f64], w: Tensor[month, asset; f64], n
     let run = sim_run(sim_panel(d, end), sim_calendar(d, cdi_d, n, end), p.m, p.t, p.w, cfg)
     if len(run.ret) == 0 { return ("the simulation produced no months", run, zero) }
     ("", run, sim_eval(run))
+}
+
+// The name of a strategy: the first 12 digits of the SHA-256 of its weights over the months seen
+// (their number, the number of assets, then each weight's 64 bits, month by month).
+fn weights_sha(w: Tensor[month, asset; f64], n: i64) -> str {
+    var b = bytes()
+    put_u64(inout b, n)
+    put_u64(inout b, size(w, asset))
+    for m in 0..n {
+        for x in to_list(w[month: m]) { put_f64(inout b, x) }
+    }
+    substr(sha256_hex(b), 0, 12)
 }

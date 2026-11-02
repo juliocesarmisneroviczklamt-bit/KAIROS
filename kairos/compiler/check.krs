@@ -807,7 +807,7 @@ fn join_path(dir: str, path: str) -> str {
 }
 
 fn std_files() -> List[str] {
-    ["std/json.krs", "std/csv.krs", "std/dates.krs", "std/base64.krs", "std/stats.krs", "std/sim.krs"]
+    ["std/json.krs", "std/csv.krs", "std/dates.krs", "std/base64.krs", "std/stats.krs", "std/sim.krs", "std/sha256.krs"]
 }
 
 // The file an `import` means: (its path, the key it is known by), or ("", "") with the error set.
