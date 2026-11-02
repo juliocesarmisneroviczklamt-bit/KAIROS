@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.18.0**, com o roteiro M1–M18 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.19.0**, com o roteiro M1–M19 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -20,7 +20,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.18.0**, com 
 - M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust;
 - M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust;
 - M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB;
-- M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações.
+- M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações;
+- M19: os demonstrativos da CVM no ponto do tempo ([`lab/cvm.krs`](lab/cvm.krs)), e o tempo desconhecido do que vem de fora separado do tempo provado.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -182,10 +183,16 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **`contract` com um lado `t3` só soma e subtrai.** No interpretador Rust, um tensor `t3` guarda cinco trits por byte.
 - **`grad` treina camadas ternárias** pelo estimador *straight-through* ([`examples/ternary.krs`](examples/ternary.krs)).
 
+**M19 (os demonstrativos da CVM, no ponto do tempo)**
+- **42 mil entregas de DFP e ITR (2010–2026)** em [`lab/cvm.krs`](lab/cvm.krs): ativo, patrimônio, receita e lucro (doze meses) e ações, mês a mês, para os ativos do painel da B3 ([spec §20](docs/spec.md)).
+- **Cada número vale do dia em que a CVM recebeu a versão que o traz**, inclusive as reapresentações.
+- **`zip_entries` e `read_zip_lines`:** ler um arquivo de dentro de um ZIP pelo nome.
+- **O que vem de fora tem uma marca:** um valor lido de arquivo não decide nada até `observed` declarar quando cada linha é conhecida, e a declaração não apaga um uso do futuro que o compilador prova.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M19 | os dados fundamentalistas da CVM (DFP e ITR) em Kairós, no ponto do tempo da entrega: cada número conhecido só a partir da data em que a empresa o entregou |
+| M20 | a definir: o custo do aluguel de ações no simulador (para o long-short) ou o `t3` compactado no WebAssembly |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

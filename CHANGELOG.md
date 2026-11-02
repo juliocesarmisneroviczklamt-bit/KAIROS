@@ -2,6 +2,28 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.19.0 — M19: os demonstrativos da CVM, no ponto do tempo
+
+**O laboratório ganhou informação nova: os demonstrativos financeiros das companhias abertas,** dos dados abertos da CVM (DFP desde 2010, ITR desde 2011), escritos em Kairós. Cada número só é conhecido a partir do dia em que a CVM recebeu a entrega que o traz. E a linguagem passou a distinguir o tempo que ela prova do tempo que não conhece.
+
+- **Os dados:**
+  - [`lab/fetch_cvm.krs`](kairos/lab/fetch_cvm.krs) baixa os 31 arquivos (~600 MB, 20 s);
+  - [`lab/build_cvm.krs`](kairos/lab/build_cvm.krs) lê 42 mil entregas em 35 s: ativo, patrimônio, receita, lucro e ações, consolidados quando existem;
+  - `cvm_fundamentals("data", n)` ([`lab/cvm.krs`](kairos/lab/cvm.krs)) dá, mês a mês, o que cada companhia tinha informado até então, com receita e lucro dos últimos doze meses. Liga 1.490 dos 2.241 ativos do painel às suas companhias.
+- **O ponto do tempo:** os arquivos guardam só a última versão de cada entrega, então uma reapresentação vale do dia em que foi recebida. O BRB entregou o DFP de 2023 seis vezes, de abril a julho de 2024: seus números valem desde julho. A data da primeira versão vazaria a reapresentação 3,5 meses antes. Uma conferência independente achou 0 valores, de 142.648, vindos de entregas recebidas depois do fim do seu mês.
+- **A linguagem:**
+  - builtins `zip_entries(p)` e `read_zip_lines(p, entrada, keep)`, mais as variantes `try_`, para ler um arquivo de dentro de um ZIP pelo nome;
+  - **o que vem de fora tem uma marca própria.** Um valor de arquivo, da rede ou da entrada não tem mais o tempo do "fim dos dados" (o de quem usa o histórico inteiro), e sim uma marca à parte, que nenhuma decisão aceita: E0301 "use of information whose time is not known";
+  - `observed(x, lag: k)` tira a marca e declara quando cada linha é conhecida, mas não apaga um uso do futuro que o compilador prova (`observed(ternary(ret))` continua sendo erro). Antes, a declaração não liberava dado de arquivo nenhum.
+- **As três implementações** (Rust, WebAssembly e o interpretador escrito em Kairós) dão a mesma saída nos builtins de ZIP. Os dois front-ends dão a mesma análise temporal em todos os arquivos.
+- **Testes:**
+  - `tests/wasm/zip_entries.krs`;
+  - `observed_declares_the_time_of_what_comes_from_outside` (em `tests/temporal.rs`);
+  - `tests/temporal/fundamentals_*.krs`;
+  - três casos de erro do verificador;
+  - [`lab/check_cvm.krs`](kairos/lab/check_cvm.krs) (cobertura, a Petrobras mês a mês e a regra do tempo).
+- **Nada foi avaliado:** os dados estão prontos para pesquisa, mas uma hipótese nova precisa de um protocolo registrado antes. Como os meses de 2026-11 em diante estão reservados ao holdout do M6, a validação de uma estratégia com fundamentos fica para o futuro.
+
 ## 0.18.0 — M18: o elemento ternário `t3`
 
 **A Kairós ganhou um tipo para valores de {−1, 0, +1}.** São os pesos do BitNet b1.58, matrizes ternárias que se multiplicam só com somas e subtrações. Também é a forma natural de uma carteira comprada, fora ou vendida. `t3` é um tipo escalar e um elemento de tensor (`Tensor[feature, hidden; t3]`).

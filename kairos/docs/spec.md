@@ -184,7 +184,7 @@ Para coletar dados e escrever relatórios em Kairós, sem passar por outra lingu
 
 - **Escapes de texto:** `\n`, `\t`, `\r`, `\0`, `\"`, `\\` e `\u{e9}`, este com 1 a 6 dígitos hexadecimais.
 - **Erros de arquivo** (não existe, sem permissão…) param o programa com R0011 e a mensagem do sistema.
-- **Tempo:** o que vem de um arquivo ou da rede não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo não decide pesos (E0301), a menos que se declare quando cada linha fica conhecida, com `observed`. `args()`, `env()` e `today()` são conhecidos antes de tudo.
+- **Tempo:** o que vem de um arquivo, da rede ou da entrada não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo leva uma marca, e com ela não decide pesos (E0301, "whose time is not known"). A marca sai quando se declara quando cada linha fica conhecida, com `observed` (§20). `args()`, `env()` e `today()` são conhecidos antes de tudo.
 - **A cerca do holdout** (§7) vale para o módulo `b3`. Ler os arquivos de mercado diretamente fica fora dela, mas aparece no código.
 
 ### 4.7 Mapas (M9)
@@ -382,7 +382,7 @@ A análise roda sobre o HIR tipado, depois da checagem de tipos, como interpreta
 - **Tensores sobre um eixo temporal** guardam que a linha `t` é conhecida em `end(t + defasagem)`:
   - `b3.monthly_returns()` e `b3.cdi()`: `end(t)`;
   - `b3.eligible()`: `end(t − 1)`, porque o universo NEFIN do ano é fixado com a liquidez do ano anterior;
-  - `observed(x, lag: k)`: declara `end(t + k)` para qualquer tensor, como dados próprios.
+  - `observed(x, lag: k)`: declara `end(t + k)` para qualquer tensor, como dados próprios. Desde o M19 (§20), a declaração cobre só o que o compilador não sabe, o tempo do que veio de fora; um uso do futuro que ele prova continua sendo erro.
 - **Seleção de linhas:** `x[month: e]` é conhecido em `end(e + defasagem)`; um intervalo `x[month: a ..= b]`, em `end(b + defasagem)`.
 - **Operações** levam o mais tardio dos operandos.
 - **O histórico inteiro:** reduzir sobre o eixo temporal (`mean(ret, over: month)`), ranquear ao longo dele ou listar todas as linhas só fica conhecido **no fim dos dados**.
@@ -760,7 +760,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M16 | o comando `kairos` escrito em Kairós (§17) | ✅ subcomandos, `exec` e REPL iguais aos do executável Rust, em WebAssembly sem Rust |
 | M17 | memória: um alocador que reaproveita blocos entre tamanhos (§18) | ✅ o `momentum` em WebAssembly cai de 1.565 MB para 542 MB, com os mesmos números |
 | M18 | o elemento ternário `t3` (§19) | ✅ `ternary`, `contract` só com somas e subtrações, cinco trits por byte no Rust, `grad` pelo *straight-through*; a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
-| M19 | os dados fundamentalistas da CVM (DFP e ITR) em Kairós, no ponto do tempo da entrega | cada número conhecido só a partir da data em que a empresa o entregou; um painel por empresa e trimestre ao lado do da B3 |
+| M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo (§20) | ✅ 42 mil entregas num painel mês a mês; 0 de 142.648 valores fora da regra; o tempo desconhecido do que vem de fora separado do tempo provado |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -1022,3 +1022,52 @@ Um `t3` vale −1, 0 ou +1. É o tipo dos pesos ternários do BitNet b1.58, matr
 - `tests/programs/ternary.krs` e `tests/wasm/t3.krs` dão a mesma saída no interpretador Rust, no WebAssembly e no interpretador escrito em Kairós. Os casos cobrem NaN, infinito, tudo zero, o meio do arredondamento, contrações com eixos de lote dos dois lados, `t3` em structs e listas, e `grad`;
 - o verificador escrito em Kairós dá os mesmos tipos, HIR e erros em 23 casos de `tests/checker/t3_*.krs`;
 - a análise temporal tem dois casos novos em `tests/temporal/ternary_*.krs`.
+
+## 20. Os demonstrativos da CVM, no ponto do tempo (M19, v0.19.0)
+
+O laboratório ganhou os demonstrativos financeiros das companhias abertas, tirados dos dados abertos da CVM e escritos em Kairós. São os DFP (anuais, desde 2010) e os ITR (trimestrais, desde 2011). Cada número só é conhecido a partir do dia em que a CVM recebeu a entrega que o traz.
+
+**Os arquivos.**
+- [`lab/fetch_cvm.krs`](../lab/fetch_cvm.krs) baixa um ZIP por ano e tipo para `data/raw/cvm` (~600 MB). Os dos últimos cinco anos são baixados de novo depois de 30 dias, porque a CVM acrescenta a eles as versões reapresentadas.
+- Cada ZIP tem 19 CSVs, em Latin-1:
+  - o índice das entregas (`DT_RECEB`, o dia do recebimento de cada versão);
+  - os balanços (BPA, BPP), o resultado (DRE) e a composição do capital;
+  - cada demonstração consolidada e individual.
+- Para ler uma entrada pelo nome, a linguagem ganhou dois builtins: `zip_entries(p)` e `read_zip_lines(p, entrada, keep)`, além das variantes `try_`.
+
+**A tabela.** [`lab/build_cvm.krs`](../lab/build_cvm.krs) lê todos os anos (42 mil entregas em 35 s) e grava `data/processed/cvm_filings.csv`. Cada entrega dá:
+- `assets`: o ativo total (conta 1);
+- `equity`: o patrimônio líquido (a conta de nível 2 do passivo com esse nome: `2.03` nas empresas, `2.07` ou `2.08` nos bancos);
+- `revenue` (3.01) e `income` (3.11, o lucro do período), do início do exercício até a data da entrega;
+- `shares`: as ações emitidas menos as em tesouraria.
+
+As consolidadas valem quando existem; senão, as individuais.
+
+**O ponto do tempo.** Os arquivos guardam só a última versão de cada entrega. Uma reapresentação, portanto, só é conhecida a partir do dia em que foi recebida. O BRB entregou o DFP de 2023 seis vezes, de 10/04 a 31/07/2024, e os números que os arquivos trazem são os da sexta versão: valem desde 31/07. Usar a data da primeira versão vazaria a reapresentação três meses e meio antes.
+
+**O painel.** `cvm_fundamentals("data", n)` devolve, para os `n` meses que o `b3` mostra (nunca além da cerca de um holdout pendente), um `Tensor[month, asset; f64]` de cada campo, com o que a companhia do ativo tinha informado até o fim de cada mês:
+- balanço: o da última entrega recebida até então;
+- `revenue` e `income`: os dos últimos doze meses, o exercício ou o acumulado do ano mais o ano anterior menos os mesmos meses dele, contanto que as três entregas tenham sido recebidas.
+
+Os ativos se ligam às companhias pelos quatro primeiros caracteres do ticker, com o `codeCVM` das respostas da B3 em cache (1.490 dos 2.241 ativos do painel). Do universo líquido de cada dezembro, 75 a 95% têm o patrimônio conhecido.
+
+**O que vem de fora.** Até o M18, um valor lido de arquivo tinha o tempo do "fim dos dados", o mesmo de quem usa o histórico inteiro, e nenhuma declaração o liberava. Agora são duas coisas distintas:
+- **O tempo que o compilador prova** (sempre, `end(t)`, o fim dos dados) continua como antes.
+- **O que vem de um arquivo, da rede ou da entrada** leva uma marca à parte, com o lugar da leitura. A marca passa por toda conta, e nenhuma decisão a aceita: E0301 "use of information whose time is not known", nos pesos de `b3.evaluate` e nas funções anotadas `@ end(...)`.
+- **`observed(x, lag: k)` tira a marca** e declara que a linha `t` é conhecida em `end(t + k)`. Não apaga o que o compilador prova: `observed(ternary(ret))` continua sendo o histórico inteiro, e `observed(arquivo + ret[month: m])` continua conhecido em `end(m)`.
+- **A declaração é de quem a escreve.** A biblioteca da CVM declara o painel porque o constrói no ponto do tempo. Ela confere a regra por um caminho à parte: dos 142.648 valores do patrimônio, nenhum vem de uma entrega recebida depois do fim do seu mês. Como a análise junta ao resultado de uma chamada o tempo dos seus argumentos, `cvm_fundamentals` lê os arquivos por dentro e recebe só o caminho e o número de meses.
+
+```
+import "lab/cvm.krs"
+let ret = b3.monthly_returns()
+let f = cvm_fundamentals("data", size(ret, month))
+for m in 12..size(ret, month) {
+    weights[month: m] = where(f.equity[month: m - 1] > 1e9, 0.01, 0.0)   // passa
+    weights[month: m] = where(f.equity[month: m] > 1e9, 0.01, 0.0)       // E0301: known at end(m)
+}
+```
+
+**Conferido:**
+- [`lab/check_cvm.krs`](../lab/check_cvm.krs) mostra a cobertura e a Petrobras mês a mês: os números mudam em março, maio, agosto e novembro, os meses das entregas;
+- `tests/temporal.rs` tem o teste `observed_declares_the_time_of_what_comes_from_outside`, e `tests/temporal/fundamentals_*.krs` cobre o painel;
+- `tests/wasm/zip_entries.krs` dá a mesma saída nas três implementações.
