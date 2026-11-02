@@ -1,0 +1,181 @@
+// Study A of the lab, in Kairós (quant-b3's src/risk.rs, which this file replaces): momentum
+// with risk control. Parameters fixed before running:
+// - long-short: WML scaled by (volatility target / realized volatility of the previous 126
+//   sessions), as in Barroso & Santa-Clara (2015); target 12% a year, at most 2x;
+// - long-only: exposure = min(1, 15% / realized volatility of the winners), the rest in CDI
+//   (volatility-managed portfolios, Moreira & Muir 2017).
+//
+//     kairos run kairos/lab/risk.krs
+import "portfolios.krs"
+import "stats.krs"
+import "fmt.krs"
+
+let win_days = 126
+let target_ls = 0.12
+let max_lev = 2.0
+let target_lo = 0.15
+
+let real = b3.sessions()
+let months = b3.months()
+let cdi_all = b3.cdi()
+let forms = momentum_forms(nefin_universe(500000.0), 15, 0.0)
+// the daily series use the whole history, so there is a volatility in 2001-01 already
+let w_d = daily_ew(forms.winners, forms.has)
+let l_d = daily_ew(forms.losers, forms.has)
+let wml_d = w_d - l_d
+let start = b3.month_index(200101)
+let n = size(w_d, month)
+
+var ls = []
+var ls_s = []
+var levs = []
+var fm = []                      // the months of the forms
+var w0 = zeros_like(b3.monthly_returns())
+var w1 = zeros_like(b3.monthly_returns())
+for m in start..n {
+    if not forms.has[month: m] { continue }
+    let wml = compound_days(w_d[month: m], real[month: m]) - compound_days(l_d[month: m], real[month: m])
+    let v = realized_vol(wml_d[month: m - 8 ..= m - 1], real[month: m - 8 ..= m - 1], win_days)
+    let lev = if is_nan(v) { 1.0 } else { min(target_ls / v, max_lev) }
+    ls.push(wml)
+    ls_s.push(lev * wml)
+    levs.push(lev)
+    fm.push(m)
+    // long-only: the winners in equal weights; with control, exposure by the winners' volatility
+    let vw = realized_vol(w_d[month: m - 8 ..= m - 1], real[month: m - 8 ..= m - 1], win_days)
+    let expo = if is_nan(vw) { 1.0 } else { min(target_lo / vw, 1.0) }
+    let k = forms.k[month: m]
+    w0[month: m] = where(forms.winners[month: m], 1.0 / k, 0.0)
+    w1[month: m] = where(forms.winners[month: m], expo / k, 0.0)
+}
+
+// long-only, with the lab's simulator (a fixed 25 bps a side, as in phase 1, to compare only the
+// effect of the control)
+let lo0 = b3.simulate(w0, cost_bps: 25.0, lag: 0, capital: 1000000.0)
+let lo1 = b3.simulate(w1, cost_bps: 25.0, lag: 0, capital: 1000000.0)
+
+fn sharpe12(x: List[f64]) -> f64 {
+    avg(x) / sd(x) * sqrt(12.0)
+}
+
+fn skewness(x: List[f64]) -> f64 {
+    let m = avg(x)
+    let s = sd(x)
+    var acc = 0.0
+    for v in x {
+        let z = (v - m) / s
+        acc += z * z * z
+    }
+    acc / float(len(x))
+}
+
+print("")
+print("================ A. MOMENTUM COM CONTROLE DE RISCO ================")
+print("Parâmetros fixados antes de rodar: vol dos últimos " + str(win_days) + " pregões; long-short com alvo de " + fixed(target_ls * 100.0, 0) + "% a.a. e alavancagem máx " + fixed(max_lev, 0) + "x; long-only com alvo de " + fixed(target_lo * 100.0, 0) + "% (o resto fica no CDI).")
+print("Período: " + ym_text(months[fm[0]]) + " a " + ym_text(months[fm[len(fm) - 1]]) + " (" + str(len(fm)) + " meses)")
+print("")
+print(left("long-short (WML)", 30) + " " + right("média", 8) + " " + right("vol", 8) + " " + right("Sharpe", 7) + " " + right("t(NW)", 7) + " " + right("maxDD", 8) + " " + right("pior mês", 9) + " " + right("assim.", 7))
+for p in [("original", ls), ("escalado pela vol", ls_s)] {
+    let x = p.1
+    let o = ols_nw(x, [], nw_lags(len(x)))
+    var worst = inf
+    for v in x { worst = min(worst, v) }
+    print(left(p.0, 30) + " " + right(pct(avg(x) * 12.0), 8) + " " + right(pct(sd(x) * sqrt(12.0)), 8) + " " + right(fixed(sharpe12(x), 2), 7) + " " + right(fixed(if o.ok { o.t[0] } else { nan }, 2), 7) + " " + right(pct(max_dd(x)), 8) + " " + right(pct(worst), 9) + " " + right(fixed(skewness(x), 2), 7))
+}
+var lmin = inf
+var lmax = 0.0
+for v in levs {
+    lmin = min(lmin, v)
+    lmax = max(lmax, v)
+}
+print("alavancagem do escalado: média " + fixed(avg(levs), 2) + "x, mín " + fixed(lmin, 2) + "x, máx " + fixed(lmax, 2) + "x")
+
+// the months each simulation covered, its returns, the CDI, the NEFIN factors
+struct Series {
+    mi: List[i64],
+    ret: List[f64],
+    expo: List[f64],
+}
+fn series(s: Simulation) -> Series {
+    var mi = []
+    var ret = []
+    var expo = []
+    for m in 0..size(s.ret, month) {
+        if not is_nan(s.ret[month: m]) {
+            mi.push(m)
+            ret.push(s.ret[month: m])
+            expo.push(s.exposure[month: m])
+        }
+    }
+    Series { mi: mi, ret: ret, expo: expo }
+}
+let s0 = series(lo0)
+let s1 = series(lo1)
+var cdi = []
+for m in s0.mi { cdi.push(cdi_all[month: m]) }
+
+let nrm = b3.nefin("rm_rf")
+let nsmb = b3.nefin("smb")
+let nhml = b3.nefin("hml")
+let niml = b3.nefin("iml")
+let nwml = b3.nefin("wml")
+let nrf = b3.nefin("rf")
+// 4- or 5-factor alpha (a year) and its t, over the months with NEFIN factors
+fn alpha_t(s: Series, rm: Tensor[month; f64], smb: Tensor[month; f64], hml: Tensor[month; f64], iml: Tensor[month; f64], wml: Tensor[month; f64], rf: Tensor[month; f64], five: bool) -> str {
+    var y = []
+    var f1 = []
+    var f2 = []
+    var f3 = []
+    var f4 = []
+    var f5 = []
+    for i in 0..len(s.mi) {
+        let m = s.mi[i]
+        if not is_nan(rf[month: m]) {
+            y.push(s.ret[i] - rf[month: m])
+            f1.push(rm[month: m])
+            f2.push(smb[month: m])
+            f3.push(hml[month: m])
+            f4.push(iml[month: m])
+            f5.push(wml[month: m])
+        }
+    }
+    let o = if five { ols_nw(y, [f1, f2, f3, f4, f5], nw_lags(len(y))) } else { ols_nw(y, [f1, f2, f3, f4], nw_lags(len(y))) }
+    if o.ok { pct(o.coef[0] * 12.0) + " (" + fixed(o.t[0], 2) + ")" } else { "" }
+}
+
+print("")
+print(left("long-only vencedores (25bps)", 30) + " " + right("CAGR", 8) + " " + right("vol", 8) + " " + right("Sharpe*", 8) + " " + right("maxDD", 8) + " " + right("exposição", 9) + " " + right("alpha 4F (t)", 17) + " " + right("alpha 5F (t)", 17))
+for p in [("original", s0), ("com controle de vol", s1)] {
+    let s = p.1
+    var ex = []
+    for i in 0..len(s.ret) { ex.push(s.ret[i] - cdi[i]) }
+    print(left(p.0, 30) + " " + right(pct(cagr(s.ret, 12.0)), 8) + " " + right(pct(sd(s.ret) * sqrt(12.0)), 8) + " " + right(fixed(avg(ex) / sd(ex) * sqrt(12.0), 2), 8) + " " + right(pct(max_dd(s.ret)), 8) + " " + right(fixed(100.0 * avg(s.expo), 0), 8) + "% " + right(alpha_t(s, nrm, nsmb, nhml, niml, nwml, nrf, false), 17) + " " + right(alpha_t(s, nrm, nsmb, nhml, niml, nwml, nrf, true), 17))
+}
+print("CDI no período: " + pct(cagr(cdi, 12.0)) + "   (* Sharpe sobre o CDI)")
+
+// consistency between subperiods
+print("")
+let split = b3.month_index(201901)
+var ex0 = []
+var ex1 = []
+for i in 0..len(s0.ret) { ex0.push(s0.ret[i] - cdi[i]) }
+for i in 0..len(s1.ret) { ex1.push(s1.ret[i] - cdi[i]) }
+fn half(x: List[f64], mi: List[i64], split: i64, early: bool) -> List[f64] {
+    var out = []
+    for i in 0..len(x) {
+        if (mi[i] < split) == early { out.push(x[i]) }
+    }
+    out
+}
+print("Sharpe por subperíodo        2001-2018   2019-hoje")
+for p in [("WML original", ls, fm), ("WML escalado", ls_s, fm), ("long-only original*", ex0, s0.mi), ("long-only com controle*", ex1, s1.mi)] {
+    print(left(p.0, 28) + " " + right(fixed(sharpe12(half(p.1, p.2, split, true)), 2), 9) + " " + right(fixed(sharpe12(half(p.1, p.2, split, false)), 2), 11))
+}
+
+// the registry of trials
+print("")
+print("Registro de testes (desconta o número de tentativas):")
+print("  " + b3.record_trial("momentum", "WML long-short", "NEFIN terciles 12-2", "2001-hoje", ls))
+print("  " + b3.record_trial("momentum", "long-only vencedores", "custo 25bps", "2001-hoje", ex0))
+print("  " + b3.record_trial("momentum-risco", "WML escalado pela vol", "alvo 12% jan 126 alav 2x", "2001-hoje", ls_s))
+print("  " + b3.record_trial("momentum-risco", "long-only com controle de vol", "alvo 15% jan 126 custo 25bps", "2001-hoje", ex1))

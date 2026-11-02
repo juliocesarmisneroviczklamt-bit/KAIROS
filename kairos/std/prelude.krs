@@ -73,6 +73,20 @@ struct Evaluation {
     dsr: f64,          // deflated Sharpe ratio: P(true Sharpe > best of `trials` tries without skill)
 }
 
+// What `b3.simulate` returns: the simulation month by month (NaN outside the simulated months),
+// for the studies that compute their own statistics. It is a trial in the registry, like
+// `b3.evaluate`.
+struct Simulation {
+    ret: Tensor[month; f64],        // monthly return of total wealth, after costs and IR
+    exposure: Tensor[month; f64],   // fraction of wealth invested
+    turnover: Tensor[month; f64],   // value traded / wealth (buys + sells)
+    cost_bps: f64,                  // average cost per traded real, in basis points
+    tax_paid: f64,                  // R$
+    final_value: f64,               // R$
+    trials: i64,
+    dsr: f64,
+}
+
 // ------------------------------------------------------------------ AI engine (M4)
 // Written in Kairós itself: `grad` differentiates any of it, and the optimizers are generic over
 // the parameters (any struct/tuple of f64 and f64 tensors: the tangent space).

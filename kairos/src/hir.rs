@@ -175,6 +175,11 @@ pub enum HostFn {
     Nefin { factor: u8 },
     /// the same, daily: `Tensor[month, session; f64]`
     NefinDaily { factor: u8 },
+    /// `b3.simulate(w, ...)`: args as `Evaluate`; returns the `Simulation` struct
+    Simulate { result: u32 },
+    /// `b3.record_trial(study, name, params, period, excess)`: the lab's registry; returns the
+    /// line that describes the trial
+    RecordTrial,
     /// `Tensor[month, session; f64]`: the date of each session (YYYYMMDD)
     SessionDates,
 }

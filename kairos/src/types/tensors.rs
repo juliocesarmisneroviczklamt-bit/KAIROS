@@ -898,7 +898,7 @@ impl Checker {
     /// `b3.f(...)`: the bridge to the quant-b3 lab (data and the realistic simulator).
     pub(super) fn b3_call(&mut self, method: &str, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
         let what = format!("`b3.{method}`");
-        if method != "evaluate" && method != "nefin" && method != "nefin_daily" {
+        if !matches!(method, "evaluate" | "simulate" | "nefin" | "nefin_daily") {
             Self::no_named_args(args, &what)?;
         }
         if let Some(a) = args.iter().find(|a| a.inout) {
@@ -940,7 +940,7 @@ impl Checker {
                 let h = self.int_expr(&args[0].expr)?;
                 host(HostFn::MonthIndex, vec![h], Ty::Int)
             }
-            "evaluate" => {
+            "evaluate" | "simulate" => {
                 nargs(1)?;
                 if args[0].name.is_some() {
                     return Err(Diag::new("E0120", args[0].expr.span, "positional arguments must come before named ones"));
@@ -954,7 +954,25 @@ impl Checker {
                     named.push((nm.as_str(), *nsp, &a.expr));
                 }
                 let (sid, xs) = self.weights_and_options("b3.evaluate", &args[0].expr, false, &named, sp)?;
-                host(HostFn::Evaluate { result: sid }, xs, Ty::Struct(sid))
+                if method == "evaluate" {
+                    host(HostFn::Evaluate { result: sid }, xs, Ty::Struct(sid))
+                } else {
+                    let Some(&sim) = self.struct_ids.get("Simulation") else {
+                        return Err(Diag::new("E0100", sp, "the prelude's `Simulation` struct is missing"));
+                    };
+                    host(HostFn::Simulate { result: sim }, xs, Ty::Struct(sim))
+                }
+            }
+            "record_trial" => {
+                nargs(5)?;
+                let mut xs = Vec::new();
+                for (k, a) in args.iter().enumerate() {
+                    let want = if k < 4 { Ty::Str } else { Ty::List(Box::new(Ty::Float)) };
+                    let (h, t) = self.expr(&a.expr, Some(&want))?;
+                    self.expect_ty(&t, &want, a.expr.span)?;
+                    xs.push(h);
+                }
+                host(HostFn::RecordTrial, xs, Ty::Str)
             }
             "daily_returns" | "daily_volume" | "daily_price" => {
                 nargs(0)?;
@@ -1018,7 +1036,7 @@ impl Checker {
                 host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
             }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial")),
         }
     }
 

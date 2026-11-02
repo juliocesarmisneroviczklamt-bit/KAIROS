@@ -272,3 +272,29 @@ fn training_that_includes_the_decision_month_is_caught() {
         "only at the end of the data",
     );
 }
+
+/// A function given data known a month early (the universe) is analysed with that: its
+/// decisions may use the month itself.
+#[test]
+fn a_function_sees_how_early_its_arguments_are_known() {
+    let pick = "fn pick(univ: Tensor[month, asset; bool], ret: Tensor[month, asset; f64]) -> Tensor[month, asset; f64] {
+    var w = zeros_like(ret)
+    for m in 1..size(ret, month) {
+        w[month: m] = where(univ[month: m] and not is_nan(ret[month: m - 1]), 0.01, 0.0)
+    }
+    w
+}
+";
+    ok(&format!("{pick}let w = pick(b3.eligible(), b3.monthly_returns())
+let ev = b3.evaluate(w, lag: 0)
+"));
+    // the same with a universe known only at the end of the month: caught
+    fails(
+        &format!("{pick}let late = b3.monthly_returns() > 0.0
+let w = pick(late, b3.monthly_returns())
+let ev = b3.evaluate(w, lag: 0)
+"),
+        "E0301",
+        "known at end(m)",
+    );
+}

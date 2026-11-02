@@ -73,6 +73,19 @@ pub struct EvalOut {
     pub dsr: f64,
 }
 
+/// The month-by-month result of `b3.simulate`.
+pub struct SimSeries {
+    /// months of the data the program sees
+    pub months: usize,
+    /// the simulated months (indices) and their values
+    pub mi: Vec<usize>,
+    pub ret: Vec<f64>,
+    pub exposure: Vec<f64>,
+    pub turnover: Vec<f64>,
+    pub tax_paid: f64,
+    pub final_value: f64,
+}
+
 /// The lab's registry of trials, inside the results folder.
 pub const REGISTRY: &str = "registro_testes.csv";
 
@@ -641,6 +654,12 @@ impl Host {
     /// asset (fraction of wealth, the rest earns CDI). Rows that are all zero are not traded. The
     /// evaluation is a trial in the registry, and its DSR counts every trial there.
     pub fn evaluate(&self, w: &TensorVal, cfg: &EvalCfg, protos: &[ProtocolDef]) -> Result<EvalOut, HostErr> {
+        self.simulate_series(w, cfg, protos).map(|(e, _)| e)
+    }
+
+    /// `b3.evaluate`, plus the simulation month by month (`b3.simulate`). Either way the
+    /// evaluation is a trial in the registry.
+    pub fn simulate_series(&self, w: &TensorVal, cfg: &EvalCfg, protos: &[ProtocolDef]) -> Result<(EvalOut, SimSeries), HostErr> {
         if let Some(k) = self.opening.get() {
             return Err(herr("R0504", format!("`b3.evaluate` cannot run while the holdout of protocol \"{}\" is open", protos[k].name))
                 .hint("the function given to `open_once` only computes the weights; `open_once` evaluates them"));
@@ -660,7 +679,45 @@ impl Host {
         let (trials, dsr) = self.record(t)?;
         e.trials = trials;
         e.dsr = dsr;
-        Ok(e)
+        let series = SimSeries {
+            months: n,
+            mi: out.mi.clone(),
+            ret: out.ret.clone(),
+            exposure: out.exposure.clone(),
+            turnover: out.turnover.clone(),
+            tax_paid: out.tax_paid,
+            final_value: out.final_value,
+        };
+        Ok((e, series))
+    }
+
+    /// `b3.record_trial(study, name, params, period, excess)`: a trial in the lab's registry, as
+    /// the lab's studies record them (a trial with the same study, name, params and period is
+    /// replaced). Returns the lab's line: Sharpe, trials in the registry, what chance gives, DSR.
+    pub fn record_trial(&self, study: &str, name: &str, params: &str, period: &str, excess: &[f64]) -> Result<String, HostErr> {
+        let t = Trial::new(study, name, params, period, excess);
+        match self.results_dir() {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| herr("R0500", format!("cannot create {}: {e}", dir.display())))?;
+                let path = dir.join(REGISTRY);
+                registry::record_and_describe(&path, &t).map_err(|e| herr("R0500", format!("cannot write the registry of trials {}: {e:#}", path.display())))
+            }
+            None => {
+                let mut mem = self.trials.borrow_mut();
+                let key = |x: &Trial| (x.estudo.clone(), x.nome.clone(), x.params.clone(), x.periodo.clone());
+                mem.retain(|x| key(x) != key(&t));
+                mem.push(t.clone());
+                let df = registry::deflate(&t, &mem);
+                Ok(format!(
+                    "{}: Sharpe {:.2} a.a. | {} testes no registro; o melhor deles daria ~{:.2} por acaso | DSR {:.0}%",
+                    t.nome,
+                    t.sr_m * 12f64.sqrt(),
+                    df.n_trials,
+                    df.sr0_ann,
+                    100.0 * df.dsr
+                ))
+            }
+        }
     }
 
     /// Records a research trial (once per distinct return series: the same strategy evaluated

@@ -455,6 +455,45 @@ impl Interp<'_> {
             HostFn::Nefin { factor } => Value::Tensor(host.nefin(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
             HostFn::NefinDaily { factor } => Value::Tensor(host.nefin_daily(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
             HostFn::SessionDates => Value::Tensor(host.session_dates(protos).map_err(herr)?),
+            HostFn::Simulate { result } => {
+                let (ev, sim) = host.simulate_series(tensor_of(&v[0]), &cfg_of(&v[1..]), protos).map_err(herr)?;
+                let def = &self.ck.structs[result as usize];
+                let series = |xs: &[f64]| {
+                    let mut t = vec![f64::NAN; sim.months];
+                    for (k, &m) in sim.mi.iter().enumerate() {
+                        t[m] = xs[k];
+                    }
+                    Value::Tensor(Rc::new(crate::tensor::TensorVal::new_f(vec![crate::types::AX_MONTH], vec![sim.months], t)))
+                };
+                let mut fields = Vec::with_capacity(def.fields.len());
+                for (name, _) in &def.fields {
+                    fields.push(match name.as_str() {
+                        "ret" => series(&sim.ret),
+                        "exposure" => series(&sim.exposure),
+                        "turnover" => series(&sim.turnover),
+                        "cost_bps" => Value::Float(ev.cost_bps),
+                        "tax_paid" => Value::Float(sim.tax_paid),
+                        "final_value" => Value::Float(sim.final_value),
+                        "trials" => Value::Int(ev.trials),
+                        "dsr" => Value::Float(ev.dsr),
+                        other => {
+                            return Err(Ctl::Err(Diag::new("R0199", sp, format!("internal: `Simulation.{other}` is not produced by `b3.simulate`"))));
+                        }
+                    });
+                }
+                Value::Struct(result, Rc::new(fields))
+            }
+            HostFn::RecordTrial => {
+                let s = |x: &Value| match x {
+                    Value::Str(s) => s.to_string(),
+                    other => unreachable!("expected a string, got {other:?}"),
+                };
+                let excess: Vec<f64> = match &v[4] {
+                    Value::List(xs) => xs.iter().map(float_of).collect(),
+                    other => unreachable!("expected a list, got {other:?}"),
+                };
+                Value::Str(host.record_trial(&s(&v[0]), &s(&v[1]), &s(&v[2]), &s(&v[3]), &excess).map_err(herr)?.into())
+            }
             HostFn::Holdout { proto } => {
                 host.holdout(protos, proto as usize).map_err(herr)?;
                 Value::Holdout(proto)

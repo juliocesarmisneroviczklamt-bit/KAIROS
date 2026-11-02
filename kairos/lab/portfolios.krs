@@ -1,0 +1,104 @@
+// Portfolios shared by the lab's studies, in Kairós (quant-b3's src/common.rs and the helpers of
+// src/risk.rs): momentum formation, daily equal-weighted returns, realized volatility.
+import "universe.krs"
+
+// The momentum portfolios of each month (rows known at the end of the previous month).
+struct Forms {
+    has: Tensor[month; bool],             // a portfolio was formed
+    alive: Tensor[month, asset; bool],    // in the universe, traded last month (and priced)
+    winners: Tensor[month, asset; bool],  // the top third by return from t-12 to t-2
+    losers: Tensor[month, asset; bool],   // the bottom third
+    k: Tensor[month; f64],                // how many winners (= losers)
+}
+
+// The last price of each month (NaN when the asset did not trade).
+fn last_price() -> Tensor[month, asset; f64] {
+    let px = b3.daily_price()
+    var out = zeros_like(b3.monthly_returns()) + nan
+    for m in 0..size(px, month) {
+        var lp = out[month: m]
+        for s in 0..size(px, session) {
+            let p = px[month: m, session: s]
+            lp = where(is_nan(p), lp, p)
+        }
+        out[month: m] = lp
+    }
+    out
+}
+
+// The lab's `momentum_forms`: from 12 months of history, the live assets of the universe (traded
+// in the previous month, last price at least `min_px`), when there are at least `min_stocks`.
+fn momentum_forms(univ: Tensor[month, asset; bool], min_stocks: i64, min_px: f64) -> Forms {
+    let ret = b3.monthly_returns()
+    let mret = fill_nan(ret, 0.0)
+    let traded = not is_nan(ret)
+    let n = size(ret, month)
+    let none = zeros_like(ret) > 1.0
+    var has = zeros(month: n) > 1.0
+    var alive_all = none
+    var win = none
+    var los = none
+    var k = zeros(month: n)
+    var priced = not none
+    if min_px > 0.0 {
+        priced = last_price() >= min_px
+    }
+    for m in 12..n {
+        let alive = univ[month: m] and traded[month: m - 1] and priced[month: m - 1]
+        let cnt = int(sum(where(alive, 1.0, 0.0)))
+        if cnt < min_stocks { continue }
+        let sig = where(alive, prod(1.0 + mret[month: m - 12 ..= m - 2], over: month) - 1.0, nan)
+        let k3 = int(round(float(cnt) / 3.0))
+        has[month: m] = true
+        alive_all[month: m] = alive
+        win[month: m] = top_k(sig, k3, over: asset)
+        los[month: m] = bottom_k(sig, k3, over: asset)
+        k[month: m] = float(k3)
+    }
+    Forms { has: has, alive: alive_all, winners: win, losers: los, k: k }
+}
+
+// Daily returns of each month's portfolio, equally weighted and rebalanced every day (an asset
+// that did not trade counts as 0, as NEFIN does): `Tensor[month, session]`, NaN where there is no
+// portfolio or no session.
+fn daily_ew(set: Tensor[month, asset; bool], has: Tensor[month; bool]) -> Tensor[month, session; f64] {
+    let d = b3.daily_returns()
+    let real = b3.sessions()
+    var out = zeros(month: size(d, month), session: size(d, session)) + nan
+    for m in 0..size(d, month) {
+        if has[month: m] {
+            let k = sum(where(set[month: m], 1.0, 0.0))
+            let acc = sum(where(set[month: m], fill_nan(d[month: m], 0.0), 0.0), over: asset)
+            out[month: m] = where(real[month: m], acc * (1.0 / k), nan)
+        }
+    }
+    out
+}
+
+// Compounded return over a month's sessions.
+fn compound_days(x: Tensor[session; f64], real: Tensor[session; bool]) -> f64 {
+    prod(1.0 + where(real, x, 0.0), over: session) - 1.0
+}
+
+// Annualized volatility (sum of squares, no mean) of the last `win` sessions of `series` (the
+// months given, in order), ignoring NaN; NaN when fewer than half are numbers.
+fn realized_vol(series: Tensor[month, session; f64], real: Tensor[month, session; bool], win: i64) -> f64 {
+    var vals = []
+    for j in 0..size(series, month) {
+        let a = to_list(series[month: j])
+        let r = to_list(where(real[month: j], 1.0, 0.0))
+        for s in 0..len(a) {
+            if r[s] > 0.5 { vals.push(a[s]) }
+        }
+    }
+    var ss = 0.0
+    var cnt = 0
+    for i in max(0, len(vals) - win)..len(vals) {
+        if not is_nan(vals[i]) {
+            ss += vals[i] * vals[i]
+            cnt += 1
+        }
+    }
+    if cnt < win / 2 { return nan }
+    sqrt(ss / float(cnt) * 252.0)
+}

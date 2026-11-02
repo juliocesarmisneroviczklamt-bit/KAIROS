@@ -231,20 +231,18 @@ fn report_formatting_is_rusts() {
     })
 }
 
-/// The momentum study written in Kairós prints exactly the report of the Rust study it replaces
-/// (`quant-b3 momentum` → results/momentum_relatorio.txt). Needs the real data, so it runs by
-/// hand: `cargo test --release -p kairos --test lab -- --ignored`.
-#[test]
-#[ignore]
-fn the_momentum_study_in_kairos_prints_the_rust_report() {
-    on_big_stack(|| {
+/// A study written in Kairós prints exactly the report of the Rust study it replaces. Needs the
+/// real data (and the Rust report), so these run by hand:
+/// `cargo test --release -p kairos --test lab -- --ignored`.
+fn same_report(study: &'static str, report: &'static str) {
+    on_big_stack_with(move || {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let report = root.join("results").join("momentum_relatorio.txt");
+        let report = root.join("results").join(report);
         let Ok(want) = std::fs::read_to_string(&report) else {
             eprintln!("skipped: no {}", report.display());
             return;
         };
-        let path = root.join("kairos").join("lab").join("momentum.krs");
+        let path = root.join("kairos").join("lab").join(study);
         let src = std::fs::read_to_string(&path).unwrap();
         let buf = Rc::new(RefCell::new(Vec::new()));
         let mut s = Session::new(Box::new(Buf(buf.clone())));
@@ -255,4 +253,33 @@ fn the_momentum_study_in_kairos_prints_the_rust_report() {
         let lines = |t: &str| t.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(lines(&got), lines(&want));
     })
+}
+
+fn on_big_stack_with(f: impl FnOnce() + Send + 'static) {
+    use kairos::interp::STACK_BYTES;
+    use std::sync::atomic::Ordering;
+    let h = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            STACK_BYTES.store(256 << 20, Ordering::Relaxed);
+            f()
+        })
+        .unwrap();
+    if let Err(p) = h.join() {
+        std::panic::resume_unwind(p);
+    }
+}
+
+/// `quant-b3 momentum` → results/momentum_relatorio.txt
+#[test]
+#[ignore]
+fn the_momentum_study_in_kairos_prints_the_rust_report() {
+    same_report("momentum.krs", "momentum_relatorio.txt");
+}
+
+/// `quant-b3 momentum-risco` → results/risco_relatorio.txt
+#[test]
+#[ignore]
+fn the_risk_study_in_kairos_prints_the_rust_report() {
+    same_report("risk.krs", "risco_relatorio.txt");
 }

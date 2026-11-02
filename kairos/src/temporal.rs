@@ -281,7 +281,7 @@ pub struct State {
 /// Checks one batch: the new functions (annotations, decisions inside them) and the new
 /// top-level statements, continuing from the state of the previous batches.
 pub fn check(ck: &Checker, new_fns: &[u32], top: &[&HExpr], state: &mut State) -> KResult<()> {
-    let mut an = An { ck, names: Vec::new(), summaries: HashMap::new(), pc: Time::ALWAYS, ret: None };
+    let mut an = An { ck, names: Vec::new(), summaries: HashMap::new(), pc: Time::ALWAYS, ret: None, in_ctx: Vec::new() };
     for &id in new_fns {
         an.summary(id)?;
     }
@@ -319,7 +319,12 @@ struct An<'a> {
     pc: Time,
     /// values returned so far by the function being analysed
     ret: Option<TV>,
+    /// functions being analysed in the context of a call (and how deep that goes)
+    in_ctx: Vec<u32>,
 }
+
+/// How deep calls are analysed in their context before falling back to summaries.
+const MAX_CTX: usize = 6;
 
 fn axis_lit(a: &HArg) -> Option<i64> {
     match a {
@@ -607,6 +612,20 @@ impl<'a> An<'a> {
                 HArg::InOut(p) => self.load_place(p, f)?,
             });
         }
+        // a temporal argument whose rows are known earlier (or later) than the summary assumes
+        // (row t at end(t)): analyse the body with what was passed, as if it were inlined
+        let in_progress = matches!(self.summaries.get(&id), Some(None)) || self.in_ctx.contains(&id);
+        if !in_progress && self.in_ctx.len() < MAX_CTX {
+            let ck = self.ck;
+            let sig = &ck.sigs[id as usize];
+            let shifted = sig.params.iter().enumerate().any(|(i, (_, ty, _))| {
+                matches!(self.param_kind(ty), ParamKind::Temporal(_)) && vals[i].rows.is_some_and(|r| r.lag != Some(0))
+            });
+            let annotated = ck.bodies[id as usize].as_ref().is_some_and(|b| b.known_at.is_some());
+            if shifted && !annotated {
+                return self.in_context(id, &vals, args, f);
+            }
+        }
         let s = self.summary(id)?;
         let ck = self.ck;
         let sig = &ck.sigs[id as usize];
@@ -696,6 +715,35 @@ impl<'a> An<'a> {
             }
         }
         Ok(res)
+    }
+
+    /// The result of a call, from the body analysed with the arguments' own knowledge times.
+    fn in_context(&mut self, id: u32, vals: &[TV], args: &[HArg], f: &mut Vec<TV>) -> KResult<TV> {
+        let ck = self.ck;
+        let body = ck.bodies[id as usize].as_ref().expect("checked body");
+        let mut frame = vec![TV::ALWAYS; body.n_slots as usize];
+        for (i, v) in vals.iter().enumerate() {
+            frame[i] = *v;
+        }
+        self.in_ctx.push(id);
+        let saved_pc = std::mem::replace(&mut self.pc, Time::ALWAYS);
+        let saved_ret = self.ret.take();
+        let r = self.eval(&body.body, &mut frame);
+        let pc = std::mem::replace(&mut self.pc, saved_pc);
+        let ret = std::mem::replace(&mut self.ret, saved_ret);
+        self.in_ctx.pop();
+        let mut res = r?.with_time(pc);
+        if let Some(rv) = ret {
+            res = res.join(&rv);
+        }
+        // `inout` arguments may have been changed with anything the function saw
+        for a in args {
+            if let HArg::InOut(p) = a {
+                let r = root(p);
+                f[r] = f[r].join(&res).no_int();
+            }
+        }
+        Ok(res.no_int())
     }
 
     fn span_of(&self, e: &HExpr) -> Option<Span> {
@@ -988,7 +1036,8 @@ impl<'a> An<'a> {
             HostFn::Cdi => data(0),
             HostFn::Months | HostFn::Tickers => TV::ALWAYS,
             HostFn::MonthIndex => TV { time: vals[0].time, rows: None, int: Lin::Unknown },
-            HostFn::Evaluate { .. } => {
+            HostFn::RecordTrial => TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown },
+            HostFn::Evaluate { .. } | HostFn::Simulate { .. } => {
                 self.check_weights(&vals[0], sp)?;
                 // the evaluation of a whole history is known at its end
                 TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown }
