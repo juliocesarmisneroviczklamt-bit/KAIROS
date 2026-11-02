@@ -12,7 +12,7 @@ fn builtin_names() -> List[str] {
     "utf8_len", "get_u8", "get_u32", "get_u64", "get_i64", "get_f64", "get_f32", "get_str", "write_bytes",
     "read_bytes", "bit_and", "bit_or", "bit_xor", "shl", "shr", "wrapping_add", "wrapping_mul", "to_hex",
     "file_size", "file_date", "http_get_all", "is_alphabetic", "is_alphanumeric", "is_whitespace",
-    "is_uppercase", "keys", "values", "items", "get", "remove", "nan_quantile", "merge_days", "assert",
+    "is_uppercase", "to_bits", "from_bits", "keys", "values", "items", "get", "remove", "nan_quantile", "merge_days", "assert",
     "mean", "prod", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "is_nan", "fill_nan", "where",
     "size", "zeros", "ones", "full", "zeros_like", "full_like", "tensor", "to_list", "rank", "top_k",
     "bottom_k", "contract", "observed", "grad", "value_and_grad", "tanh", "sigmoid", "relu", "softplus",

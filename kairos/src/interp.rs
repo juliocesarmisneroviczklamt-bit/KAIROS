@@ -760,9 +760,10 @@ impl<'a> Interp<'a> {
             Builtin::Sqrt => Ok(Value::Float(float(&v[0]).sqrt())),
             Builtin::Exp => Ok(Value::Float(libm::exp(float(&v[0])))),
             Builtin::Ln => Ok(Value::Float(libm::log(float(&v[0])))),
-            Builtin::Floor => Ok(Value::Float(float(&v[0]).floor())),
-            Builtin::Ceil => Ok(Value::Float(float(&v[0]).ceil())),
-            Builtin::Round => Ok(Value::Float(float(&v[0]).round())),
+            Builtin::Floor => Ok(Value::Float(libm::floor(float(&v[0])))),
+            Builtin::Ceil => Ok(Value::Float(libm::ceil(float(&v[0])))),
+            // libm, not the platform's C library: MinGW's `round` gives 1.0 for 0.49999999999999994
+            Builtin::Round => Ok(Value::Float(libm::round(float(&v[0])))),
             Builtin::ToFloat => Ok(Value::Float(match &v[0] {
                 Value::Int(i) => *i as f64,
                 Value::Float(x) => *x,
@@ -921,6 +922,8 @@ impl<'a> Interp<'a> {
                     _ => c.is_whitespace(),
                 })))
             }
+            Builtin::ToBits => Ok(Value::Int(float(&v[0]).to_bits() as i64)),
+            Builtin::FromBits => Ok(Value::Float(f64::from_bits(as_int(v[0].clone()) as u64))),
             Builtin::FileSize => Ok(Value::Int(std::fs::metadata(str_of(&v[0])).map_or(-1, |m| m.len() as i64))),
             Builtin::FileDate => {
                 let days = std::fs::metadata(str_of(&v[0]))

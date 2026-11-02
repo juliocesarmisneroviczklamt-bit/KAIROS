@@ -286,9 +286,9 @@ impl Interp<'_> {
                     B::Sqrt => f64::sqrt,
                     B::Exp => libm::exp,
                     B::Ln => libm::log,
-                    B::Floor => f64::floor,
-                    B::Ceil => f64::ceil,
-                    _ => f64::round,
+                    B::Floor => libm::floor,
+                    B::Ceil => libm::ceil,
+                    _ => libm::round,
                 };
                 self.map_f(tensor_of(&v[0]), sp, f)?
             }

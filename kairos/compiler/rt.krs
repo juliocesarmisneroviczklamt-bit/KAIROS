@@ -7,6 +7,7 @@
 //
 // A text is the address of an object: its length in bytes (32 bits, little-endian), then its
 // UTF-8 bytes. Texts never change once made.
+import "rt_ryu.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0
@@ -133,4 +134,304 @@ fn rt_str_i64(v: i64) -> str {
     }
     if v < 0 { wasm_store8(p + 4, 45) }
     wasm_str_at(p)
+}
+
+// ------------------------------------------------------------------ floats as text
+//
+// `str(x)` and `print(x)` of a float, as Rust's `{:?}`: the shortest digits that read back as
+// the same float (Ryu, by Ulf Adams: d2s.c with its full tables, in rt_ryu.krs), as a decimal
+// from 1e-4 to 1e16 and with an exponent beyond. These functions use the language itself
+// (`str`, `len`, `substr`), so they run in the interpreter too, where they are checked against
+// the formatting of Rust. 64-bit unsigned numbers are i64 with the same bits.
+
+fn rt_min64() -> i64 {
+    -9223372036854775807 - 1
+}
+
+// a < b as unsigned numbers
+fn rt_ult(a: i64, b: i64) -> bool {
+    bit_xor(a, rt_min64()) < bit_xor(b, rt_min64())
+}
+
+// the high 64 bits of the 128-bit product of a and b, unsigned (by 32-bit halves)
+fn rt_umulhi(a: i64, b: i64) -> i64 {
+    let m32 = 4294967295
+    let a_lo = bit_and(a, m32)
+    let a_hi = shr(a, 32)
+    let b_lo = bit_and(b, m32)
+    let b_hi = shr(b, 32)
+    let b00 = wrapping_mul(a_lo, b_lo)
+    let b01 = wrapping_mul(a_lo, b_hi)
+    let b10 = wrapping_mul(a_hi, b_lo)
+    let b11 = wrapping_mul(a_hi, b_hi)
+    let mid1 = wrapping_add(b10, shr(b00, 32))
+    let mid2 = wrapping_add(b01, bit_and(mid1, m32))
+    wrapping_add(wrapping_add(b11, shr(mid1, 32)), shr(mid2, 32))
+}
+
+// x / d, unsigned, for a small d
+fn rt_udiv(x: i64, d: i64) -> i64 {
+    if x >= 0 { return x / d }
+    var q = shr(x, 1) / d * 2
+    let r = wrapping_add(x, wrapping_mul(q, -d))
+    if r >= d { q += 1 }
+    q
+}
+
+// x - 10 * q10, unsigned
+fn rt_umod10(x: i64, q10: i64) -> i64 {
+    wrapping_add(x, wrapping_mul(q10, -10))
+}
+
+// (m * mul) >> j for a 128-bit `mul` (lo, hi) and 64 < j < 128
+fn rt_mul_shift(m: i64, lo: i64, hi: i64, j: i64) -> i64 {
+    let low1 = wrapping_mul(m, hi)
+    var high1 = rt_umulhi(m, hi)
+    let high0 = rt_umulhi(m, lo)
+    let sum = wrapping_add(high0, low1)
+    if rt_ult(sum, high0) { high1 = wrapping_add(high1, 1) }
+    let d = j - 64
+    bit_or(shl(high1, 64 - d), shr(sum, d))
+}
+
+fn rt_pow5bits(e: i64) -> i64 {
+    shr(e * 1217359, 19) + 1
+}
+
+fn rt_log10_pow2(e: i64) -> i64 {
+    shr(e * 78913, 18)
+}
+
+fn rt_log10_pow5(e: i64) -> i64 {
+    shr(e * 732923, 20)
+}
+
+// how many times 5 divides v (v > 0)
+fn rt_pow5_factor(v: i64) -> i64 {
+    var x = v
+    var count = 0
+    while x % 5 == 0 {
+        x = x / 5
+        count += 1
+    }
+    count
+}
+
+fn rt_zeros(n: i64) -> str {
+    var s = ""
+    for i in 0..n { s = s + "0" }
+    s
+}
+
+fn rt_fmt_f64(x: f64) -> str {
+    let bits = to_bits(x)
+    let neg = bits < 0
+    let ieee_m = bit_and(bits, 4503599627370495)
+    let ieee_e = bit_and(shr(bits, 52), 2047)
+    if ieee_e == 2047 {
+        if ieee_m != 0 { return "NaN" }
+        return if neg { "-inf" } else { "inf" }
+    }
+    let sign = if neg { "-" } else { "" }
+    if ieee_e == 0 and ieee_m == 0 { return sign + "0.0" }
+    // the value is m2 * 2^e2 (e2 two below the true exponent, to fit the bounds)
+    var e2 = 1 - 1023 - 52 - 2
+    var m2 = ieee_m
+    if ieee_e != 0 {
+        e2 = ieee_e - 1023 - 52 - 2
+        m2 = bit_or(4503599627370496, ieee_m)
+    }
+    let accept = bit_and(m2, 1) == 0
+    let mv = 4 * m2
+    let mm_shift = if ieee_m != 0 or ieee_e <= 1 { 1 } else { 0 }
+    // the decimals that read back as x lie in (vm, vp), and x is vr, all times 10^-e10
+    var vr = 0
+    var vp = 0
+    var vm = 0
+    var e10 = 0
+    var vm_tz = false
+    var vr_tz = false
+    if e2 >= 0 {
+        let q = rt_log10_pow2(e2) - (if e2 > 3 { 1 } else { 0 })
+        e10 = q
+        let k = 125 + rt_pow5bits(q) - 1
+        let i = -e2 + q + k
+        let lo = rt_ryu_inv_lo(q)
+        let hi = rt_ryu_inv_hi(q)
+        vr = rt_mul_shift(mv, lo, hi, i)
+        vp = rt_mul_shift(mv + 2, lo, hi, i)
+        vm = rt_mul_shift(mv - 1 - mm_shift, lo, hi, i)
+        if q <= 21 {
+            if mv % 5 == 0 {
+                vr_tz = rt_pow5_factor(mv) >= q
+            } else if accept {
+                vm_tz = rt_pow5_factor(mv - 1 - mm_shift) >= q
+            } else if rt_pow5_factor(mv + 2) >= q {
+                vp = wrapping_add(vp, -1)
+            }
+        }
+    } else {
+        let q = rt_log10_pow5(-e2) - (if -e2 > 1 { 1 } else { 0 })
+        e10 = q + e2
+        let i = -e2 - q
+        let k = rt_pow5bits(i) - 125
+        let j = q - k
+        let lo = rt_ryu_pow5_lo(i)
+        let hi = rt_ryu_pow5_hi(i)
+        vr = rt_mul_shift(mv, lo, hi, j)
+        vp = rt_mul_shift(mv + 2, lo, hi, j)
+        vm = rt_mul_shift(mv - 1 - mm_shift, lo, hi, j)
+        if q <= 1 {
+            vr_tz = true
+            if accept {
+                vm_tz = mm_shift == 1
+            } else {
+                vp = wrapping_add(vp, -1)
+            }
+        } else if q < 63 {
+            vr_tz = bit_and(mv, shl(1, q) - 1) == 0
+        }
+    }
+    // the shortest decimal in the interval
+    var removed = 0
+    var last = 0
+    var output = 0
+    if vm_tz or vr_tz {
+        while true {
+            let vp10 = rt_udiv(vp, 10)
+            let vm10 = rt_udiv(vm, 10)
+            if vp10 <= vm10 { break }
+            let vm_mod = rt_umod10(vm, vm10)
+            let vr10 = rt_udiv(vr, 10)
+            let vr_mod = rt_umod10(vr, vr10)
+            vm_tz = vm_tz and vm_mod == 0
+            vr_tz = vr_tz and last == 0
+            last = vr_mod
+            vr = vr10
+            vp = vp10
+            vm = vm10
+            removed += 1
+        }
+        if vm_tz {
+            while true {
+                let vm10 = rt_udiv(vm, 10)
+                if rt_umod10(vm, vm10) != 0 { break }
+                let vp10 = rt_udiv(vp, 10)
+                let vr10 = rt_udiv(vr, 10)
+                let vr_mod = rt_umod10(vr, vr10)
+                vr_tz = vr_tz and last == 0
+                last = vr_mod
+                vr = vr10
+                vp = vp10
+                vm = vm10
+                removed += 1
+            }
+        }
+        // exactly halfway: up, as Rust (Ryu rounds to even here)
+        let up = (vr == vm and (not accept or not vm_tz)) or last >= 5
+        output = if up { wrapping_add(vr, 1) } else { vr }
+    } else {
+        var round_up = false
+        let vp100 = rt_udiv(vp, 100)
+        let vm100 = rt_udiv(vm, 100)
+        if vp100 > vm100 {
+            let vr100 = rt_udiv(vr, 100)
+            round_up = wrapping_add(vr, wrapping_mul(vr100, -100)) >= 50
+            vr = vr100
+            vp = vp100
+            vm = vm100
+            removed += 2
+        }
+        while true {
+            let vp10 = rt_udiv(vp, 10)
+            let vm10 = rt_udiv(vm, 10)
+            if vp10 <= vm10 { break }
+            let vr10 = rt_udiv(vr, 10)
+            round_up = rt_umod10(vr, vr10) >= 5
+            vr = vr10
+            vp = vp10
+            vm = vm10
+            removed += 1
+        }
+        output = if vr == vm or round_up { wrapping_add(vr, 1) } else { vr }
+    }
+    // the digits d1..dn of x = 0.d1..dn * 10^k
+    let digits = str(output)
+    let n = len(digits)
+    let k = e10 + removed + n
+    let ax = if neg { -x } else { x }
+    if ax < 0.0001 or ax >= 10000000000000000.0 {
+        var s = sign + substr(digits, 0, 1)
+        if n > 1 { s = s + "." + substr(digits, 1, n - 1) }
+        return s + "e" + str(k - 1)
+    }
+    if k <= 0 { return sign + "0." + rt_zeros(-k) + digits }
+    if k < n { return sign + substr(digits, 0, k) + "." + substr(digits, k, n - k) }
+    sign + digits + rt_zeros(k - n) + ".0"
+}
+
+// ------------------------------------------------------------------ the rest of a division
+//
+// x % y on floats, exactly, with the sign of x (C's fmod, as musl writes it): the mantissas
+// are subtracted bit by bit, so the result is exact.
+fn rt_fmod(x: f64, y: f64) -> f64 {
+    let xb = to_bits(x)
+    let yb = to_bits(y)
+    var ex = bit_and(shr(xb, 52), 2047)
+    var ey = bit_and(shr(yb, 52), 2047)
+    let sx = shr(xb, 63)
+    if shl(yb, 1) == 0 or y != y or ex == 2047 { return (x * y) / (x * y) }
+    let ax = shl(xb, 1)
+    let ay = shl(yb, 1)
+    if not rt_ult(ay, ax) {
+        if ax == ay { return 0.0 * x }
+        return x
+    }
+    // the mantissas with their leading 1 (subnormals shifted up)
+    var mx = xb
+    if ex == 0 {
+        var i = shl(mx, 12)
+        while i >= 0 {
+            ex -= 1
+            i = shl(i, 1)
+        }
+        mx = shl(mx, 1 - ex)
+    } else {
+        mx = bit_or(bit_and(mx, 4503599627370495), 4503599627370496)
+    }
+    var my = yb
+    if ey == 0 {
+        var i = shl(my, 12)
+        while i >= 0 {
+            ey -= 1
+            i = shl(i, 1)
+        }
+        my = shl(my, 1 - ey)
+    } else {
+        my = bit_or(bit_and(my, 4503599627370495), 4503599627370496)
+    }
+    while ex > ey {
+        let i = mx - my
+        if i >= 0 {
+            if i == 0 { return 0.0 * x }
+            mx = i
+        }
+        mx = shl(mx, 1)
+        ex -= 1
+    }
+    let i = mx - my
+    if i >= 0 {
+        if i == 0 { return 0.0 * x }
+        mx = i
+    }
+    while shr(mx, 52) == 0 {
+        mx = shl(mx, 1)
+        ex -= 1
+    }
+    if ex > 0 {
+        mx = bit_or(mx - 4503599627370496, shl(ex, 52))
+    } else {
+        mx = shr(mx, 1 - ex)
+    }
+    from_bits(bit_or(mx, shl(sx, 63)))
 }

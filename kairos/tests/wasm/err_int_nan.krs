@@ -1,0 +1,5 @@
+fn to_int(x: f64) -> i64 {
+    int(x)
+}
+print(to_int(-0.5))         // out: 0
+print(to_int(0.0 / 0.0))    // error: R0009

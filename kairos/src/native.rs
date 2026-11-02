@@ -84,7 +84,7 @@ extern "C" fn h_pow(x: f64, y: f64) -> f64 {
     libm::pow(x, y)
 }
 extern "C" fn h_round(x: f64) -> f64 {
-    x.round()
+    libm::round(x)
 }
 extern "C" fn h_fmod(x: f64, y: f64) -> f64 {
     x % y

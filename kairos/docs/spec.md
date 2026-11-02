@@ -233,6 +233,7 @@ Para montar a base de dados em Kairós: os arquivos da B3 são texto de largura 
 | `put_f32(inout b, x)`, `get_f32(b, pos)` | f32, arredondado como o `x as f32` do Rust |
 | `bit_and/or/xor(a, b)`, `shl(a, n)`, `shr(a, n)` | os bits de um `i64`; `shr` é lógico; deslocamento fora de 0..63 é R0014 |
 | `wrapping_add(a, b)`, `wrapping_mul(a, b)` | aritmética que dá a volta em vez de falhar (para hashes como o FNV-1a) |
+| `to_bits(x)`, `from_bits(b)` | os 64 bits de um `f64` como `i64`, e de volta (para escrever floats em Kairós: o runtime do WebAssembly formata números assim) |
 | `to_hex(x, largura)` | hexadecimal minúsculo dos 64 bits, com zeros à esquerda |
 | `file_size(p)`, `file_date(p)` | tamanho (−1 se não existe) e dia da última gravação (UTC, AAAAMMDD; 0 se não existe) |
 | `http_get_all(urls, n)` | vários GETs, `n` de cada vez, na ordem: `(true, corpo)` ou `(false, o erro)` |
@@ -702,7 +703,7 @@ Cada execução gera um **recibo** com:
 
 Reduções são determinísticas por padrão; o modo `fast` é explícito e fica marcado no recibo.
 
-**Os mesmos bits em qualquer sistema (desde a 0.2.1).** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a biblioteca do sistema operacional, que muda de um sistema para outro no último bit. O resto já é exato pelo IEEE 754: `+ − × ÷`, `sqrt`, `floor`, `ceil`, `round`, `%`. A formatação de números é a mesma em todo lugar.
+**Os mesmos bits em qualquer sistema (desde a 0.2.1).** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a biblioteca do sistema operacional, que muda de um sistema para outro no último bit. O resto já é exato pelo IEEE 754: `+ − × ÷`, `sqrt`, `%`. `floor`, `ceil` e `round` também usam a `libm` desde a 0.13: o `round` da biblioteca do MinGW, no Windows, dava 1.0 para 0.49999999999999994, e não 0.0. A formatação de números é a mesma em todo lugar.
 
 ## 12. Esboço do primeiro modelo inédito (M6)
 

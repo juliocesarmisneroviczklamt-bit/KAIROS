@@ -1,0 +1,59 @@
+// Floats in the WebAssembly back end: IEEE 754 as Rust computes it, written as Rust's `{:?}`
+// writes it (the shortest digits that read back: Ryu, in the runtime written in Kairós).
+fn hyp(a: f64, b: f64) -> f64 {
+    sqrt(a * a + b * b)
+}
+
+fn mean3(a: f64, b: f64, c: f64) -> f64 {
+    (a + b + c) / 3.0
+}
+
+fn grow(x0: f64, n: i64) -> f64 {
+    var x = x0
+    for i in 0..n { x *= 1.5 }
+    x
+}
+
+print(0.1 + 0.2, 1.0 / 3.0, 2.0 / 3.0)
+print(hyp(3.0, 4.0), mean3(1.0, 2.0, 4.0), grow(1.0, 10))
+print(1e16, 1e15, 0.0001, 0.00001, 123456789.0 * 1000000000.0, 1e-7 * 3.0)
+print(-0.0, 0.0 == -0.0, 5e-324, 1.7976931348623157e308, 2.2250738585072014e-308)
+print(nan, inf, -inf, nan == nan, nan != nan)
+print(1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0)
+print(7.5 % 2.0, -7.5 % 2.0, 7.5 % -2.0, 5.0 % inf, 1e300 % 7.0)
+print(floor(-2.5), ceil(-2.5), round(-2.5), round(2.5), round(0.49999999999999994))
+print(round(-0.4), abs(-3.25), sqrt(2.0), sqrt(-1.0))
+print(max(1.5, nan), min(-0.0, 0.0), max(2.0, 3.0), min(2.0, 3.0))
+print(is_nan(nan), is_nan(1.0), fill_nan(nan, 7.0), fill_nan(2.5, 7.0))
+print(int(2.9), int(-2.9), float(7), float(-9007199254740993))
+print(to_bits(1.0), from_bits(4611686018427387904), to_bits(-0.0))
+print(wrapping_add(9223372036854775807, 1), wrapping_mul(3037000500, 3037000500))
+print(shl(1, 62), shr(-1, 60), shl(3, 0))
+print(1.5 < 2.5, 1.5 > 2.5, 2.5 <= 2.5, nan < 1.0, nan >= 1.0)
+var x = grow(1.0, 7)
+x -= 0.25
+x /= 2.0
+x = x % 3.0
+print(x, str(x) + "!", -x, "[" + str(1e100) + "]")
+let v = if x > 1.0 { "big" } else if x > 0.0 { "small" } else { "none" }
+print(v)
+
+// the output, line by line:
+// out: 0.30000000000000004 0.3333333333333333 0.6666666666666666
+// out: 5.0 2.3333333333333335 57.6650390625
+// out: 1e16 1000000000000000.0 0.0001 1e-5 1.23456789e17 3e-7
+// out: -0.0 true 5e-324 1.7976931348623157e308 2.2250738585072014e-308
+// out: NaN inf -inf false true
+// out: inf -inf NaN
+// out: 1.5 -1.5 1.5 5.0 1.0
+// out: -3.0 -2.0 -3.0 3.0 0.0
+// out: -0.0 3.25 1.4142135623730951 NaN
+// out: NaN 0.0 3.0 2.0
+// out: true false 7.0 2.5
+// out: 2 -2 7.0 -9007199254740992.0
+// out: 4607182418800017408 2.0 -9223372036854775808
+// out: -9223372036854775808 -9223372036709301616
+// out: 4611686018427387904 15 3
+// out: true false true false false
+// out: 2.41796875 2.41796875! -2.41796875 [1e100]
+// out: big

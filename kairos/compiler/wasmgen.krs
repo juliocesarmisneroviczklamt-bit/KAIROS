@@ -125,6 +125,13 @@ fn i32c(inout g: WGen, v: i64) {
     sleb(inout g.code, v)
 }
 
+// f64.const: the float's 8 bytes, little-endian
+fn f64c(inout g: WGen, v: f64) {
+    g.code.push(68)
+    let b = to_bits(v)
+    for i in 0..8 { g.code.push(bit_and(shr(b, 8 * i), 255)) }
+}
+
 fn call_f(inout g: WGen, f: i64) {
     op_u(inout g, 16, f)
 }
@@ -254,12 +261,44 @@ fn overflow_at(inout g: WGen, e: H) {
     fail_at_rt(inout g, e, "R0006", "integer overflow", "i64 arithmetic is checked; use f64 for very large values")
 }
 
+// The text at address p (in local `p`) to the file descriptor `fd`.
+fn write_obj(inout g: WGen, fd: i64, p: i64) {
+    i32c(inout g, fd)
+    lget(inout g, p)
+    i32c(inout g, 4)
+    op(inout g, 106)
+    lget(inout g, p)
+    op_u(inout g, 40, 2)
+    uleb(inout g.code, 0)
+    call_f(inout g, f_write())
+}
+
+// A runtime error whose message shows a value: `before`, the value in local `v` as the runtime
+// function `fmt` writes it (`rt_str_i64`, `rt_fmt_f64`), then `after`.
+fn fail_dyn(inout g: WGen, e: H, code: str, before: str, after: str, v: i64, fmt: str) {
+    let f = if e.f >= 0 and e.f < len(g.srcs) { e.f } else { 0 }
+    let mark = from_codes([1])
+    let parts = split(render_diag(code, before + mark + after, "", g.srcs[f], g.ck.files[f], e.lo, e.hi), mark)
+    emit_text(inout g, 2, parts[0])
+    lget(inout g, v)
+    call_f(inout g, rt_fn(inout g, fmt))
+    let p = new_local(inout g, wt_i32())
+    lset(inout g, p)
+    write_obj(inout g, 2, p)
+    let t = intern(inout g, parts[1])
+    i32c(inout g, t.0)
+    i32c(inout g, t.1)
+    call_f(inout g, f_fail())
+    op(inout g, 0)
+}
+
 // ------------------------------------------------------------------ types
 
 // The WebAssembly type of a value of type `t`: 0 none (`()`, `!`), -1 not compiled yet.
 fn vt(t: Ty) -> i64 {
     match t {
         TInt => wt_i64(),
+        TFloat => wt_f64(),
         TBool => wt_i32(),
         TStr => wt_i32(),
         TUnit => 0,
@@ -289,6 +328,8 @@ fn gen(inout g: WGen, e: H) {
     if k == "lit" {
         if starts_with(e.text, "i64 ") {
             i64c(inout g, parse_int(substr(e.text, 4, len(e.text))))
+        } else if starts_with(e.text, "f64 ") {
+            f64c(inout g, parse_float(substr(e.text, 4, len(e.text))))
         } else if e.text == "bool true" {
             i32c(inout g, 1)
         } else if e.text == "bool false" {
@@ -334,12 +375,13 @@ fn gen(inout g: WGen, e: H) {
             return
         }
         // `x op= v`: the value first, then the variable
-        gen(inout g, e.kids[1])
-        let tv = new_local(inout g, wt_i64())
+        let v = e.kids[1]
+        gen(inout g, v)
+        let tv = new_local(inout g, vt_of(inout g, v))
         lset(inout g, tv)
         lget(inout g, l)
         lget(inout g, tv)
-        arith(inout g, e.text, e)
+        op_on(inout g, e.text, v.t, e)
         lset(inout g, l)
         return
     }
@@ -348,6 +390,10 @@ fn gen(inout g: WGen, e: H) {
         gen(inout g, e.kids[0])
         if e.text == "not" {
             op(inout g, 69)
+            return
+        }
+        if t == wt_f64() {
+            op(inout g, 154)
             return
         }
         // -x: 0 - x, checked
@@ -597,13 +643,34 @@ fn pow_w(inout g: WGen, x: i64, y: i64, e: H) {
     lget(inout g, acc)
 }
 
+// `x op y` on floats (both on the stack): IEEE 754, as Rust's f64.
+fn float_op(inout g: WGen, o: str, e: H) {
+    if o == "+" { return op(inout g, 160) }
+    if o == "-" { return op(inout g, 161) }
+    if o == "*" { return op(inout g, 162) }
+    if o == "/" { return op(inout g, 163) }
+    if o == "==" { return op(inout g, 97) }
+    if o == "!=" { return op(inout g, 98) }
+    if o == "<" { return op(inout g, 99) }
+    if o == ">" { return op(inout g, 100) }
+    if o == "<=" { return op(inout g, 101) }
+    if o == ">=" { return op(inout g, 102) }
+    if o == "%" { return call_f(inout g, rt_fn(inout g, "rt_fmod")) }
+    wg_fail(inout g, e, "the operator `" + o + "` on floats")
+}
+
 fn binary_w(inout g: WGen, e: H) {
-    let o = e.text
     let a = e.kids[0]
-    let at = vt(a.t)
     gen(inout g, a)
     gen(inout g, e.kids[1])
     if g.failed { return }
+    op_on(inout g, e.text, a.t, e)
+}
+
+// `x op y` with both on the stack, x of type `t`.
+fn op_on(inout g: WGen, o: str, t: Ty, e: H) {
+    let at = vt(t)
+    if at == wt_f64() { return float_op(inout g, o, e) }
     if at == wt_i64() {
         if o == "==" { return op(inout g, 81) }
         if o == "!=" { return op(inout g, 82) }
@@ -613,7 +680,7 @@ fn binary_w(inout g: WGen, e: H) {
         if o == ">=" { return op(inout g, 89) }
         return arith(inout g, o, e)
     }
-    if a.t == Ty.TStr {
+    if t == Ty.TStr {
         if o == "+" { return call_f(inout g, rt_fn(inout g, "rt_concat")) }
         if o == "==" or o == "!=" {
             call_f(inout g, rt_fn(inout g, "rt_str_eq"))
@@ -759,6 +826,10 @@ fn builtin_w(inout g: WGen, e: H) {
             } else if xt == wt_i64() {
                 gen(inout g, x)
                 call_f(inout g, f_print_i64())
+            } else if xt == wt_f64() {
+                gen(inout g, x)
+                call_f(inout g, rt_fn(inout g, "rt_fmt_f64"))
+                call_f(inout g, f_print_str())
             } else if xt == wt_i32() {
                 gen(inout g, x)
                 open(inout g, 4, 0)
@@ -789,6 +860,39 @@ fn builtin_w(inout g: WGen, e: H) {
         fail_at_rt(inout g, e, "R0003", msg, "")
         close(inout g)
         return
+    }
+    if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
+    if b == "float" {
+        gen(inout g, args[0].kids[0])
+        return op(inout g, 185)
+    }
+    if b == "from_bits" {
+        gen(inout g, args[0].kids[0])
+        return op(inout g, 191)
+    }
+    if b == "wrapping_add" or b == "wrapping_mul" {
+        gen(inout g, args[0].kids[0])
+        gen(inout g, args[1].kids[0])
+        return op(inout g, if b == "wrapping_add" { 124 } else { 126 })
+    }
+    if b == "shl" or b == "shr" {
+        gen(inout g, args[0].kids[0])
+        gen(inout g, args[1].kids[0])
+        let o = if b == "shl" { 134 } else { 136 }
+        if g.unchecked { return op(inout g, o) }
+        let n = new_local(inout g, wt_i64())
+        let a = new_local(inout g, wt_i64())
+        lset(inout g, n)
+        lset(inout g, a)
+        lget(inout g, n)
+        i64c(inout g, 63)
+        op(inout g, 86)
+        open(inout g, 4, 0)
+        fail_dyn(inout g, e, "R0014", "shift by ", ": it must be from 0 to 63", n, "rt_str_i64")
+        close(inout g)
+        lget(inout g, a)
+        lget(inout g, n)
+        return op(inout g, o)
     }
     if b == "abs" and vt(args[0].kids[0].t) == wt_i64() {
         gen(inout g, args[0].kids[0])
@@ -867,6 +971,109 @@ fn builtin_w(inout g: WGen, e: H) {
         return op(inout g, if b == "bit_and" { 131 } else if b == "bit_or" { 132 } else { 133 })
     }
     wg_fail(inout g, e, "`" + b + "`")
+}
+
+// The builtins whose first argument is a float, as Rust's f64 computes them.
+fn float_builtin(inout g: WGen, b: str, args: List[H], e: H) {
+    // one instruction
+    let simple = [("abs", 153), ("sqrt", 159), ("floor", 156), ("ceil", 155), ("to_bits", 189), ("float", -1)]
+    for s in simple {
+        if b == s.0 {
+            gen(inout g, args[0].kids[0])
+            if s.1 > 0 { op(inout g, s.1) }
+            return
+        }
+    }
+    if b == "str" {
+        gen(inout g, args[0].kids[0])
+        return call_f(inout g, rt_fn(inout g, "rt_fmt_f64"))
+    }
+    // the others use the float twice: it goes to a local
+    gen(inout g, args[0].kids[0])
+    let x = new_local(inout g, wt_f64())
+    lset(inout g, x)
+    if b == "int" {
+        // NaN, the infinities and what does not fit stop the program
+        lget(inout g, x)
+        op(inout g, 153)
+        f64c(inout g, 9.2e18)
+        op(inout g, 99)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        fail_dyn(inout g, e, "R0009", "cannot convert ", " to i64", x, "rt_fmt_f64")
+        close(inout g)
+        lget(inout g, x)
+        return op(inout g, 176)
+    }
+    if b == "round" {
+        // half away from zero: the integer part, plus or minus 1 when the rest is 0.5 or more
+        let t = new_local(inout g, wt_f64())
+        lget(inout g, x)
+        op(inout g, 157)
+        lset(inout g, t)
+        lget(inout g, x)
+        lget(inout g, t)
+        op(inout g, 161)
+        op(inout g, 153)
+        f64c(inout g, 0.5)
+        op(inout g, 102)
+        open(inout g, 4, wt_f64())
+        lget(inout g, t)
+        f64c(inout g, 1.0)
+        lget(inout g, x)
+        op(inout g, 166)
+        op(inout g, 160)
+        else_(inout g)
+        lget(inout g, t)
+        close(inout g)
+        return
+    }
+    if b == "is_nan" {
+        lget(inout g, x)
+        lget(inout g, x)
+        return op(inout g, 98)
+    }
+    if b == "fill_nan" {
+        gen(inout g, args[1].kids[0])
+        let w = new_local(inout g, wt_f64())
+        lset(inout g, w)
+        lget(inout g, w)
+        lget(inout g, x)
+        lget(inout g, x)
+        lget(inout g, x)
+        op(inout g, 98)
+        return op(inout g, 27)
+    }
+    if (b == "max" or b == "min") and len(args) == 2 {
+        gen(inout g, args[1].kids[0])
+        let y = new_local(inout g, wt_f64())
+        lset(inout g, y)
+        // NaN when either is NaN; otherwise as on integers
+        lget(inout g, x)
+        lget(inout g, x)
+        op(inout g, 98)
+        lget(inout g, y)
+        lget(inout g, y)
+        op(inout g, 98)
+        op(inout g, 114)
+        open(inout g, 4, wt_f64())
+        f64c(inout g, nan)
+        else_(inout g)
+        if b == "max" {
+            lget(inout g, y)
+            lget(inout g, x)
+        } else {
+            lget(inout g, x)
+            lget(inout g, y)
+        }
+        lget(inout g, x)
+        lget(inout g, y)
+        op(inout g, 99)
+        op(inout g, 27)
+        close(inout g)
+        return
+    }
+    wg_fail(inout g, e, "`" + b + "` on floats")
 }
 
 // The instructions behind the runtime's `wasm_*` functions (their arguments are on the stack).

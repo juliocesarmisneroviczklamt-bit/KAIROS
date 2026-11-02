@@ -134,6 +134,10 @@ pub enum Builtin {
     IsAlphanumeric,
     IsWhitespace,
     IsUppercase,
+    /// M13: the IEEE 754 bits of a float and back (`to_bits(x)`, `from_bits(b)`), as Rust's
+    /// `f64::to_bits` and `f64::from_bits`
+    ToBits,
+    FromBits,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -275,6 +279,8 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("is_alphanumeric", Builtin::IsAlphanumeric),
     ("is_whitespace", Builtin::IsWhitespace),
     ("is_uppercase", Builtin::IsUppercase),
+    ("to_bits", Builtin::ToBits),
+    ("from_bits", Builtin::FromBits),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

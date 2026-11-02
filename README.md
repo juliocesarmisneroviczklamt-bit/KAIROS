@@ -37,7 +37,7 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M10 | a base de dados montada em Kairós: COTAHIST, eventos da B3, painel | ✅ `bars.bin`, cache de eventos e `panel.bin` iguais aos do Rust, byte a byte |
 | M11 | o simulador (custos, impacto, IR) escrito em Kairós | ✅ `b3.evaluate`/`b3.simulate` rodam [`std/sim.krs`](kairos/std/sim.krs), com os mesmos bits do simulador Rust |
 | M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós | ✅ o front-end inteiro em [`kairos/compiler/`](kairos/compiler), igual ao Rust nó a nó em todos os arquivos; compila a si mesmo (a imagem é um ponto fixo) e seus programas rodam com `kairos exec` |
-| M13 | o back-end em Kairós: o compilador escrito em Kairós gera código (WebAssembly) | em andamento: inteiros, booleanos, textos, funções e controle de fluxo já viram WebAssembly ([`kw.krs`](kairos/compiler/kw.krs)), com a saída e os erros do interpretador; o runtime dos módulos é escrito em Kairós ([`rt.krs`](kairos/compiler/rt.krs)) |
+| M13 | o back-end em Kairós: o compilador escrito em Kairós gera código (WebAssembly) | em andamento: inteiros, floats, booleanos, textos, funções e controle de fluxo já viram WebAssembly ([`kw.krs`](kairos/compiler/kw.krs)), com a saída e os erros do interpretador; o runtime dos módulos é escrito em Kairós ([`rt.krs`](kairos/compiler/rt.krs)), inclusive a escrita de floats igual à do Rust (Ryu) e o `%` exato |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

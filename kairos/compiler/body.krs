@@ -1624,6 +1624,8 @@ fn fixed_sig(name: str) -> (bool, List[Ty], Ty) {
     if name == "to_hex" { return (true, [i, i], s) }
     if name == "file_size" or name == "file_date" { return (true, [s], i) }
     if contains(["is_alphabetic", "is_alphanumeric", "is_whitespace", "is_uppercase"], name) { return (true, [i], b) }
+    if name == "to_bits" { return (true, [Ty.TFloat], i) }
+    if name == "from_bits" { return (true, [i], Ty.TFloat) }
     if name == "http_get_all" { return (true, [ls, i], Ty.TList(Ty.TTuple([b, s]))) }
     if name == "download" { return (true, [s, s], i) }
     (false, [], u)
