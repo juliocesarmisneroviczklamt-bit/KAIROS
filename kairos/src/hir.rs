@@ -32,6 +32,8 @@ pub enum Builtin {
     ToFloat,
     ToInt,
     ToStr,
+    /// `format_fixed(x, d)`: `x` with `d` decimals, rounded exactly (as Rust's `{:.d}`)
+    FormatFixed,
     Assert,
     // ---- M2: reductions (lists and tensors)
     Mean,
@@ -103,6 +105,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("float", Builtin::ToFloat),
     ("int", Builtin::ToInt),
     ("str", Builtin::ToStr),
+    ("format_fixed", Builtin::FormatFixed),
     ("assert", Builtin::Assert),
     ("mean", Builtin::Mean),
     ("prod", Builtin::Prod),
@@ -170,6 +173,10 @@ pub enum HostFn {
     Classes,
     /// a NEFIN factor (0 rm_rf, 1 smb, 2 hml, 3 wml, 4 iml, 5 rf); args: value-weighted?
     Nefin { factor: u8 },
+    /// the same, daily: `Tensor[month, session; f64]`
+    NefinDaily { factor: u8 },
+    /// `Tensor[month, session; f64]`: the date of each session (YYYYMMDD)
+    SessionDates,
 }
 
 /// Selector of one tensor axis: `axis: i` (removes the axis) or `axis: a .. b` / `a ..= b`.

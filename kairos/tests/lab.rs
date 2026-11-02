@@ -164,3 +164,95 @@ for m in jan {
         assert!(lines[3].starts_with("200401 [\"AAAA4\", \"DDDD3\", \"EEEE3\", \"GGGG3\""), "{out}");
     })
 }
+
+fn list(xs: &[f64]) -> String {
+    format!("[{}]", xs.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(", "))
+}
+
+#[test]
+fn the_statistics_in_kairos_are_the_labs_bit_for_bit() {
+    on_big_stack(|| {
+        use quant_b3::stats;
+        let mut rng = Rng(0x5EED_0F_57A7_5u64);
+        let mut series = |n: usize, scale: f64| -> Vec<f64> { (0..n).map(|_| scale * (rng.unit() - 0.45)).collect() };
+        let (x, y, z, w) = (series(240, 0.08), series(240, 0.05), series(240, 0.03), series(240, 0.02));
+        let src = format!(
+            "import \"stats.krs\"\nlet x = {}\nlet y = {}\nlet z = {}\nlet w = {}\nprint(avg(x))\nprint(sd(x))\nprint(corr(x, y))\nprint(max_dd(x))\nprint(nw_lags(len(x)))\nprint(cagr(x, 12.0))\nlet o = ols_nw(y, [x, z, w], nw_lags(len(y)))\nfor v in o.coef {{ print(v) }}\nfor v in o.t {{ print(v) }}\nprint(o.r2)\nlet a = annual(x)\nprint(a.0)\nprint(a.1)\nprint(a.2)\nprint(a.3)\n",
+            list(&x),
+            list(&y),
+            list(&z),
+            list(&w)
+        );
+        let out = run(&market(), &src);
+        let got: Vec<f64> = out.lines().map(|l| l.trim().parse::<f64>().unwrap()).collect();
+        let o = stats::ols_nw(&y, &[&x, &z, &w], stats::nw_lags(y.len())).unwrap();
+        let ann = stats::ols_nw(&x, &[], stats::nw_lags(x.len())).unwrap();
+        let (m, s) = (stats::mean(&x), stats::std(&x));
+        let mut want = vec![m, s, stats::corr(&x, &y), stats::max_dd(&x), stats::nw_lags(x.len()) as f64];
+        let cagr = stats::cagr(&x, 12.0);
+        want.extend(o.coef.iter().chain(&o.t));
+        want.push(o.r2);
+        want.extend([m * 12.0, s * 12f64.sqrt(), ann.t[0], m / s * 12f64.sqrt()]);
+        // everything but the CAGR (x^y: pure-Rust libm in Kairós, the system's pow in quant-b3)
+        let mut got_exact = got.clone();
+        let got_cagr = got_exact.remove(5);
+        assert!((got_cagr - cagr).abs() <= 1e-15 * cagr.abs().max(1.0), "cagr {got_cagr} vs {cagr}");
+        assert_eq!(got_exact.len(), want.len(), "{out}");
+        for (i, (g, w)) in got_exact.iter().zip(&want).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "value {i}: Kairós {g:?}, Rust {w:?}");
+        }
+    })
+}
+
+#[test]
+fn report_formatting_is_rusts() {
+    on_big_stack(|| {
+        let vals = [0.0, -0.0, 0.15, 0.25, 2.5, -2.5, 0.0005, -0.0004, 1.005, 123.456789, -98.7654, 1e-9, f64::NAN, f64::INFINITY, -f64::INFINITY];
+        let mut src = String::from("import \"fmt.krs\"\n");
+        for v in vals {
+            let lit = if v.is_nan() {
+                "nan".to_string()
+            } else if v.is_infinite() {
+                if v > 0.0 { "inf".into() } else { "-inf".into() }
+            } else {
+                format!("{v:?}")
+            };
+            src.push_str(&format!("print(fixed({lit}, 1) + \"|\" + fixed({lit}, 2) + \"|\" + signed({lit}, 1) + \"|\" + pct({lit}) + \"|\" + right(fixed({lit}, 2), 9) + \"|\" + left(fixed({lit}, 0), 6) + \"|\")\n"));
+        }
+        src.push_str("print(ym_text(202610), date_text(20261030), join([\"a\", \"b\", \"c\"], \" | \"))\n");
+        let out = run(&market(), &src);
+        let mut want = String::new();
+        for v in vals {
+            let pct = if v.is_finite() { format!("{:+.1}%", v * 100.0) } else { "n/d".into() };
+            want.push_str(&format!("{v:.1}|{v:.2}|{v:+.1}|{pct}|{:>9}|{:<6}|\n", format!("{v:.2}"), format!("{v:.0}")));
+        }
+        want.push_str("2026-10 2026-10-30 a | b | c\n");
+        assert_eq!(out, want);
+    })
+}
+
+/// The momentum study written in Kairós prints exactly the report of the Rust study it replaces
+/// (`quant-b3 momentum` → results/momentum_relatorio.txt). Needs the real data, so it runs by
+/// hand: `cargo test --release -p kairos --test lab -- --ignored`.
+#[test]
+#[ignore]
+fn the_momentum_study_in_kairos_prints_the_rust_report() {
+    on_big_stack(|| {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let report = root.join("results").join("momentum_relatorio.txt");
+        let Ok(want) = std::fs::read_to_string(&report) else {
+            eprintln!("skipped: no {}", report.display());
+            return;
+        };
+        let path = root.join("kairos").join("lab").join("momentum.krs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut s = Session::new(Box::new(Buf(buf.clone())));
+        if let Err(e) = s.run(&path.to_string_lossy(), &src) {
+            panic!("{}", s.render(&e));
+        }
+        let got = String::from_utf8(buf.borrow().clone()).unwrap();
+        let lines = |t: &str| t.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(lines(&got), lines(&want));
+    })
+}

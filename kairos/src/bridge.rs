@@ -87,6 +87,11 @@ pub struct Host {
     /// daily returns, volumes and prices (M8)
     daily: [OnceCell<Rc<TensorVal>>; 3],
     sess: OnceCell<Rc<TensorVal>>,
+    dates: OnceCell<Rc<TensorVal>>,
+    /// daily NEFIN factors (equally weighted, value weighted), read on first use
+    nefin_d: [OnceCell<Option<std::collections::BTreeMap<u32, quant_b3::macrodata::Factors>>>; 2],
+    /// where the data was loaded from (None: given in memory)
+    data_dir: OnceCell<PathBuf>,
     /// the same tensors cut at the last month the program may see: (which, months)
     views: RefCell<HashMap<(u8, usize), Rc<TensorVal>>>,
     /// folder of the ledger and of the registry; `None`: kept in memory (tests, embedding)
@@ -237,6 +242,7 @@ impl Host {
         };
         let d = Data::load(&Paths::new(&dir, &Self::results_of(&dir)))
             .map_err(|e| herr("R0100", format!("cannot load the B3 data from {}: {e:#}", dir.display())))?;
+        let _ = self.data_dir.set(dir.clone());
         let _ = self.data.set(Rc::new(d));
         Ok(self.data.get().expect("data was just loaded"))
     }
@@ -445,6 +451,57 @@ impl Host {
             TensorVal::new_b(vec![AX_MONTH, AX_SESSION], vec![nm, s], v)
         });
         Ok(self.view(13, n, full))
+    }
+
+    /// `Tensor[month, session; f64]`: the date of each session, as YYYYMMDD (NaN where the month
+    /// has no such session).
+    pub fn session_dates(&self, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let full = Self::cached(&self.dates, || {
+            let (nm, s) = (d.cal.months.len(), sessions_per_month(d));
+            let mut v = vec![f64::NAN; nm * s];
+            for (m, &(a, b)) in d.cal.mrange.iter().enumerate() {
+                for j in 0..(b - a) {
+                    v[m * s + j] = d.panel.dates[a + j] as f64;
+                }
+            }
+            TensorVal::new_f(vec![AX_MONTH, AX_SESSION], vec![nm, s], v)
+        });
+        Ok(self.view(14, n, full))
+    }
+
+    /// `Tensor[month, session; f64]`: a daily NEFIN factor, NaN on the days NEFIN does not have.
+    /// Read from the data folder's raw/nefin.
+    pub fn nefin_daily(&self, factor: u8, vw: bool, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let table = self.nefin_d[vw as usize].get_or_init(|| {
+            let dir = self.data_dir.get()?;
+            let file = if vw { "nefin_factors.csv" } else { "nefin_factors_equally_weighted.csv" };
+            quant_b3::macrodata::load_factors(&dir.join("raw").join("nefin").join(file), false).ok()
+        });
+        let Some(table) = table else {
+            return Err(herr("R0100", "the daily NEFIN factors are not available").hint("they are read from the data folder's raw/nefin (`quant-b3 fetch-macro`)"));
+        };
+        let s = sessions_per_month(d);
+        let mut v = vec![f64::NAN; n * s];
+        for m in 0..n {
+            let (a, b) = d.cal.mrange[m];
+            for j in 0..(b - a) {
+                if let Some(f) = table.get(&d.panel.dates[a + j]) {
+                    v[m * s + j] = match factor {
+                        0 => f.rm_rf,
+                        1 => f.smb,
+                        2 => f.hml,
+                        3 => f.wml,
+                        4 => f.iml,
+                        _ => f.rf,
+                    };
+                }
+            }
+        }
+        Ok(Rc::new(TensorVal::new_f(vec![AX_MONTH, AX_SESSION], vec![n, s], v)))
     }
 
     /// The company (`issuers`) or the class (`classes`, e.g. ON, PN, UNT, CI for ETFs) of each asset.

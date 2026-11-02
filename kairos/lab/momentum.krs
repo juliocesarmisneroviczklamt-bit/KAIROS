@@ -1,0 +1,285 @@
+// Study 1 of the lab, in Kairós (quant-b3's src/momentum.rs, which this file replaces):
+// replicate NEFIN's momentum factor (WML) with our data, and measure what is left for an
+// investor who can only buy (long-only), after costs.
+//
+//     kairos run kairos/lab/momentum.krs
+import "universe.krs"
+import "stats.krs"
+import "fmt.krs"
+
+let min_stocks = 15
+let cost_bps = 25.0
+
+struct Row {
+    mi: i64,      // month index
+    ym: i64,
+    n: i64,       // live assets
+    w: f64,       // winners, losers and the live universe: daily-rebalanced equal weights
+    l: f64,
+    mkt: f64,
+    lo: f64,      // long-only winners, held through the month (before costs)
+    turn: f64,    // its turnover (buys + sells, fraction of the portfolio)
+    bh: f64,      // the live universe, equal weights, held through the month
+}
+
+let ret = b3.monthly_returns()
+let mret = fill_nan(ret, 0.0)          // as the lab: 0 in a month without trades
+let traded = not is_nan(ret)
+let daily = b3.daily_returns()
+let real = b3.sessions()
+let dates = b3.session_dates()
+let months = b3.months()
+let tick = b3.tickers()
+let elig = nefin_universe(500000.0)
+let n = size(ret, month)
+let na = size(ret, asset)
+let ns = size(daily, session)
+
+var rows = []
+var prev = zeros(asset: na)            // the long-only portfolio after the month's returns
+var wml_d = zeros(month: n, session: ns) + nan
+var ext = []                           // daily |r| > 50% inside the universe: (|r|, asset, date, r)
+for m in 12..n {
+    // live: in the universe, and traded last month
+    let alive = elig[month: m] and traded[month: m - 1]
+    let cnt = int(sum(where(alive, 1.0, 0.0)))
+    if cnt < min_stocks {
+        prev = zeros(asset: na)
+        continue
+    }
+    // the signal: return from t-12 to t-2 (skipping t-1)
+    let sig = where(alive, prod(1.0 + mret[month: m - 12 ..= m - 2], over: month) - 1.0, nan)
+    let k3 = int(round(float(cnt) / 3.0))
+    let win = top_k(sig, k3, over: asset)
+    let los = bottom_k(sig, k3, over: asset)
+    // daily equal-weighted returns, rebalanced every day (as NEFIN)
+    let dm = daily[month: m]
+    let d0 = fill_nan(dm, 0.0)
+    let rm = real[month: m]
+    let wd = where(rm, sum(where(win, d0, 0.0), over: asset) * (1.0 / float(k3)), 0.0)
+    let ld = where(rm, sum(where(los, d0, 0.0), over: asset) * (1.0 / float(k3)), 0.0)
+    let ed = where(rm, sum(where(alive, d0, 0.0), over: asset) * (1.0 / float(cnt)), 0.0)
+    wml_d[month: m] = where(rm, wd - ld, nan)
+    let big = alive and abs(d0) > 0.5
+    if sum(where(big, 1.0, 0.0)) > 0.0 {
+        let has = sum(where(big, 1.0, 0.0), over: session) > 0.0
+        for a in 0..na {
+            if has[asset: a] {
+                for s in 0..ns {
+                    if big[session: s, asset: a] {
+                        let r = dm[session: s, asset: a]
+                        ext.push((abs(r), a, int(dates[month: m, session: s]), r))
+                    }
+                }
+            }
+        }
+    }
+    // long-only: the winners in equal weights, held through the month
+    let lo = sum(where(win, mret[month: m], 0.0)) / float(k3)
+    let bh = sum(where(alive, mret[month: m], 0.0)) / float(cnt)
+    let wnew = where(win, 1.0 / float(k3), 0.0)
+    let turn = sum(abs(wnew - prev))
+    let grown = wnew * (1.0 + mret[month: m])
+    prev = grown / sum(grown)
+    let w = prod(1.0 + wd, over: session) - 1.0
+    let l = prod(1.0 + ld, over: session) - 1.0
+    let mk = prod(1.0 + ed, over: session) - 1.0
+    rows.push(Row { mi: m, ym: months[m], n: cnt, w: w, l: l, mkt: mk, lo: lo, turn: turn, bh: bh })
+}
+
+// ------------------------------------------------------------------ the report
+let first = rows[0].ym
+let last = rows[len(rows) - 1].ym
+print("")
+print("================ MOMENTUM NA B3 ================")
+print("Universo estilo NEFIN: regra de liquidez Dias, volume mínimo R$ 500000. Meses: " + str(len(rows)) + " (" + ym_text(first) + ".." + ym_text(last) + ")")
+var years = []
+var ysum = []
+var ycnt = []
+for r in rows {
+    let y = r.ym / 100
+    let k = len(years)
+    if k == 0 or years[k - 1] != y {
+        years.push(y)
+        ysum.push(0)
+        ycnt.push(0)
+    }
+    let j = len(years) - 1
+    ysum[j] += r.n
+    ycnt[j] += 1
+}
+var parts = []
+for j in 0..len(years) {
+    if years[j] % 5 == 0 or years[j] == last / 100 {
+        parts.push(str(years[j]) + ": " + str(ysum[j] / ycnt[j]))
+    }
+}
+print("Ações elegíveis (média no ano): " + join(parts, " | "))
+// the 8 largest, the first on ties (a stable sort)
+var taken = []
+for e in ext { taken.push(false) }
+var top = []
+for k in 0..min(8, len(ext)) {
+    var b = -1
+    for i in 0..len(ext) {
+        if not taken[i] and (b < 0 or ext[i].0 > ext[b].0) { b = i }
+    }
+    taken[b] = true
+    top.push(tick[ext[b].1] + " " + date_text(ext[b].2) + " " + pct(ext[b].3))
+}
+print("Retornos diários |r| > 50% dentro do universo elegível: " + str(len(ext)) + " (maiores: " + join(top, ", ") + ")")
+
+// --- 1. replication
+let nw = b3.nefin("wml")
+let nwv = b3.nefin("wml", vw: true)
+let nrm = b3.nefin("rm_rf")
+let nrf = b3.nefin("rf")
+let nsmb = b3.nefin("smb")
+let nhml = b3.nefin("hml")
+let niml = b3.nefin("iml")
+var sample = []
+for r in rows {
+    if not is_nan(nrf[month: r.mi]) { sample.push(r) }
+}
+var ours = []
+var n_ew = []
+var n_vw = []
+var our_mkt = []
+var n_mkt = []
+var f_rm = []
+var f_smb = []
+var f_hml = []
+var f_iml = []
+var f_rf = []
+for r in sample {
+    ours.push(r.w - r.l)
+    n_ew.push(nw[month: r.mi])
+    n_vw.push(nwv[month: r.mi])
+    our_mkt.push(r.mkt)
+    n_mkt.push(nrm[month: r.mi] + nrf[month: r.mi])
+    f_rm.push(nrm[month: r.mi])
+    f_smb.push(nsmb[month: r.mi])
+    f_hml.push(nhml[month: r.mi])
+    f_iml.push(niml[month: r.mi])
+    f_rf.push(nrf[month: r.mi])
+}
+let nd_ew = b3.nefin_daily("wml")
+let nd_vw = b3.nefin_daily("wml", vw: true)
+var xd = []
+var yd_ew = []
+var yd_vw = []
+for m in 0..n {
+    let a = to_list(wml_d[month: m])
+    let b = to_list(nd_ew[month: m])
+    let c = to_list(nd_vw[month: m])
+    for s in 0..ns {
+        if not is_nan(a[s]) and not is_nan(b[s]) {
+            xd.push(a[s])
+            yd_ew.push(b[s])
+            yd_vw.push(c[s])
+        }
+    }
+}
+let c_ew = corr_finite(ours, n_ew)
+let c_vw = corr_finite(ours, n_vw)
+let c_d = corr_finite(xd, yd_ew)
+let c_dvw = corr_finite(xd, yd_vw)
+let c_mkt = corr_finite(our_mkt, n_mkt)
+print("")
+print("--- 1. Replicação do WML do NEFIN (valida o motor) ---")
+print("Correlação mensal  com WML NEFIN equal-weighted: " + fixed(c_ew.0, 3) + " | value-weighted: " + fixed(c_vw.0, 3) + "   (" + str(c_ew.1) + " meses)")
+print("Correlação diária  com WML NEFIN equal-weighted: " + fixed(c_d.0, 3) + " | value-weighted: " + fixed(c_dvw.0, 3) + "   (" + str(c_d.1) + " dias)")
+print("Correlação mensal do nosso mercado EW com o mercado NEFIN (VW): " + fixed(c_mkt.0, 3))
+
+// --- 2. the long-short premium, no costs
+print("")
+print("--- 2. Prêmio de momentum long-short (vencedores - perdedores, sem custos) ---")
+print(left("período", 14) + " " + right("média", 8) + " " + right("vol", 8) + " " + right("t(NW)", 7) + " " + right("Sharpe", 7) + " | " + right("NEFIN", 8) + " " + right("t(NW)", 7))
+for p in [(200101, 201012, "2001-2010"), (201101, 202012, "2011-2020"), (202101, 999912, "2021-hoje"), (0, 999912, "2001-hoje")] {
+    var x = []
+    var z = []
+    for i in 0..len(sample) {
+        if sample[i].ym >= p.0 and sample[i].ym <= p.1 {
+            x.push(ours[i])
+            z.push(n_ew[i])
+        }
+    }
+    if len(x) < 12 { continue }
+    let a = annual(x)
+    let b = annual(z)
+    print(left(p.2, 14) + " " + right(pct(a.0), 8) + " " + right(pct(a.1), 8) + " " + right(fixed(a.2, 2), 7) + " " + right(fixed(a.3, 2), 7) + " | " + right(pct(b.0), 8) + " " + right(fixed(b.2, 2), 7))
+}
+var pre = []
+for r in rows {
+    if r.ym < 200101 { pre.push(r.w - r.l) }
+}
+if len(pre) >= 24 {
+    let a = annual(pre)
+    print(left(str(first / 100) + "-2000", 14) + " " + right(pct(a.0), 8) + " " + right("", 8) + " " + right(fixed(a.2, 2), 7) + " " + right("", 7) + " | (fora da amostra do NEFIN)")
+}
+let o4 = ols_nw(ours, [f_rm, f_smb, f_hml, f_iml], nw_lags(len(ours)))
+if o4.ok {
+    print("WML nosso explicado por mercado/tamanho/valor/iliquidez? alpha " + pct(o4.coef[0] * 12.0) + " a.a. (t=" + fixed(o4.t[0], 2) + "), R2=" + fixed(o4.r2, 2))
+}
+
+// --- 3. long-only
+print("")
+print("--- 3. Long-only nos vencedores (o que dá pra fazer sem alugar ação) ---")
+let cdi = b3.cdi()
+var lo_cdi = []
+var turns = []
+var univ = []
+for r in sample {
+    lo_cdi.push(cdi[month: r.mi])
+    turns.push(r.turn)
+    univ.push(r.bh)
+}
+print("Giro médio: " + fixed(100.0 * avg(turns), 0) + "% da carteira por mês (compra+venda); custo anual ≈ giro x 12 x custo por lado")
+print(left("estratégia", 22) + " " + right("CAGR", 8) + " " + right("vol", 8) + " " + right("Sharpe*", 8) + " " + right("maxDD", 8) + " " + right("vs univ.EW", 12) + " " + right("t", 6) + " " + right("%m>CDI", 9))
+fn line(name: str, x: List[f64], cdi: List[f64], univ: List[f64]) -> str {
+    var ex_cdi = []
+    var ex_u = []
+    var beat = 0.0
+    for i in 0..len(x) {
+        ex_cdi.push(x[i] - cdi[i])
+        ex_u.push(x[i] - univ[i])
+        if x[i] - cdi[i] > 0.0 { beat += 1.0 }
+    }
+    let sh = avg(ex_cdi) / sd(ex_cdi) * sqrt(12.0)
+    let u = annual(ex_u)
+    left(name, 22) + " " + right(pct(cagr(x, 12.0)), 8) + " " + right(pct(sd(x) * sqrt(12.0)), 8) + " " + right(fixed(sh, 2), 8) + " " + right(pct(max_dd(x)), 8) + " " + right(pct(u.0), 12) + " " + right(fixed(u.2, 2), 6) + " " + right(fixed(100.0 * beat / float(len(x)), 0), 8) + "%"
+}
+var net_main = []
+for c in [0.0, 10.0, 25.0, 50.0, 100.0] {
+    var net = []
+    for r in sample { net.push(r.lo - r.turn * c / 10000.0) }
+    print(line("vencedores, custo " + fixed(c, 0) + "bps", net, lo_cdi, univ))
+    if abs(c - cost_bps) < 1e-9 { net_main = net }
+}
+print(line("universo EW (B&H)", univ, lo_cdi, univ))
+let vrm = b3.nefin("rm_rf", vw: true)
+let vrf = b3.nefin("rf", vw: true)
+var nef_mkt = []
+var all_finite = true
+for r in sample {
+    let v = vrm[month: r.mi] + vrf[month: r.mi]
+    nef_mkt.push(v)
+    if is_nan(v - v) { all_finite = false }
+}
+if all_finite { print(line("mercado NEFIN (VW)", nef_mkt, lo_cdi, univ)) }
+print(line("CDI", lo_cdi, lo_cdi, univ))
+print("* Sharpe sobre o CDI. 'vs univ.EW' = excesso médio a.a. sobre o universo elegível equal-weighted.")
+
+var y_ex = []
+for i in 0..len(net_main) { y_ex.push(net_main[i] - f_rf[i]) }
+let lags = nw_lags(len(y_ex))
+print("")
+print("Regressão do long-only (custo " + fixed(cost_bps, 0) + "bps) contra os fatores NEFIN (equal-weighted):")
+let r4 = ols_nw(y_ex, [f_rm, f_smb, f_hml, f_iml], lags)
+if r4.ok {
+    print("  4 fatores (Mkt, SMB, HML, IML):       alpha " + pct(r4.coef[0] * 12.0) + " a.a. (t=" + fixed(r4.t[0], 2) + ")  betas Mkt " + fixed(r4.coef[1], 2) + " SMB " + fixed(r4.coef[2], 2) + " HML " + fixed(r4.coef[3], 2) + " IML " + fixed(r4.coef[4], 2) + "  R2=" + fixed(r4.r2, 2))
+}
+let r5 = ols_nw(y_ex, [f_rm, f_smb, f_hml, f_iml, n_ew], lags)
+if r5.ok {
+    print("  5 fatores (+ WML do NEFIN):           alpha " + pct(r5.coef[0] * 12.0) + " a.a. (t=" + fixed(r5.t[0], 2) + ")  beta WML " + fixed(r5.coef[5], 2) + " (t=" + fixed(r5.t[5], 2) + ")  R2=" + fixed(r5.r2, 2))
+}

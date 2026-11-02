@@ -453,6 +453,8 @@ impl Interp<'_> {
                 Value::List(Rc::new(names.into_iter().map(|s| Value::Str(s.into())).collect()))
             }
             HostFn::Nefin { factor } => Value::Tensor(host.nefin(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
+            HostFn::NefinDaily { factor } => Value::Tensor(host.nefin_daily(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
+            HostFn::SessionDates => Value::Tensor(host.session_dates(protos).map_err(herr)?),
             HostFn::Holdout { proto } => {
                 host.holdout(protos, proto as usize).map_err(herr)?;
                 Value::Holdout(proto)

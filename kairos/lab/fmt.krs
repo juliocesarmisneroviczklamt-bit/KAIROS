@@ -1,0 +1,59 @@
+// Number and text formatting for reports, written in Kairós (what Rust's `format!` did for the
+// lab's reports): fixed decimals, signs, percentages, padding.
+
+fn negative(x: f64) -> bool {
+    x < 0.0 or (x == 0.0 and 1.0 / x < 0.0)
+}
+
+// `x` with `d` decimals: the exact binary value rounded half to even, as Rust's `{:.d}` ("NaN",
+// "inf", "-0.0"...). The rounding is the runtime's `format_fixed`: getting it right needs the
+// exact decimal expansion of the double.
+fn fixed(x: f64, d: i64) -> str {
+    format_fixed(x, d)
+}
+
+// Always with a sign, like `{:+.d}`.
+fn signed(x: f64, d: i64) -> str {
+    let s = fixed(x, d)
+    if is_nan(x) or negative(x) { s } else { "+" + s }
+}
+
+// The lab's percentages: "+12.3%", "n/d" when not finite.
+fn pct(x: f64) -> str {
+    if is_nan(x - x) { "n/d" } else { signed(100.0 * x, 1) + "%" }
+}
+
+// Right-aligned in `w` columns (`{:>w}`).
+fn right(s: str, w: i64) -> str {
+    var out = s
+    while len(out) < w { out = " " + out }
+    out
+}
+
+// Left-aligned in `w` columns (`{:<w}`).
+fn left(s: str, w: i64) -> str {
+    var out = s
+    while len(out) < w { out = out + " " }
+    out
+}
+
+// A month YYYYMM as "2026-10".
+fn ym_text(ym: i64) -> str {
+    let m = ym % 100
+    str(ym / 100) + "-" + (if m < 10 { "0" } else { "" }) + str(m)
+}
+
+// A date YYYYMMDD as "2026-10-30".
+fn date_text(d: i64) -> str {
+    let dd = d % 100
+    ym_text(d / 100) + "-" + (if dd < 10 { "0" } else { "" }) + str(dd)
+}
+
+fn join(xs: List[str], sep: str) -> str {
+    var out = ""
+    for i in 0..len(xs) {
+        if i > 0 { out = out + sep }
+        out = out + xs[i]
+    }
+    out
+}

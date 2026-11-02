@@ -1744,6 +1744,14 @@ impl Checker {
                 self.default_nums(&t);
                 (vec![HArg::Val(h)], Ty::Str)
             }
+            Builtin::FormatFixed => {
+                arity(2)?;
+                let (hx, tx) = self.expr(all[0].0, Some(&Ty::Float))?;
+                self.expect_ty(&tx, &Ty::Float, all[0].0.span)?;
+                let (hd, td) = self.expr(all[1].0, Some(&Ty::Int))?;
+                self.expect_ty(&td, &Ty::Int, all[1].0.span)?;
+                (vec![HArg::Val(hx), HArg::Val(hd)], Ty::Str)
+            }
             Builtin::Assert => {
                 if n != 1 && n != 2 {
                     return Err(Diag::new("E0103", sp, "`assert` takes a condition and an optional message"));

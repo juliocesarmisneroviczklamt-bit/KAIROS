@@ -898,7 +898,7 @@ impl Checker {
     /// `b3.f(...)`: the bridge to the quant-b3 lab (data and the realistic simulator).
     pub(super) fn b3_call(&mut self, method: &str, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
         let what = format!("`b3.{method}`");
-        if method != "evaluate" && method != "nefin" {
+        if method != "evaluate" && method != "nefin" && method != "nefin_daily" {
             Self::no_named_args(args, &what)?;
         }
         if let Some(a) = args.iter().find(|a| a.inout) {
@@ -969,11 +969,15 @@ impl Checker {
                 nargs(0)?;
                 host(HostFn::Sessions, vec![], Ty::Tensor(vec![AX_MONTH, AX_SESSION], Box::new(Ty::Bool)))
             }
+            "session_dates" => {
+                nargs(0)?;
+                host(HostFn::SessionDates, vec![], Ty::Tensor(vec![AX_MONTH, AX_SESSION], Box::new(Ty::Float)))
+            }
             "issuers" | "classes" => {
                 nargs(0)?;
                 host(if method == "issuers" { HostFn::Issuers } else { HostFn::Classes }, vec![], Ty::List(Box::new(Ty::Str)))
             }
-            "nefin" => {
+            "nefin" | "nefin_daily" => {
                 nargs(1)?;
                 let names = ["rm_rf", "smb", "hml", "wml", "iml", "rf"];
                 let factor = match &args[0].expr.kind {
@@ -996,7 +1000,11 @@ impl Checker {
                         None => return Err(Diag::new("E0120", a.expr.span, "positional arguments must come before named ones")),
                     }
                 }
-                host(HostFn::Nefin { factor: factor as u8 }, vec![vw], Ty::Tensor(vec![AX_MONTH], Box::new(Ty::Float)))
+                if method == "nefin" {
+                    host(HostFn::Nefin { factor: factor as u8 }, vec![vw], Ty::Tensor(vec![AX_MONTH], Box::new(Ty::Float)))
+                } else {
+                    host(HostFn::NefinDaily { factor: factor as u8 }, vec![vw], Ty::Tensor(vec![AX_MONTH, AX_SESSION], Box::new(Ty::Float)))
+                }
             }
             "holdout" => {
                 nargs(1)?;
@@ -1010,7 +1018,7 @@ impl Checker {
                 host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
             }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, issuers, classes, nefin")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily")),
         }
     }
 
