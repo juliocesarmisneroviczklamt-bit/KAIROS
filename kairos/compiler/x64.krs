@@ -1,0 +1,502 @@
+// x86-64 machine code, written by the compiler in Kairós (M21): the instructions the native back
+// end (native.krs) uses, each as its bytes (Intel SDM vol. 2), with labels for jumps and calls.
+//
+// Registers by number: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8..r15 8..15;
+// xmm0..xmm15 likewise. A memory operand is [base + index + disp] (index -1: none).
+
+struct X64 {
+    code: List[i64],            // the bytes
+    labels: List[i64],          // each label's offset (-1 until bound)
+    jumps: List[(i64, i64)],    // (where a rel32 is, its label): relative to the end of the rel32
+    rdata: List[(i64, i64)],    // (where a rel32 is, an offset in the read-only data): RIP-relative
+    rdata_end: List[i64],       // the end of each of those instructions (an immediate may follow)
+}
+
+fn x64_new() -> X64 {
+    X64 { code: [], labels: [], jumps: [], rdata: [], rdata_end: [] }
+}
+
+fn rax() -> i64 { 0 }
+fn rcx() -> i64 { 1 }
+fn rdx() -> i64 { 2 }
+fn rbx() -> i64 { 3 }
+fn rsp() -> i64 { 4 }
+fn rbp() -> i64 { 5 }
+fn rsi() -> i64 { 6 }
+fn rdi() -> i64 { 7 }
+fn r8() -> i64 { 8 }
+fn r9() -> i64 { 9 }
+fn r15() -> i64 { 15 }
+
+fn xb(inout x: X64, b: i64) {
+    x.code.push(bit_and(b, 255))
+}
+
+fn x_i32(inout x: X64, v: i64) {
+    xb(inout x, v)
+    xb(inout x, shr(v, 8))
+    xb(inout x, shr(v, 16))
+    xb(inout x, shr(v, 24))
+}
+
+fn x_i64(inout x: X64, v: i64) {
+    x_i32(inout x, v)
+    x_i32(inout x, shr(v, 32))
+}
+
+// Overwrite the 32 bits at `at`.
+fn x_patch32(inout x: X64, at: i64, v: i64) {
+    x.code[at] = bit_and(v, 255)
+    x.code[at + 1] = bit_and(shr(v, 8), 255)
+    x.code[at + 2] = bit_and(shr(v, 16), 255)
+    x.code[at + 3] = bit_and(shr(v, 24), 255)
+}
+
+fn fits8(v: i64) -> bool {
+    v >= -128 and v <= 127
+}
+
+fn fits32(v: i64) -> bool {
+    v >= -2147483648 and v <= 2147483647
+}
+
+// ------------------------------------------------------------------ operands
+//
+// `pre`: a mandatory prefix (0x66, 0xF2, 0xF3) or 0; `w`: REX.W (64-bit operands); `ops`: the
+// opcode bytes; `reg`: the ModRM reg field (a register, or the opcode extension /0../7).
+
+fn x_rex(inout x: X64, w: bool, r: i64, i: i64, b: i64, force: bool) {
+    let rex = 64 + (if w { 8 } else { 0 }) + (if r >= 8 { 4 } else { 0 }) + (if i >= 8 { 2 } else { 0 }) + (if b >= 8 { 1 } else { 0 })
+    if rex != 64 or force { xb(inout x, rex) }
+}
+
+// reg, rm: both registers
+fn x_rr(inout x: X64, pre: i64, w: bool, ops: List[i64], reg: i64, rm: i64) {
+    if pre != 0 { xb(inout x, pre) }
+    x_rex(inout x, w, reg, 0, rm, false)
+    for o in ops { xb(inout x, o) }
+    xb(inout x, 192 + 8 * bit_and(reg, 7) + bit_and(rm, 7))
+}
+
+// reg, [base + index + disp]
+fn x_rm(inout x: X64, pre: i64, w: bool, ops: List[i64], reg: i64, base: i64, index: i64, disp: i64) {
+    if pre != 0 { xb(inout x, pre) }
+    x_rex(inout x, w, reg, if index >= 0 { index } else { 0 }, base, false)
+    for o in ops { xb(inout x, o) }
+    let b7 = bit_and(base, 7)
+    let sib = index >= 0 or b7 == 4
+    let md = if disp == 0 and b7 != 5 { 0 } else if fits8(disp) { 1 } else { 2 }
+    xb(inout x, 64 * md + 8 * bit_and(reg, 7) + (if sib { 4 } else { b7 }))
+    if sib { xb(inout x, 8 * (if index >= 0 { bit_and(index, 7) } else { 4 }) + b7) }
+    if md == 1 { xb(inout x, disp) }
+    if md == 2 { x_i32(inout x, disp) }
+}
+
+// reg, [rip + the read-only data at `off`]; `imm` bytes of immediate follow the instruction
+fn x_rip(inout x: X64, pre: i64, w: bool, ops: List[i64], reg: i64, off: i64, imm: i64) {
+    if pre != 0 { xb(inout x, pre) }
+    x_rex(inout x, w, reg, 0, 0, false)
+    for o in ops { xb(inout x, o) }
+    xb(inout x, 5 + 8 * bit_and(reg, 7))
+    x.rdata.push((len(x.code), off))
+    x.rdata_end.push(len(x.code) + 4 + imm)
+    x_i32(inout x, 0)
+}
+
+// ------------------------------------------------------------------ moves
+
+// reg <- [base + disp], 64 bits
+fn x_load(inout x: X64, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, true, [139], reg, base, -1, disp)
+}
+
+// [base + disp] <- reg, 64 bits
+fn x_store(inout x: X64, base: i64, disp: i64, reg: i64) {
+    x_rm(inout x, 0, true, [137], reg, base, -1, disp)
+}
+
+// reg <- [base + disp], 32 bits (the upper half cleared)
+fn x_load32(inout x: X64, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, false, [139], reg, base, -1, disp)
+}
+
+fn x_store32(inout x: X64, base: i64, disp: i64, reg: i64) {
+    x_rm(inout x, 0, false, [137], reg, base, -1, disp)
+}
+
+// reg <- [base + disp], 32 bits with the sign (movsxd)
+fn x_load32s(inout x: X64, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, true, [99], reg, base, -1, disp)
+}
+
+// dst <- src, 64 bits
+fn x_mov(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 0, true, [139], dst, src)
+}
+
+// dst <- the low 32 bits of src with their sign (movsxd)
+fn x_movsxd(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 0, true, [99], dst, src)
+}
+
+// dst <- src, 32 bits (the upper half cleared)
+fn x_mov32(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 0, false, [139], dst, src)
+}
+
+// reg <- a constant, in the shortest form
+fn x_imm(inout x: X64, reg: i64, v: i64) {
+    if v == 0 {
+        x_rr(inout x, 0, false, [51], reg, reg)
+    } else if v > 0 and v <= 4294967295 {
+        x_rex(inout x, false, 0, 0, reg, false)
+        xb(inout x, 184 + bit_and(reg, 7))
+        x_i32(inout x, v)
+    } else if fits32(v) {
+        x_rr(inout x, 0, true, [199], 0, reg)
+        x_i32(inout x, v)
+    } else {
+        x_rex(inout x, true, 0, 0, reg, false)
+        xb(inout x, 184 + bit_and(reg, 7))
+        x_i64(inout x, v)
+    }
+}
+
+// [base + disp] <- a constant that fits in 32 bits with its sign, 64 bits
+fn x_store_imm(inout x: X64, base: i64, disp: i64, v: i64) {
+    x_rm(inout x, 0, true, [199], 0, base, -1, disp)
+    x_i32(inout x, v)
+}
+
+// reg <- the address base + disp
+fn x_lea(inout x: X64, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, true, [141], reg, base, -1, disp)
+}
+
+// reg <- the address of the read-only data at `off`
+fn x_lea_rdata(inout x: X64, reg: i64, off: i64) {
+    x_rip(inout x, 0, true, [141], reg, off, 0)
+}
+
+// ------------------------------------------------------------------ arithmetic
+//
+// The ALU operations as "reg op= r/m": add 0x03, or 0x0B, and 0x23, sub 0x2B, xor 0x33, cmp 0x3B.
+
+fn op_add() -> i64 { 3 }
+fn op_or() -> i64 { 11 }
+fn op_and() -> i64 { 35 }
+fn op_sub() -> i64 { 43 }
+fn op_xor() -> i64 { 51 }
+fn op_cmp() -> i64 { 59 }
+
+// reg op= [base + disp] (w: 64 bits)
+fn x_alu_m(inout x: X64, op: i64, w: bool, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, w, [op], reg, base, -1, disp)
+}
+
+// dst op= src
+fn x_alu(inout x: X64, op: i64, w: bool, dst: i64, src: i64) {
+    x_rr(inout x, 0, w, [op], dst, src)
+}
+
+// reg op= a constant that fits in 32 bits (the extension of 0x81: add /0 or /1 and /4 sub /5 xor /6 cmp /7)
+fn x_alu_i(inout x: X64, ext: i64, w: bool, reg: i64, v: i64) {
+    if fits8(v) {
+        x_rr(inout x, 0, w, [131], ext, reg)
+        xb(inout x, v)
+    } else {
+        x_rr(inout x, 0, w, [129], ext, reg)
+        x_i32(inout x, v)
+    }
+}
+
+// reg *= [base + disp]
+fn x_imul_m(inout x: X64, w: bool, reg: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, w, [15, 175], reg, base, -1, disp)
+}
+
+// rdx:rax / reg (ext 7: idiv, 6: div), the quotient in rax and the remainder in rdx
+fn x_div(inout x: X64, ext: i64, w: bool, reg: i64) {
+    x_rr(inout x, 0, w, [247], ext, reg)
+}
+
+// rdx <- the sign of rax (cqo), or edx <- that of eax (cdq)
+fn x_cqo(inout x: X64, w: bool) {
+    if w { xb(inout x, 72) }
+    xb(inout x, 153)
+}
+
+// reg shifted by cl (ext: rol 0, ror 1, shl 4, shr 5, sar 7)
+fn x_shift_cl(inout x: X64, ext: i64, w: bool, reg: i64) {
+    x_rr(inout x, 0, w, [211], ext, reg)
+}
+
+// reg shifted by a constant
+fn x_shift_i(inout x: X64, ext: i64, w: bool, reg: i64, n: i64) {
+    x_rr(inout x, 0, w, [193], ext, reg)
+    xb(inout x, n)
+}
+
+// a unary operation (ext of 0xF7: not 2, neg 3)
+fn x_unary(inout x: X64, ext: i64, w: bool, reg: i64) {
+    x_rr(inout x, 0, w, [247], ext, reg)
+}
+
+// a bit count: popcnt (0xB8), tzcnt (0xBC), lzcnt (0xBD), each F3 0F op
+fn x_bitcount(inout x: X64, op: i64, w: bool, dst: i64, src: i64) {
+    x_rr(inout x, 243, w, [15, op], dst, src)
+}
+
+// test a, b (w: 64 bits)
+fn x_test(inout x: X64, w: bool, a: i64, b: i64) {
+    x_rr(inout x, 0, w, [133], b, a)
+}
+
+// ------------------------------------------------------------------ conditions
+//
+// The condition codes: o 0, no 1, b 2, ae 3, e 4, ne 5, be 6, a 7, s 8, ns 9, p 10, np 11,
+// l 12, ge 13, le 14, g 15.
+
+fn cc_b() -> i64 { 2 }
+fn cc_ae() -> i64 { 3 }
+fn cc_e() -> i64 { 4 }
+fn cc_ne() -> i64 { 5 }
+fn cc_be() -> i64 { 6 }
+fn cc_a() -> i64 { 7 }
+fn cc_p() -> i64 { 10 }
+fn cc_np() -> i64 { 11 }
+fn cc_l() -> i64 { 12 }
+fn cc_ge() -> i64 { 13 }
+fn cc_le() -> i64 { 14 }
+fn cc_g() -> i64 { 15 }
+
+// the low byte of reg (rax, rcx, rdx or rbx) <- the condition
+fn x_setcc(inout x: X64, cc: i64, reg: i64) {
+    x_rr(inout x, 0, false, [15, 144 + cc], 0, reg)
+}
+
+// reg <- its low byte, zero-extended (32 bits, the upper half cleared too)
+fn x_movzx8(inout x: X64, reg: i64) {
+    x_rr(inout x, 0, false, [15, 182], reg, reg)
+}
+
+// dst <- [base + disp] when the condition holds, 64 bits
+fn x_cmov_m(inout x: X64, cc: i64, dst: i64, base: i64, disp: i64) {
+    x_rm(inout x, 0, true, [15, 64 + cc], dst, base, -1, disp)
+}
+
+// ------------------------------------------------------------------ memory of the module
+//
+// [r15 + index + disp]: the module's memory starts at r15, and an address is 32 bits (index).
+
+// reg <- the bytes at [base + index + disp]: `kind` 0: 8 bits zero-extended, 1: 8 bits with the
+// sign, 2: 16 zero-extended, 3: 16 with the sign, 4: 32 (zero-extended), 5: 32 with the sign,
+// 6: 64. `w` widens the signed ones to 64 bits.
+fn x_load_kind(inout x: X64, kind: i64, w: bool, reg: i64, base: i64, index: i64, disp: i64) {
+    if kind == 0 { x_rm(inout x, 0, false, [15, 182], reg, base, index, disp) }
+    if kind == 1 { x_rm(inout x, 0, w, [15, 190], reg, base, index, disp) }
+    if kind == 2 { x_rm(inout x, 0, false, [15, 183], reg, base, index, disp) }
+    if kind == 3 { x_rm(inout x, 0, w, [15, 191], reg, base, index, disp) }
+    if kind == 4 { x_rm(inout x, 0, false, [139], reg, base, index, disp) }
+    if kind == 5 { x_rm(inout x, 0, true, [99], reg, base, index, disp) }
+    if kind == 6 { x_rm(inout x, 0, true, [139], reg, base, index, disp) }
+}
+
+// [base + index + disp] <- the low `bytes` (1, 2, 4 or 8) of reg (rax, rcx, rdx or rbx)
+fn x_store_n(inout x: X64, bytes_: i64, reg: i64, base: i64, index: i64, disp: i64) {
+    if bytes_ == 1 { x_rm(inout x, 0, false, [136], reg, base, index, disp) }
+    if bytes_ == 2 { x_rm(inout x, 102, false, [137], reg, base, index, disp) }
+    if bytes_ == 4 { x_rm(inout x, 0, false, [137], reg, base, index, disp) }
+    if bytes_ == 8 { x_rm(inout x, 0, true, [137], reg, base, index, disp) }
+}
+
+// ------------------------------------------------------------------ floating point (SSE2)
+
+// xmm <- [base + index + disp] (movsd), and back
+fn x_movsd_load(inout x: X64, xmm: i64, base: i64, index: i64, disp: i64) {
+    x_rm(inout x, 242, false, [15, 16], xmm, base, index, disp)
+}
+
+fn x_movsd_store(inout x: X64, base: i64, index: i64, disp: i64, xmm: i64) {
+    x_rm(inout x, 242, false, [15, 17], xmm, base, index, disp)
+}
+
+// 32-bit floats (movss)
+fn x_movss_load(inout x: X64, xmm: i64, base: i64, index: i64, disp: i64) {
+    x_rm(inout x, 243, false, [15, 16], xmm, base, index, disp)
+}
+
+fn x_movss_store(inout x: X64, base: i64, index: i64, disp: i64, xmm: i64) {
+    x_rm(inout x, 243, false, [15, 17], xmm, base, index, disp)
+}
+
+// xmm op= [base + disp]: add 0x58, mul 0x59, sub 0x5C, div 0x5E, sqrt 0x51 (F2 0F op)
+fn x_sse_m(inout x: X64, op: i64, xmm: i64, base: i64, disp: i64) {
+    x_rm(inout x, 242, false, [15, op], xmm, base, -1, disp)
+}
+
+// dst op= src (F2 0F op)
+fn x_sse(inout x: X64, op: i64, dst: i64, src: i64) {
+    x_rr(inout x, 242, false, [15, op], dst, src)
+}
+
+// compare a with b, unordered (ucomisd): flags as unsigned, PF on NaN
+fn x_ucomisd(inout x: X64, a: i64, b: i64) {
+    x_rr(inout x, 102, false, [15, 46], a, b)
+}
+
+// xmm <- rounded (roundsd, SSE4.1): mode 8 nearest even, 9 down, 10 up, 11 toward zero
+fn x_roundsd(inout x: X64, dst: i64, src: i64, mode: i64) {
+    x_rr(inout x, 102, false, [15, 58, 11], dst, src)
+    xb(inout x, mode)
+}
+
+// xmm <- the 64-bit integer in reg (cvtsi2sd)
+fn x_cvtsi2sd(inout x: X64, xmm: i64, reg: i64) {
+    x_rr(inout x, 242, true, [15, 42], xmm, reg)
+}
+
+// reg <- the 64-bit integer toward zero (cvttsd2si; 2^63 when out of range or NaN)
+fn x_cvttsd2si(inout x: X64, w: bool, reg: i64, xmm: i64) {
+    x_rr(inout x, 242, w, [15, 44], reg, xmm)
+}
+
+// f64 -> f32 (cvtsd2ss) and f32 -> f64 (cvtss2sd)
+fn x_cvtsd2ss(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 242, false, [15, 90], dst, src)
+}
+
+fn x_cvtss2sd(inout x: X64, dst: i64, src: i64) {
+    x_rr(inout x, 243, false, [15, 90], dst, src)
+}
+
+// xmm <- reg (movq), and back
+fn x_movq_xr(inout x: X64, xmm: i64, reg: i64) {
+    x_rr(inout x, 102, true, [15, 110], xmm, reg)
+}
+
+fn x_movq_rx(inout x: X64, reg: i64, xmm: i64) {
+    x_rr(inout x, 102, true, [15, 126], xmm, reg)
+}
+
+// ------------------------------------------------------------------ the stack and calls
+
+fn x_push(inout x: X64, reg: i64) {
+    x_rex(inout x, false, 0, 0, reg, false)
+    xb(inout x, 80 + bit_and(reg, 7))
+}
+
+fn x_pop(inout x: X64, reg: i64) {
+    x_rex(inout x, false, 0, 0, reg, false)
+    xb(inout x, 88 + bit_and(reg, 7))
+}
+
+fn x_ret(inout x: X64) {
+    xb(inout x, 195)
+}
+
+// mov rsp, rbp; pop rbp
+fn x_leave(inout x: X64) {
+    xb(inout x, 201)
+}
+
+// call reg
+fn x_call_r(inout x: X64, reg: i64) {
+    x_rr(inout x, 0, false, [255], 2, reg)
+}
+
+// call [rip + the read-only data at `off`] (an entry of the import table)
+fn x_call_rdata(inout x: X64, off: i64) {
+    x_rip(inout x, 0, false, [255], 2, off, 0)
+}
+
+// ud2: stops the program (an illegal instruction)
+fn x_ud2(inout x: X64) {
+    xb(inout x, 15)
+    xb(inout x, 11)
+}
+
+// rep movsb: copy rcx bytes from [rsi] to [rdi]
+fn x_rep_movsb(inout x: X64) {
+    xb(inout x, 243)
+    xb(inout x, 164)
+}
+
+// rep stosq: fill rcx quadwords at [rdi] with rax
+fn x_rep_stosq(inout x: X64) {
+    xb(inout x, 243)
+    xb(inout x, 72)
+    xb(inout x, 171)
+}
+
+// ------------------------------------------------------------------ labels
+
+fn x_label(inout x: X64) -> i64 {
+    x.labels.push(-1)
+    len(x.labels) - 1
+}
+
+fn x_bind(inout x: X64, l: i64) {
+    x.labels[l] = len(x.code)
+}
+
+fn x_rel(inout x: X64, l: i64) {
+    x.jumps.push((len(x.code), l))
+    x_i32(inout x, 0)
+}
+
+fn x_jmp(inout x: X64, l: i64) {
+    xb(inout x, 233)
+    x_rel(inout x, l)
+}
+
+fn x_jcc(inout x: X64, cc: i64, l: i64) {
+    xb(inout x, 15)
+    xb(inout x, 128 + cc)
+    x_rel(inout x, l)
+}
+
+// reg <- the address of a label (lea reg, [rip + label])
+fn x_lea_label(inout x: X64, reg: i64, l: i64) {
+    x_rex(inout x, true, reg, 0, 0, false)
+    xb(inout x, 141)
+    xb(inout x, 5 + 8 * bit_and(reg, 7))
+    x_rel(inout x, l)
+}
+
+// bit n of reg: bt 4, bts 5, btr 6, btc 7 (0F BA /ext ib), 64 bits
+fn x_bit_i(inout x: X64, ext: i64, reg: i64, bit: i64) {
+    x_rr(inout x, 0, true, [15, 186], ext, reg)
+    xb(inout x, bit)
+}
+
+// dst <- src * a constant (imul r, r/m, imm32)
+fn x_imul_i(inout x: X64, w: bool, dst: i64, src: i64, v: i64) {
+    x_rr(inout x, 0, w, [105], dst, src)
+    x_i32(inout x, v)
+}
+
+fn x_call(inout x: X64, l: i64) {
+    xb(inout x, 232)
+    x_rel(inout x, l)
+}
+
+// The jumps and calls to labels, once every label is bound (false: one is not).
+fn x_resolve(inout x: X64) -> bool {
+    let js = x.jumps
+    for j in js {
+        let to = x.labels[j.1]
+        if to < 0 { return false }
+        x_patch32(inout x, j.0, to - (j.0 + 4))
+    }
+    true
+}
+
+// The RIP-relative references, once the code is at `text_rva` and the read-only data at `rdata_rva`.
+fn x_resolve_rdata(inout x: X64, text_rva: i64, rdata_rva: i64) {
+    let rs = x.rdata
+    for k in 0..len(rs) {
+        let r = rs[k]
+        x_patch32(inout x, r.0, rdata_rva + r.1 - (text_rva + x.rdata_end[k]))
+    }
+}

@@ -2,6 +2,29 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.21.0 — M21: o back-end nativo escrito em Kairós
+
+**O compilador escrito em Kairós passou a gerar executáveis do Windows:** código de máquina x86-64 que ele mesmo escreve, sem Rust e sem runtime de WebAssembly (wasmtime, node). O próprio compilador vira um executável que compila a si mesmo, nos mesmos bytes.
+
+```
+kairos run kairos/compiler/kn.krs kairos/std out programa.krs    # out/programa.exe
+```
+
+- **O caminho:** o front-end em Kairós; o `wasmgen.krs`, que faz o módulo de WebAssembly; e então três arquivos novos, todos em Kairós:
+  - [`native.krs`](kairos/compiler/native.krs) traduz o módulo para x86-64, função por função: cada valor da pilha do WebAssembly tem um lugar no quadro, e a memória do módulo começa em `r15`;
+  - [`x64.krs`](kairos/compiler/x64.krs) codifica as instruções;
+  - [`pe.krs`](kairos/compiler/pe.krs) grava o executável (PE32+).
+- **O sistema operacional também é Kairós:** [`rt_win.krs`](kairos/compiler/rt_win.krs) implementa sobre a `kernel32.dll` as 13 funções do WASI que o runtime usa. São os arquivos e as pastas, o console (em UTF-16, para mostrar os acentos), os relógios, os argumentos e o ambiente.
+- **Conferido:**
+  - os 62 programas de `tests/wasm`, os 31 dourados que rodam e os 10 com os dados reais da B3 dão a saída, os erros e o código de saída do interpretador;
+  - o registro de tentativas e o livro-razão saem iguais byte a byte;
+  - o comando `kairos` escrito em Kairós, como executável, é igual ao Rust nas 59 linhas e nas 3 sessões de REPL do teste do M16;
+  - o `kn.exe` (5,9 MB) compila a si mesmo em 24 s nos mesmos bytes.
+- **Testes:** `tests/native_x64.rs` (Windows x86-64, release) e o job `native-x64` do CI. A release traz `kairos-selfhost.exe`, o comando escrito em Kairós como executável.
+- **Limites:**
+  - o código ainda é o de base, com cada valor passando pela memória: o `momentum` leva 6,5 s, contra 1,5 s no interpretador Rust (M22: registradores);
+  - por enquanto, só Windows x86-64 (M22: ELF para Linux).
+
 ## 0.20.0 — M20: texto formatado
 
 **A Kairós ganhou o texto formatado:** `f"{name} {ym}: equity {equity / 1e9:.1} bi"`. Antes, o mesmo texto era uma soma de pedaços com `str(...)` e `format_fixed(..., 1)`.

@@ -1,0 +1,667 @@
+// The operating system of Kairós programs compiled to Windows executables (M21), written in
+// Kairós: the WASI functions the runtime (rt.krs) calls, over kernel32.dll. The native back end
+// (native.krs) calls `win_<name>` for each WASI import, gives each `k32_<Name>` the body of a call
+// to kernel32's <Name> (its arguments as Windows takes them, its rax as the result) and gives
+// `rt_win_base` the address where the module's memory starts: an address of the module is that
+// plus its offset.
+//
+// Paths are relative to the current folder (WASI's descriptor 3, `--dir=.`), their `/` written as
+// `\` for Windows. The descriptors live in a table whose address is at 208: 32 bytes each, the kind
+// (0 free, 1 file, 2 folder, 3 console, 4 another standard stream), the handle, and for a folder
+// the address and size of its pattern (`folder\*`, UTF-16). An error is WASI's code.
+
+// ------------------------------------------------------------------ kernel32 (the bodies the native back end gives)
+
+fn rt_win_base() -> i64 {
+    0
+}
+
+fn k32_GetStdHandle(which: i64) -> i64 {
+    0
+}
+
+fn k32_WriteFile(h: i64, buf: i64, n: i64, written: i64, overlapped: i64) -> i64 {
+    0
+}
+
+fn k32_ReadFile(h: i64, buf: i64, n: i64, got: i64, overlapped: i64) -> i64 {
+    0
+}
+
+fn k32_WriteConsoleW(h: i64, buf: i64, n: i64, written: i64, reserved: i64) -> i64 {
+    0
+}
+
+fn k32_GetConsoleMode(h: i64, mode: i64) -> i64 {
+    0
+}
+
+fn k32_CreateFileW(path: i64, access: i64, share: i64, security: i64, disposition: i64, flags: i64, template: i64) -> i64 {
+    0
+}
+
+fn k32_CloseHandle(h: i64) -> i64 {
+    0
+}
+
+fn k32_GetLastError() -> i64 {
+    0
+}
+
+fn k32_CreateDirectoryW(path: i64, security: i64) -> i64 {
+    0
+}
+
+fn k32_GetFileAttributesW(path: i64) -> i64 {
+    0
+}
+
+fn k32_GetFileAttributesExW(path: i64, level: i64, data: i64) -> i64 {
+    0
+}
+
+fn k32_FindFirstFileW(pattern: i64, data: i64) -> i64 {
+    0
+}
+
+fn k32_FindNextFileW(h: i64, data: i64) -> i64 {
+    0
+}
+
+fn k32_FindClose(h: i64) -> i64 {
+    0
+}
+
+fn k32_GetCommandLineW() -> i64 {
+    0
+}
+
+fn k32_GetEnvironmentStringsW() -> i64 {
+    0
+}
+
+fn k32_FreeEnvironmentStringsW(block: i64) -> i64 {
+    0
+}
+
+fn k32_lstrlenW(s: i64) -> i64 {
+    0
+}
+
+fn k32_RtlMoveMemory(dst: i64, src: i64, n: i64) -> i64 {
+    0
+}
+
+fn k32_GetSystemTimePreciseAsFileTime(ft: i64) -> i64 {
+    0
+}
+
+fn k32_QueryPerformanceCounter(c: i64) -> i64 {
+    0
+}
+
+fn k32_QueryPerformanceFrequency(f: i64) -> i64 {
+    0
+}
+
+fn k32_ExitProcess(code: i64) -> i64 {
+    0
+}
+
+// ------------------------------------------------------------------ helpers
+
+// a native address from an address of the module
+fn rt_win_at(a: i64) -> i64 {
+    rt_win_base() + a
+}
+
+// a 32-bit result of kernel32 (BOOL, DWORD): the low half of rax
+fn rt_win_u32(r: i64) -> i64 {
+    bit_and(r, 4294967295)
+}
+
+// WASI's code for Windows' last error
+fn rt_win_errno() -> i64 {
+    let e = rt_win_u32(k32_GetLastError())
+    if e == 2 or e == 3 or e == 123 or e == 161 { return 44 }
+    if e == 5 or e == 32 or e == 33 { return 2 }
+    if e == 80 or e == 183 { return 20 }
+    if e == 267 { return 54 }
+    if e == 6 { return 8 }
+    29
+}
+
+// The table of descriptors (made the first time: 0, 1, 2 the standard streams, 3 the current folder).
+fn rt_win_table() -> i64 {
+    let t = wasm_load32(208)
+    if t != 0 { return t }
+    let n = rt_win_fds()
+    let nt = rt_alloc(32 * n)
+    for i in 0..4 * n { wasm_store64(nt + 8 * i, 0) }
+    let cell = rt_alloc(16)
+    for fd in 0..3 {
+        let h = k32_GetStdHandle(-10 - fd)
+        let console = rt_win_u32(k32_GetConsoleMode(h, rt_win_at(cell))) != 0
+        wasm_store64(nt + 32 * fd, if console { 3 } else { 4 })
+        wasm_store64(nt + 32 * fd + 8, h)
+    }
+    rt_free(cell, 16)
+    wasm_store64(nt + 32 * 3, 2)
+    wasm_store32(208, nt)
+    nt
+}
+
+fn rt_win_fds() -> i64 {
+    256
+}
+
+// The entry of a descriptor in use, or 0.
+fn rt_win_entry(fd: i64) -> i64 {
+    if fd < 0 or fd >= rt_win_fds() { return 0 }
+    let e = rt_win_table() + 32 * fd
+    if wasm_load64(e) == 0 { 0 } else { e }
+}
+
+// A new descriptor of `kind`, or -1 when all are in use.
+fn rt_win_new_fd(kind: i64, h: i64, pat: i64, size: i64) -> i64 {
+    let t = rt_win_table()
+    for fd in 4..rt_win_fds() {
+        let e = t + 32 * fd
+        if wasm_load64(e) == 0 {
+            wasm_store64(e, kind)
+            wasm_store64(e + 8, h)
+            wasm_store64(e + 16, pat)
+            wasm_store64(e + 24, size)
+            return fd
+        }
+    }
+    -1
+}
+
+// The UTF-8 bytes at p (n of them) as UTF-16 with a final zero (in a path, `/` as a backslash), `extra`
+// code units of room more: (its address, the bytes allocated, the code units before the zero).
+fn rt_win_wide(p: i64, n: i64, extra: i64, path: bool) -> (i64, i64, i64) {
+    let size = 2 * n + 2 + 2 * extra
+    let w = rt_alloc(size)
+    var i = 0
+    var k = 0
+    while i < n {
+        let b = wasm_load8(p + i)
+        var cp = b
+        var len_ = 1
+        if b >= 240 and i + 3 < n {
+            cp = 262144 * bit_and(b, 7) + 4096 * bit_and(wasm_load8(p + i + 1), 63) + 64 * bit_and(wasm_load8(p + i + 2), 63) + bit_and(wasm_load8(p + i + 3), 63)
+            len_ = 4
+        } else if b >= 224 and i + 2 < n {
+            cp = 4096 * bit_and(b, 15) + 64 * bit_and(wasm_load8(p + i + 1), 63) + bit_and(wasm_load8(p + i + 2), 63)
+            len_ = 3
+        } else if b >= 192 and i + 1 < n {
+            cp = 64 * bit_and(b, 31) + bit_and(wasm_load8(p + i + 1), 63)
+            len_ = 2
+        }
+        if cp == 47 and path { cp = 92 }
+        if cp >= 65536 {
+            let c = cp - 65536
+            rt_win_store16(w + 2 * k, 55296 + shr(c, 10))
+            rt_win_store16(w + 2 * k + 2, 56320 + bit_and(c, 1023))
+            k += 2
+        } else {
+            rt_win_store16(w + 2 * k, cp)
+            k += 1
+        }
+        i += len_
+    }
+    rt_win_store16(w + 2 * k, 0)
+    (w, size, k)
+}
+
+fn rt_win_store16(addr: i64, v: i64) {
+    wasm_store8(addr, bit_and(v, 255))
+    wasm_store8(addr + 1, bit_and(shr(v, 8), 255))
+}
+
+fn rt_win_load16(addr: i64) -> i64 {
+    wasm_load8(addr) + 256 * wasm_load8(addr + 1)
+}
+
+// The UTF-16 code units at w (n of them) as UTF-8, written at q: how many bytes (q = -1: only
+// count them).
+fn rt_win_narrow(w: i64, n: i64, q: i64) -> i64 {
+    var i = 0
+    var k = 0
+    while i < n {
+        var cp = rt_win_load16(w + 2 * i)
+        i += 1
+        if cp >= 55296 and cp < 56320 and i < n {
+            let lo = rt_win_load16(w + 2 * i)
+            if lo >= 56320 and lo < 57344 {
+                cp = 65536 + 1024 * (cp - 55296) + (lo - 56320)
+                i += 1
+            }
+        }
+        if cp >= 55296 and cp < 57344 { cp = 65533 }
+        var bs: List[i64] = []
+        if cp < 128 {
+            bs = [cp]
+        } else if cp < 2048 {
+            bs = [192 + shr(cp, 6), 128 + bit_and(cp, 63)]
+        } else if cp < 65536 {
+            bs = [224 + shr(cp, 12), 128 + bit_and(shr(cp, 6), 63), 128 + bit_and(cp, 63)]
+        } else {
+            bs = [240 + shr(cp, 18), 128 + bit_and(shr(cp, 12), 63), 128 + bit_and(shr(cp, 6), 63), 128 + bit_and(cp, 63)]
+        }
+        for b in bs {
+            if q >= 0 { wasm_store8(q + k, b) }
+            k += 1
+        }
+    }
+    k
+}
+
+// Nanoseconds since 1970 from a FILETIME (100 ns since 1601) at the address a.
+fn rt_win_ns(a: i64) -> i64 {
+    let ft = wasm_load32(a) + 4294967296 * wasm_load32(a + 4)
+    (ft - 116444736000000000) * 100
+}
+
+// ------------------------------------------------------------------ WASI
+
+fn win_fd_write(fd: i64, iovs: i64, n: i64, nwritten_at: i64) -> i64 {
+    let e = rt_win_entry(fd)
+    if e == 0 { return 8 }
+    let kind = wasm_load64(e)
+    let h = wasm_load64(e + 8)
+    let cell = rt_alloc(16)
+    var total = 0
+    var err = 0
+    for i in 0..n {
+        let buf = wasm_load32(iovs + 8 * i)
+        let len_ = wasm_load32(iovs + 8 * i + 4)
+        if kind == 3 {
+            // the console: as UTF-16, so that it shows what the bytes mean
+            let w = rt_win_wide(buf, len_, 0, false)
+            var at = 0
+            while at < w.2 and err == 0 {
+                if rt_win_u32(k32_WriteConsoleW(h, rt_win_at(w.0 + 2 * at), w.2 - at, rt_win_at(cell), 0)) == 0 {
+                    err = rt_win_errno()
+                } else {
+                    let got = wasm_load32(cell)
+                    if got == 0 { err = 29 }
+                    at += got
+                }
+            }
+            rt_free(w.0, w.1)
+        } else {
+            var at = 0
+            while at < len_ and err == 0 {
+                if rt_win_u32(k32_WriteFile(h, rt_win_at(buf + at), len_ - at, rt_win_at(cell), 0)) == 0 {
+                    err = rt_win_errno()
+                } else {
+                    let got = wasm_load32(cell)
+                    if got == 0 { err = 29 }
+                    at += got
+                }
+            }
+        }
+        if err != 0 { break }
+        total += len_
+    }
+    rt_free(cell, 16)
+    wasm_store32(nwritten_at, total)
+    err
+}
+
+fn win_fd_read(fd: i64, iovs: i64, n: i64, nread_at: i64) -> i64 {
+    let e = rt_win_entry(fd)
+    if e == 0 { return 8 }
+    let kind = wasm_load64(e)
+    if kind == 2 { return 31 }
+    let h = wasm_load64(e + 8)
+    let cell = rt_alloc(16)
+    var total = 0
+    var err = 0
+    for i in 0..n {
+        let buf = wasm_load32(iovs + 8 * i)
+        let len_ = wasm_load32(iovs + 8 * i + 4)
+        if rt_win_u32(k32_ReadFile(h, rt_win_at(buf), len_, rt_win_at(cell), 0)) == 0 {
+            let w = rt_win_u32(k32_GetLastError())
+            // a pipe closed at the other end, or the end of the file: no more bytes
+            if w != 109 and w != 38 { err = rt_win_errno() }
+            break
+        }
+        let got = wasm_load32(cell)
+        total += got
+        if got < len_ { break }
+    }
+    rt_free(cell, 16)
+    wasm_store32(nread_at, total)
+    err
+}
+
+fn win_fd_close(fd: i64) -> i64 {
+    let e = rt_win_entry(fd)
+    if e == 0 { return 8 }
+    let kind = wasm_load64(e)
+    if kind == 1 { let _ = k32_CloseHandle(wasm_load64(e + 8)) }
+    if kind == 2 and wasm_load64(e + 16) != 0 { rt_free(wasm_load64(e + 16), wasm_load64(e + 24)) }
+    if fd >= 4 { wasm_store64(e, 0) }
+    0
+}
+
+fn win_path_open(dir: i64, dirflags: i64, path: i64, plen: i64, oflags: i64, rights: i64, inherit: i64, fdflags: i64, fd_at: i64) -> i64 {
+    let w = rt_win_wide(path, plen, 2, true)
+    if bit_and(oflags, 2) != 0 {
+        // a folder: kept as the pattern of its names
+        let a = rt_win_u32(k32_GetFileAttributesW(rt_win_at(w.0)))
+        if a == 4294967295 {
+            let err = rt_win_errno()
+            rt_free(w.0, w.1)
+            return err
+        }
+        if bit_and(a, 16) == 0 {
+            rt_free(w.0, w.1)
+            return 54
+        }
+        var k = w.2
+        if k > 0 and rt_win_load16(w.0 + 2 * k - 2) != 92 {
+            rt_win_store16(w.0 + 2 * k, 92)
+            k += 1
+        }
+        if k == 0 {
+            rt_win_store16(w.0, 46)
+            rt_win_store16(w.0 + 2, 92)
+            k = 2
+        }
+        rt_win_store16(w.0 + 2 * k, 42)
+        rt_win_store16(w.0 + 2 * k + 2, 0)
+        let fd = rt_win_new_fd(2, 0, w.0, w.1)
+        if fd < 0 {
+            rt_free(w.0, w.1)
+            return 33
+        }
+        wasm_store32(fd_at, fd)
+        return 0
+    }
+    // reading, writing, or appending (FILE_APPEND_DATA: every write goes to the end)
+    var access = 0
+    if bit_and(rights, 2) != 0 { access += 2147483648 }
+    if bit_and(fdflags, 1) != 0 { access += 4 } else if bit_and(rights, 64) != 0 { access += 1073741824 }
+    let creat = bit_and(oflags, 1) != 0
+    let trunc = bit_and(oflags, 8) != 0
+    let excl = bit_and(oflags, 4) != 0
+    let disp = if creat and excl { 1 } else if creat and trunc { 2 } else if creat { 4 } else if trunc { 5 } else { 3 }
+    let h = k32_CreateFileW(rt_win_at(w.0), access, 7, 0, disp, 128, 0)
+    if h == -1 {
+        var err = rt_win_errno()
+        // Windows refuses a folder as a file: WASI says what it is
+        if err == 2 and bit_and(rt_win_u32(k32_GetFileAttributesW(rt_win_at(w.0))), 16) != 0 { err = 31 }
+        rt_free(w.0, w.1)
+        return err
+    }
+    rt_free(w.0, w.1)
+    let fd = rt_win_new_fd(1, h, 0, 0)
+    if fd < 0 {
+        let _ = k32_CloseHandle(h)
+        return 33
+    }
+    wasm_store32(fd_at, fd)
+    0
+}
+
+fn win_path_create_directory(dir: i64, path: i64, plen: i64) -> i64 {
+    let w = rt_win_wide(path, plen, 0, true)
+    let ok = rt_win_u32(k32_CreateDirectoryW(rt_win_at(w.0), 0)) != 0
+    let err = if ok { 0 } else { rt_win_errno() }
+    rt_free(w.0, w.1)
+    err
+}
+
+// WASI's filestat: the type (3 folder, 4 file) at 16, the size at 32, the times at 40, 48, 56.
+fn win_path_filestat_get(dir: i64, flags: i64, path: i64, plen: i64, st: i64) -> i64 {
+    let w = rt_win_wide(path, plen, 0, true)
+    let data = rt_alloc(64)
+    let ok = rt_win_u32(k32_GetFileAttributesExW(rt_win_at(w.0), 0, rt_win_at(data))) != 0
+    var err = 0
+    if ok {
+        for i in 0..8 { wasm_store64(st + 8 * i, 0) }
+        let a = wasm_load32(data)
+        wasm_store8(st + 16, if bit_and(a, 16) != 0 { 3 } else { 4 })
+        wasm_store64(st + 24, 1)
+        wasm_store64(st + 32, 4294967296 * wasm_load32(data + 28) + wasm_load32(data + 32))
+        wasm_store64(st + 40, rt_win_ns(data + 12))
+        wasm_store64(st + 48, rt_win_ns(data + 20))
+        wasm_store64(st + 56, rt_win_ns(data + 4))
+    } else {
+        err = rt_win_errno()
+    }
+    rt_free(data, 64)
+    rt_free(w.0, w.1)
+    err
+}
+
+// The names of a folder from the `cookie`-th, as WASI's entries: the next cookie (8 bytes), the
+// inode (8), the name's length (4), the type (1), 3 more, then the name; cut at the buffer's end.
+fn win_fd_readdir(fd: i64, buf: i64, size: i64, cookie: i64, used_at: i64) -> i64 {
+    let e = rt_win_entry(fd)
+    if e == 0 { return 8 }
+    if wasm_load64(e) != 2 { return 54 }
+    let data = rt_alloc(1024)
+    let h = k32_FindFirstFileW(rt_win_at(wasm_load64(e + 16)), rt_win_at(data))
+    if h == -1 {
+        rt_free(data, 1024)
+        let err = rt_win_errno()
+        wasm_store32(used_at, 0)
+        return if err == 44 { 0 } else { err }
+    }
+    let name = rt_alloc(1040)
+    var index = 0
+    var at = 0
+    var more = true
+    while more and at < size {
+        if index >= cookie {
+            var units = 0
+            while units < 260 and rt_win_load16(data + 44 + 2 * units) != 0 { units += 1 }
+            let n = rt_win_narrow(data + 44, units, name)
+            let head = rt_alloc(24)
+            wasm_store64(head, index + 1)
+            wasm_store64(head + 8, 0)
+            wasm_store32(head + 16, n)
+            wasm_store32(head + 20, if bit_and(wasm_load32(data), 16) != 0 { 3 } else { 4 })
+            for i in 0..24 {
+                if at + i < size { wasm_store8(buf + at + i, wasm_load8(head + i)) }
+            }
+            for i in 0..n {
+                if at + 24 + i < size { wasm_store8(buf + at + 24 + i, wasm_load8(name + i)) }
+            }
+            rt_free(head, 24)
+            at += 24 + n
+        }
+        index += 1
+        more = rt_win_u32(k32_FindNextFileW(h, rt_win_at(data))) != 0
+    }
+    let _ = k32_FindClose(h)
+    rt_free(name, 1040)
+    rt_free(data, 1024)
+    wasm_store32(used_at, min(at, size))
+    0
+}
+
+// The time in nanoseconds: 0 the wall clock (since 1970), 1 a monotonic one.
+fn win_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
+    let cell = rt_alloc(16)
+    if id == 0 {
+        let _ = k32_GetSystemTimePreciseAsFileTime(rt_win_at(cell))
+        wasm_store64(time_at, rt_win_ns(cell))
+    } else {
+        let _ = k32_QueryPerformanceCounter(rt_win_at(cell))
+        let _ = k32_QueryPerformanceFrequency(rt_win_at(cell + 8))
+        let c = wasm_load64(cell)
+        let f = wasm_load64(cell + 8)
+        wasm_store64(time_at, c / f * 1000000000 + c % f * 1000000000 / f)
+    }
+    rt_free(cell, 16)
+    0
+}
+
+fn win_proc_exit(code: i64) {
+    let _ = k32_ExitProcess(code)
+}
+
+// ------------------------------------------------------------------ the arguments and the environment
+
+// The UTF-16 string at the native address p, copied into the module: (its address, its code units).
+fn rt_win_copy16(p: i64) -> (i64, i64) {
+    let n = rt_win_u32(k32_lstrlenW(p))
+    let w = rt_alloc(2 * n + 2)
+    let _ = k32_RtlMoveMemory(rt_win_at(w), p, 2 * n + 2)
+    (w, n)
+}
+
+// The arguments of the command line, as UTF-8 texts (the program's first), split as Rust splits
+// them on Windows: spaces and tabs between them, quotes around spaces, 2n backslashes and a quote
+// give n backslashes, 2n + 1 give n and the quote.
+fn rt_win_args() -> List[str] {
+    let c = rt_win_copy16(k32_GetCommandLineW())
+    var units: List[i64] = []
+    for i in 0..c.1 { units.push(rt_win_load16(c.0 + 2 * i)) }
+    rt_free(c.0, 2 * c.1 + 2)
+    var out: List[List[i64]] = []
+    var i = 0
+    let n = len(units)
+    // the program: to the next quote, or to a space
+    var first: List[i64] = []
+    if n > 0 and units[0] == 34 {
+        i = 1
+        while i < n and units[i] != 34 {
+            first.push(units[i])
+            i += 1
+        }
+        i += 1
+    } else {
+        while i < n and units[i] != 32 and units[i] != 9 {
+            first.push(units[i])
+            i += 1
+        }
+    }
+    out.push(first)
+    while true {
+        while i < n and (units[i] == 32 or units[i] == 9) { i += 1 }
+        if i >= n { break }
+        var cur: List[i64] = []
+        var quoted = false
+        while i < n {
+            let u = units[i]
+            if u == 92 {
+                var k = 0
+                while i < n and units[i] == 92 {
+                    k += 1
+                    i += 1
+                }
+                if i < n and units[i] == 34 {
+                    for j in 0..k / 2 { cur.push(92) }
+                    if k % 2 == 1 {
+                        cur.push(34)
+                        i += 1
+                    }
+                } else {
+                    for j in 0..k { cur.push(92) }
+                }
+            } else if u == 34 {
+                if quoted and i + 1 < n and units[i + 1] == 34 {
+                    cur.push(34)
+                    i += 2
+                } else {
+                    quoted = not quoted
+                    i += 1
+                }
+            } else if (u == 32 or u == 9) and not quoted {
+                break
+            } else {
+                cur.push(u)
+                i += 1
+            }
+        }
+        out.push(cur)
+    }
+    var texts: List[str] = []
+    for a in out { texts.push(rt_win_text16(a)) }
+    texts
+}
+
+// UTF-16 code units as a text
+fn rt_win_text16(us: List[i64]) -> str {
+    let w = rt_alloc(2 * len(us) + 2)
+    for i in 0..len(us) { rt_win_store16(w + 2 * i, us[i]) }
+    let n = rt_win_narrow(w, len(us), -1)
+    let q = rt_alloc(n + 1)
+    let _ = rt_win_narrow(w, len(us), q)
+    let s = rt_text_of(q, n)
+    rt_free(q, n + 1)
+    rt_free(w, 2 * len(us) + 2)
+    s
+}
+
+// The variables of the environment as `NAME=value` (without Windows' `=C:=...`).
+fn rt_win_environ() -> List[str] {
+    var out: List[str] = []
+    let block = k32_GetEnvironmentStringsW()
+    var p = block
+    while true {
+        let c = rt_win_copy16(p)
+        if c.1 == 0 {
+            rt_free(c.0, 2)
+            break
+        }
+        if rt_win_load16(c.0) != 61 {
+            var us: List[i64] = []
+            for i in 0..c.1 { us.push(rt_win_load16(c.0 + 2 * i)) }
+            out.push(rt_win_text16(us))
+        }
+        rt_free(c.0, 2 * c.1 + 2)
+        p += 2 * c.1 + 2
+    }
+    let _ = k32_FreeEnvironmentStringsW(block)
+    out
+}
+
+// The texts as WASI gives them: their count and the bytes of their C strings at the two cells,
+// or (`list` >= 0) the addresses at `list` and the strings at `buf`.
+fn rt_win_cstrings(ts: List[str], count_at: i64, size_at: i64, list: i64, buf: i64) -> i64 {
+    if list < 0 {
+        var size = 0
+        for t in ts { size += rt_utf8_size(t) + 1 }
+        wasm_store32(count_at, len(ts))
+        wasm_store32(size_at, size)
+        return 0
+    }
+    var at = buf
+    for i in 0..len(ts) {
+        wasm_store32(list + 4 * i, at)
+        let a = wasm_str_addr(ts[i])
+        let n = wasm_load32(a + 4)
+        for k in 0..n { wasm_store8(at + k, wasm_load8(a + 8 + k)) }
+        wasm_store8(at + n, 0)
+        at += n + 1
+    }
+    0
+}
+
+fn rt_utf8_size(s: str) -> i64 {
+    wasm_load32(wasm_str_addr(s) + 4)
+}
+
+fn win_args_sizes_get(argc_at: i64, size_at: i64) -> i64 {
+    rt_win_cstrings(rt_win_args(), argc_at, size_at, -1, 0)
+}
+
+fn win_args_get(argv_at: i64, buf_at: i64) -> i64 {
+    rt_win_cstrings(rt_win_args(), 0, 0, argv_at, buf_at)
+}
+
+fn win_environ_sizes_get(n_at: i64, size_at: i64) -> i64 {
+    rt_win_cstrings(rt_win_environ(), n_at, size_at, -1, 0)
+}
+
+fn win_environ_get(env_at: i64, buf_at: i64) -> i64 {
+    rt_win_cstrings(rt_win_environ(), 0, 0, env_at, buf_at)
+}

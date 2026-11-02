@@ -4,6 +4,7 @@
 # - other architectures: RISC-V 64, PowerPC64 LE and s390x (big-endian), under QEMU
 # - WebAssembly (WASI), under wasmtime
 # - the toolchain written in Kairós (release build), and the `kairos` command it compiles, under wasmtime
+# - the native back end written in Kairós: Windows executables, and the compiler compiling itself
 name: CI
 
 on:
@@ -116,6 +117,26 @@ jobs:
           $k --version
           $k run kairos/examples/finance.krs
           printf '1 + 2\nlet x = [1, 2, 3]\nx\n' | $k repl
+
+  # the native back end written in Kairós (M21): the programs compiled to Windows executables
+  # (x86-64, no Rust and no WebAssembly runtime inside) against the interpreter, and the compiler,
+  # as an executable, compiling itself to the same bytes (release only)
+  native-x64:
+    name: test (native back end written in Kairós, Windows x86-64, release)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: tests
+        run: cargo test --release -p kairos --locked --test native_x64
+      - name: the command written in Kairós, as a Windows executable
+        shell: bash
+        run: |
+          ./target/release/kairos run kairos/compiler/kn.krs kairos/std out kairos/compiler/kairos.krs
+          ls -l out/kairos.exe
+          out/kairos.exe --version
+          out/kairos.exe run kairos/examples/finance.krs
+          printf '1 + 2\nlet x = [1, 2, 3]\nx\n' | out/kairos.exe repl
 
   freebsd:
     name: test (freebsd-x86_64)

@@ -763,7 +763,8 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M18 | o elemento ternário `t3` (§19) | ✅ `ternary`, `contract` só com somas e subtrações, cinco trits por byte no Rust, `grad` pelo *straight-through*; a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
 | M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo (§20) | ✅ 42 mil entregas num painel mês a mês; 0 de 142.648 valores fora da regra; o tempo desconhecido do que vem de fora separado do tempo provado |
 | M20 | texto formatado `f"..."` (§21) | ✅ o léxico o escreve como a concatenação, e o resto do compilador não muda; os mesmos tokens e erros nos dois léxicos e a mesma saída nas três implementações; o relatório da CVM, reescrito com ele, sai igual |
-| M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 e gravado como executável (PE no Windows, depois ELF no Linux), com a camada do sistema operacional em Kairós | o comando `kairos` roda como executável nativo, sem Rust e sem node, com a saída dos outros, e compila a si mesmo num ponto fixo |
+| M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 e gravado como executável do Windows, com a camada do sistema operacional em Kairós (§22) | ✅ os programas de teste (62 + 31 + 10 com os dados da B3) saem iguais ao interpretador, inclusive o registro e o livro-razão; o comando `kairos` nativo é igual ao Rust; o compilador nativo compila a si mesmo nos mesmos bytes |
+| M22 | desempenho do código nativo (pilha de valores em registradores) e executáveis ELF para Linux | o `momentum` nativo mais rápido que o interpretador Rust, com os mesmos números |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -1108,3 +1109,46 @@ fn pct(x: f64) -> str { f"{100.0 * x:.1}%" }     // pct(0.12345) == "12.3%"
 - `tests/wasm/fstrings.krs` dá a mesma saída no Rust, no WebAssembly e no interpretador em Kairós;
 - [`lab/check_cvm.krs`](../lab/check_cvm.krs), reescrito com textos formatados, imprime o mesmo relatório;
 - a gramática do VS Code (`editors/vscode`) colore as expressões dentro das chaves.
+
+## 22. O back-end nativo escrito em Kairós (M21, v0.21.0)
+
+Até o M20, um programa Kairós rodava no interpretador Rust ou num runtime de WebAssembly (wasmtime, node). Agora o compilador escrito em Kairós gera também **executáveis do Windows**: código de máquina x86-64 escrito por ele, sem Rust e sem runtime de WebAssembly.
+
+```
+kairos run kairos/compiler/kn.krs kairos/std out programa.krs    # out/programa.exe
+out/programa.exe
+```
+
+O próprio compilador vira executável (`kn.krs` → `kn.exe`, 5,9 MB). Daí em diante ele compila sozinho: `kn.exe kairos/std out programa.krs`.
+
+**O caminho.**
+- O front-end em Kairós verifica o programa e gera o HIR, como no M13.
+- O `wasmgen.krs` faz o módulo de WebAssembly com o runtime de sempre (`rt.krs`) e com o **sistema operacional escrito em Kairós** (`rt_win.krs`), que implementa as 13 funções do WASI que o runtime chama sobre a `kernel32.dll`:
+  - escrever, inclusive no console, em UTF-16;
+  - ler;
+  - abrir, criar e listar arquivos e pastas;
+  - os atributos de um arquivo;
+  - os relógios;
+  - os argumentos e o ambiente.
+- O [`native.krs`](../compiler/native.krs) traduz o módulo para x86-64, função por função. O [`x64.krs`](../compiler/x64.krs) codifica as instruções, e o [`pe.krs`](../compiler/pe.krs) grava o executável (PE32+, com a tabela de importação da `kernel32.dll`).
+
+**A tradução.** É direta:
+- **Os valores:** cada valor da pilha de operandos do WebAssembly tem um lugar de 8 bytes no quadro da função. O tradutor sabe esse lugar em cada instrução, porque a altura da pilha é fixa no código.
+- **As chamadas:** os argumentos vão na área de saída de quem chama. O primeiro resultado volta em `rax`, os outros (os parâmetros `inout` devolvidos) na mesma área.
+- **A memória:** a do módulo começa em `r15`. O programa reserva 8 GiB + 64 KiB de endereços, de modo que qualquer endereço de 32 bits com qualquer deslocamento caia neles. As páginas são confirmadas à medida que a memória cresce.
+- **As armadilhas** do WebAssembly param o programa.
+- **As funções marcadas** por exportações ganham outro corpo:
+  - `__k32_<Nome>` vira uma chamada a `<Nome>` da `kernel32`, na convenção do Windows;
+  - `__mem_base` vira o endereço da memória;
+  - `__wasi_<nome>` passa a implementar o import `<nome>`.
+
+**Conferido:**
+- **os programas:** os 62 de `tests/wasm`, os 31 dourados que rodam e os 10 de `tests/wasm_b3`, com os dados reais da B3, dão a saída, os erros e o código de saída do interpretador. O registro de tentativas e o livro-razão que gravam são iguais byte a byte. A única diferença é o texto de um erro do sistema, que é o do POSIX, como no WebAssembly;
+- **o comando:** o `kairos` escrito em Kairós, como executável, é igual ao Rust nas 59 linhas e nas 3 sessões de REPL do teste do M16;
+- **o ponto fixo:** o `kn.exe` compila a si mesmo em 24 s nos mesmos bytes que o `kn.krs` interpretado gera;
+- **os testes:** `tests/native_x64.rs` (só no Windows x86-64 e em release) e o job `native-x64` do CI. As releases trazem `kairos-selfhost.exe`.
+
+**Limites:**
+- **Desempenho:** o código ainda é o de base, e cada valor passa pela memória. O `momentum` leva 6,5 s, contra 1,5 s no interpretador Rust (§13, M22).
+- **Plataforma:** só Windows x86-64 por enquanto. O processador precisa de SSE4.1.
+- **Rede:** não há, como no WebAssembly.

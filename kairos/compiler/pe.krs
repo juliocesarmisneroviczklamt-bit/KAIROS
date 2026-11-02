@@ -1,0 +1,163 @@
+// A Windows executable (PE32+, x86-64, console), written by the compiler in Kairós (M21): the
+// headers, the code (.text) and one section of data (.data) that holds the import table of
+// kernel32.dll and the module's data. (Microsoft's "PE Format" specification.)
+//
+// The file: the headers (0x200 bytes), then .text, then .data, each a multiple of 0x200 bytes.
+// In memory: .text at 0x1000 from the image's start, .data at the next multiple of 0x1000.
+//
+// .data starts with the imports: the descriptor of kernel32.dll and an empty one (40 bytes), the
+// lookup table and the address table (8 bytes per function and a zero), the hint/name entries and
+// the name of the DLL; the module's data starts at the next multiple of 16 (pe_data_at). The loader
+// writes each function's address in the address table, where the code calls it.
+
+fn pe_text_rva() -> i64 {
+    4096
+}
+
+fn pe_align(v: i64, a: i64) -> i64 {
+    (v + a - 1) / a * a
+}
+
+// where .data is in memory, after `code_len` bytes of code
+fn pe_data_rva(code_len: i64) -> i64 {
+    pe_align(pe_text_rva() + code_len, 4096)
+}
+
+// the address table, in .data
+fn pe_iat_at(n: i64) -> i64 {
+    40 + 8 * (n + 1)
+}
+
+fn pe_dll() -> str {
+    "KERNEL32.dll"
+}
+
+// The size of a hint/name entry: the hint (2 bytes), the name and its zero, to an even size.
+fn pe_hint_size(name: str) -> i64 {
+    pe_align(2 + len(name) + 1, 2)
+}
+
+// where the module's data starts, in .data
+fn pe_data_at(names: List[str]) -> i64 {
+    var at = 40 + 16 * (len(names) + 1)
+    for s in names { at += pe_hint_size(s) }
+    pe_align(at + len(pe_dll()) + 1, 16)
+}
+
+fn pe_put16(inout b: List[i64], at: i64, v: i64) {
+    b[at] = bit_and(v, 255)
+    b[at + 1] = bit_and(shr(v, 8), 255)
+}
+
+fn pe_put32(inout b: List[i64], at: i64, v: i64) {
+    pe_put16(inout b, at, v)
+    pe_put16(inout b, at + 2, shr(v, 16))
+}
+
+fn pe_put64(inout b: List[i64], at: i64, v: i64) {
+    pe_put32(inout b, at, v)
+    pe_put32(inout b, at + 4, shr(v, 32))
+}
+
+// The import structures, for .data at `data_rva`.
+fn pe_imports(names: List[str], data_rva: i64) -> List[i64] {
+    let n = len(names)
+    var b: List[i64] = []
+    let hints_at = 40 + 16 * (n + 1)
+    var dll_at = hints_at
+    for s in names { dll_at += pe_hint_size(s) }
+    while len(b) < dll_at + len(pe_dll()) + 1 { b.push(0) }
+    // the descriptor: the lookup table, the name, the address table
+    pe_put32(inout b, 0, data_rva + 40)
+    pe_put32(inout b, 12, data_rva + dll_at)
+    pe_put32(inout b, 16, data_rva + pe_iat_at(n))
+    var at = hints_at
+    for i in 0..n {
+        pe_put64(inout b, 40 + 8 * i, data_rva + at)
+        pe_put64(inout b, pe_iat_at(n) + 8 * i, data_rva + at)
+        let cs = codes(names[i])
+        for k in 0..len(cs) { b[at + 2 + k] = cs[k] }
+        at += pe_hint_size(names[i])
+    }
+    let ds = codes(pe_dll())
+    for k in 0..len(ds) { b[dll_at + k] = ds[k] }
+    b
+}
+
+fn pe_name(inout h: List[i64], at: i64, name: str) {
+    let cs = codes(name)
+    for k in 0..len(cs) { h[at + k] = cs[k] }
+}
+
+// The executable: `code` at .text with its entry at `entry`, `data` at .data (data_rva), with the
+// imports of `n` functions at its start.
+fn pe_image(code: List[i64], entry: i64, data: List[i64], data_rva: i64, n: i64) -> Bytes {
+    let text_raw = pe_align(len(code), 512)
+    let data_raw = pe_align(len(data), 512)
+    var h: List[i64] = []
+    for i in 0..512 { h.push(0) }
+    // the DOS header: "MZ", and where the PE header is
+    h[0] = 77
+    h[1] = 90
+    pe_put32(inout h, 60, 64)
+    // "PE\0\0" and the COFF header: x86-64, 2 sections, an optional header of 240 bytes,
+    // executable and able to use addresses above 2 GiB
+    h[64] = 80
+    h[65] = 69
+    pe_put16(inout h, 68, 34404)
+    pe_put16(inout h, 70, 2)
+    pe_put16(inout h, 84, 240)
+    pe_put16(inout h, 86, 34)
+    // the optional header (PE32+)
+    let o = 88
+    pe_put16(inout h, o, 523)
+    h[o + 2] = 14
+    pe_put32(inout h, o + 4, text_raw)
+    pe_put32(inout h, o + 8, data_raw)
+    pe_put32(inout h, o + 16, pe_text_rva() + entry)
+    pe_put32(inout h, o + 20, pe_text_rva())
+    pe_put64(inout h, o + 24, 5368709120)
+    pe_put32(inout h, o + 32, 4096)
+    pe_put32(inout h, o + 36, 512)
+    pe_put16(inout h, o + 40, 6)
+    pe_put16(inout h, o + 48, 6)
+    pe_put32(inout h, o + 56, pe_align(data_rva + len(data), 4096))
+    pe_put32(inout h, o + 60, 512)
+    // a console program; no fixed address (the code is position-independent), no execution of data
+    pe_put16(inout h, o + 68, 3)
+    pe_put16(inout h, o + 70, 33120)
+    // the stack: 1 GiB reserved (deep recursion), 1 MiB committed; the heap is not used
+    pe_put64(inout h, o + 72, 1073741824)
+    pe_put64(inout h, o + 80, 1048576)
+    pe_put64(inout h, o + 88, 1048576)
+    pe_put64(inout h, o + 96, 4096)
+    pe_put32(inout h, o + 108, 16)
+    // the data directories: the imports (1) and the address table (12)
+    let dd = o + 112
+    pe_put32(inout h, dd + 8, data_rva)
+    pe_put32(inout h, dd + 12, 40)
+    pe_put32(inout h, dd + 96, data_rva + pe_iat_at(n))
+    pe_put32(inout h, dd + 100, 8 * (n + 1))
+    // the sections: .text (code, read and execute) and .data (read and write)
+    let s = o + 240
+    pe_name(inout h, s, ".text")
+    pe_put32(inout h, s + 8, len(code))
+    pe_put32(inout h, s + 12, pe_text_rva())
+    pe_put32(inout h, s + 16, text_raw)
+    pe_put32(inout h, s + 20, 512)
+    pe_put32(inout h, s + 36, 1610612768)
+    let s2 = s + 40
+    pe_name(inout h, s2, ".data")
+    pe_put32(inout h, s2 + 8, len(data))
+    pe_put32(inout h, s2 + 12, data_rva)
+    pe_put32(inout h, s2 + 16, data_raw)
+    pe_put32(inout h, s2 + 20, 512 + text_raw)
+    pe_put32(inout h, s2 + 36, 3221225536)
+    var out = bytes()
+    for x in h { out.put_u8(x) }
+    for x in code { out.put_u8(x) }
+    for i in len(code)..text_raw { out.put_u8(0) }
+    for x in data { out.put_u8(x) }
+    for i in len(data)..data_raw { out.put_u8(0) }
+    out
+}

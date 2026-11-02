@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.20.0**, com o roteiro M1–M20 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.21.0**, com o roteiro M1–M21 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -22,7 +22,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.20.0**, com 
 - M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB;
 - M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações;
 - M19: os demonstrativos da CVM no ponto do tempo ([`lab/cvm.krs`](lab/cvm.krs)), e o tempo desconhecido do que vem de fora separado do tempo provado;
-- M20: o texto formatado, `f"{name}: {x / 1e9:.1} bi"`.
+- M20: o texto formatado, `f"{name}: {x / 1e9:.1} bi"`;
+- M21: o back-end nativo escrito em Kairós: executáveis do Windows em x86-64 ([`compiler/native.krs`](compiler/native.krs)), com o sistema operacional em Kairós; o compilador, como executável, compila a si mesmo.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -194,10 +195,16 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **`f"{expr}"` é o texto da expressão, e `f"{x:.N}"` o número com N casas** ([spec §21](docs/spec.md)); `{{` e `}}` são chaves.
 - **O léxico o escreve como a concatenação** (`str` e `format_fixed`), então o texto formatado tem os tipos, o tempo e os erros dela, e um erro dentro de `{}` aponta para o lugar certo.
 
+**M21 (o back-end nativo escrito em Kairós)**
+- **`kairos run kairos/compiler/kn.krs kairos/std out programa.krs` grava `out/programa.exe`**: x86-64 escrito pelo compilador em Kairós ([spec §22](docs/spec.md)), sem Rust e sem runtime de WebAssembly.
+- **A tradução** ([`compiler/native.krs`](compiler/native.krs), [`x64.krs`](compiler/x64.krs), [`pe.krs`](compiler/pe.krs)) parte do módulo de WebAssembly. Cada valor da pilha tem um lugar no quadro, e a memória do módulo começa em `r15`.
+- **O sistema operacional é Kairós:** [`compiler/rt_win.krs`](compiler/rt_win.krs) implementa sobre a `kernel32.dll` as funções do WASI que o runtime usa.
+- **Conferido:** os programas de teste e os da B3 saem iguais ao interpretador. O comando `kairos` como executável é igual ao Rust, e o `kn.exe` compila a si mesmo nos mesmos bytes.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M21 | o back-end nativo escrito em Kairós: x86-64 a partir do WebAssembly, gravado como executável (PE no Windows, depois ELF no Linux), com a camada do sistema operacional em Kairós |
+| M22 | desempenho do código nativo (a pilha de valores em registradores, comparações fundidas aos saltos) e executáveis ELF para Linux |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o custo do aluguel de ações no simulador (falta uma fonte aberta do histórico); o `t3` compactado também no WebAssembly |

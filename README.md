@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.20.0 (M20)
+## Estado: v0.21.0 (M21)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -45,7 +45,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M18 | o elemento ternário `t3`: tensores de pesos {−1, 0, +1} e `contract` só com somas e subtrações (como no BitNet b1.58); uma carteira comprada/vendida/fora é um tensor `t3` | ✅ `ternary(x)` (a quantização do BitNet) e `ternary(x, threshold: t)` (a carteira de um sinal); cinco trits por byte no interpretador Rust; `grad` treina camadas ternárias pelo *straight-through* ([`examples/ternary.krs`](kairos/examples/ternary.krs)); a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
 | M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo | ✅ 42 mil entregas (2010–2026) num painel mês a mês ao lado do da B3 ([`lab/cvm.krs`](kairos/lab/cvm.krs)): cada número só vale do dia em que a CVM recebeu a versão que o traz; 0 de 142.648 valores fora da regra; a linguagem distingue o tempo que prova do que não conhece (o que vem de arquivo leva uma marca que só `observed` tira, sem apagar um uso do futuro provado) |
 | M20 | texto formatado: `f"{name} {ym}: {equity / 1e9:.1} bi"` | ✅ o léxico o escreve como a concatenação (`str` e `format_fixed`), e o resto do compilador não muda; os dois léxicos dão os mesmos tokens e erros, e as três implementações a mesma saída |
-| M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 e gravado como executável (PE no Windows, depois ELF no Linux), com a camada do sistema operacional também em Kairós | em andamento: a meta é o comando `kairos` rodar como executável nativo sem Rust e sem node |
+| M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 ([`native.krs`](kairos/compiler/native.krs)) e gravado como executável do Windows, com o sistema operacional também em Kairós ([`rt_win.krs`](kairos/compiler/rt_win.krs), sobre a `kernel32.dll`) | ✅ os programas de teste (inclusive os 10 com os dados da B3, com o mesmo registro e o mesmo livro-razão) saem iguais ao interpretador; o comando `kairos` como executável é igual ao Rust; o compilador nativo (`kn.exe`) compila a si mesmo nos mesmos bytes, sem Rust e sem runtime de WebAssembly |
+| M22 | desempenho do código nativo (a pilha de valores em registradores) e executáveis ELF para Linux | meta: o `momentum` nativo mais rápido que o interpretador Rust (hoje 6,5 s contra 1,5 s) |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3
@@ -197,6 +198,12 @@ cargo build --release -p kairos          # target/release/kairos
 kairos repl                              # sessão interativa
 kairos run kairos/examples/finance.krs   # exemplo do núcleo
 cargo test -p kairos                     # testes dourados + teste de aceitação
+```
+
+**Sem Rust nenhum (Windows x86-64):** o compilador escrito em Kairós grava executáveis em código de máquina que ele mesmo gera (M21). A release traz `kairos-selfhost.exe`, o comando `kairos` escrito em Kairós e compilado assim.
+
+```text
+kairos run kairos/compiler/kn.krs kairos/std out programa.krs   # out/programa.exe
 ```
 
 **Mesmo resultado em qualquer lugar:** `exp`, `ln` e `^` usam matemática em Rust puro, não a do sistema operacional. O mesmo programa dá os mesmos bits em todos os sistemas. A CI roda os testes a cada push em 11 combinações de sistema e arquitetura. Nativas: Linux x86_64 e ARM64, macOS, Windows x86_64 e i686, FreeBSD. Emuladas: Linux i686 e ARMv7, RISC-V 64, PowerPC64 LE e s390x (big-endian). E também WebAssembly.

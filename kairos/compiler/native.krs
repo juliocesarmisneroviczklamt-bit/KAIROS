@@ -1,0 +1,1015 @@
+// The native back end of Kairós (M21), written in Kairós: the WebAssembly module that the back end
+// makes (wasmgen.krs) translated to x86-64, function by function, and written as a Windows
+// executable (pe.krs). Nothing but the module and kernel32.dll: the program's operating system
+// (the WASI functions the runtime calls) is Kairós too, compiled into the module (rt_win.krs).
+//
+// The translation is direct: each value of WebAssembly's operand stack has a slot of 8 bytes in
+// the function's frame, whose place the translator knows at each instruction (the stack's height
+// is fixed by the code), and each instruction reads its operands from their slots and writes its
+// result to a slot. The module's memory starts at r15; an address is its 32 bits, added to r15.
+//
+// The frame of a function (rbp at its start):
+//   [rbp + 16 + 8i]           parameter i (the caller's outgoing area)
+//   [rbp + 8], [rbp]          the return address, the caller's rbp
+//   [rbp - 8 - 8j]            the other locals (zero at the start)
+//   below them                the operand slots, then the outgoing area at rsp (the arguments of
+//                             the calls this function makes; for kernel32, its 32 bytes of shadow
+//                             space and the arguments after the fourth)
+// A function's first result comes back in rax (a float as its bits), the others (a function with
+// `inout` parameters gives them back too) in the caller's outgoing area, from its start. Values of
+// 32 bits live in the low half of their slot, and whoever reads one reads 32 bits.
+//
+// Functions the module exports with a mark get another body:
+//   __k32_<Name>      a call to <Name> of kernel32.dll (Windows' convention: rcx, rdx, r8, r9,
+//                     then the stack), with the function's parameters, giving its rax
+//   __mem_base        the address where the module's memory starts (r15)
+//   __wasi_<name>     the function that does WASI's <name>: a call to that import calls it
+//
+// Memory: 8 GiB + 64 KiB of addresses reserved, so that any 32-bit address with any 32-bit offset
+// stays in them; the first 64 KiB hold the globals (8 bytes each) and, at their end, the number
+// of pages in use; the module's memory follows (r15), its pages committed as it grows.
+import "x64.krs"
+import "pe.krs"
+
+struct NCtl {
+    kind: i64,          // 0 block, 1 loop, 2 if, 3 the function's body
+    label: i64,         // where a branch to it goes: its end, or a loop's start
+    else_l: i64,        // an if's else (-1: none)
+    height: i64,        // the operand stack's height where it starts
+    results: i64,       // the values it leaves (a block: 0 or 1; the function: any)
+    has_else: bool,
+}
+
+struct Nat {
+    x: X64,
+    m: WMod,
+    nimp: i64,                  // imported functions (their indices come first)
+    labels: List[i64],          // each function's label (an import: -1)
+    impl_of: List[i64],         // each import: the function that does it (-1: none)
+    k32: List[str],             // the functions of kernel32.dll, in the import table's order
+    k32_of: Map[i64, i64],      // a function marked __k32_ -> its entry in k32
+    base_fn: i64,               // the function marked __mem_base (-1: none)
+    grow_l: i64,                // memory.grow (rcx: the pages to add; rax: the old count or -1)
+    trap_l: i64,                // a trap: the program stops
+    table_l: i64,               // the jumps of the table (call_indirect), 5 bytes each
+    iat_at: i64,                // where the import address table is in the data
+    failed: bool,
+    msg: str,
+    // the function being translated
+    code: List[i64],
+    pos: i64,
+    np: i64,                    // its parameters
+    nl: i64,                    // its other locals
+    ltypes: List[i64],
+    result: i64,                // its results
+    h: i64,                     // the operand stack's height
+    max_h: i64,
+    max_out: i64,               // the bytes of the outgoing area
+    ctl: List[NCtl],
+    dead: bool,                 // after br, return, unreachable: nothing runs until the next end or else
+    dead_depth: i64,            // blocks opened in dead code
+    frame_at: i64,              // where the frame's size is (written at the end)
+}
+
+fn n_fail(inout n: Nat, msg: str) {
+    if not n.failed {
+        n.failed = true
+        n.msg = msg
+    }
+}
+
+// ------------------------------------------------------------------ reading the code
+
+fn n_byte(inout n: Nat) -> i64 {
+    let b = n.code[n.pos]
+    n.pos += 1
+    b
+}
+
+// an unsigned LEB128 number
+fn n_u(inout n: Nat) -> i64 {
+    var r = 0
+    var s = 0
+    var b = 128
+    while b >= 128 {
+        b = n_byte(inout n)
+        if s < 63 { r = bit_or(r, shl(bit_and(b, 127), s)) }
+        s += 7
+    }
+    r
+}
+
+// a signed LEB128 number (up to 64 bits)
+fn n_s(inout n: Nat) -> i64 {
+    var r = 0
+    var s = 0
+    var b = 128
+    while b >= 128 {
+        b = n_byte(inout n)
+        if s < 64 { r = bit_or(r, shl(bit_and(b, 127), s)) }
+        s += 7
+    }
+    if s < 64 and bit_and(b, 64) != 0 { r = bit_or(r, shl(-1, s)) }
+    r
+}
+
+// the bytes of a constant, little-endian
+fn n_fixed(inout n: Nat, k: i64) -> i64 {
+    var r = 0
+    for i in 0..k { r = bit_or(r, shl(n_byte(inout n), 8 * i)) }
+    if k == 4 and r >= 2147483648 { r = r - 4294967296 }
+    r
+}
+
+// a block's type: the values it leaves
+fn n_blocktype(inout n: Nat) -> i64 {
+    let b = n.code[n.pos]
+    if b == 64 {
+        n.pos += 1
+        return 0
+    }
+    if b == 127 or b == 126 or b == 125 or b == 124 {
+        n.pos += 1
+        return 1
+    }
+    let t = n_s(inout n)
+    if t < 0 or t >= len(n.m.tresults) or len(n.m.tparams[t]) > 0 or len(n.m.tresults[t]) > 1 {
+        n_fail(inout n, "a block of several values")
+        return 0
+    }
+    len(n.m.tresults[t])
+}
+
+// ------------------------------------------------------------------ slots
+
+// the operand slot at height s, and the local j, as displacements from rbp
+fn n_slot(n: Nat, s: i64) -> i64 {
+    -8 * (1 + n.nl + s)
+}
+
+fn n_local(n: Nat, j: i64) -> i64 {
+    if j < n.np { 16 + 8 * j } else { -8 * (1 + j - n.np) }
+}
+
+// the global g, as a displacement from r15
+fn n_global(g: i64) -> i64 {
+    -65536 + 8 * g
+}
+
+fn n_pages_at() -> i64 {
+    -8
+}
+
+fn n_push(inout n: Nat) -> i64 {
+    let d = n_slot(n, n.h)
+    n.h += 1
+    if n.h > n.max_h { n.max_h = n.h }
+    d
+}
+
+fn n_pop(inout n: Nat) -> i64 {
+    n.h -= 1
+    n_slot(n, n.h)
+}
+
+// the top slot (without popping)
+fn n_top(n: Nat) -> i64 {
+    n_slot(n, n.h - 1)
+}
+
+fn n_out(inout n: Nat, bytes_: i64) {
+    if bytes_ > n.max_out { n.max_out = bytes_ }
+}
+
+// ------------------------------------------------------------------ control
+
+fn n_ctl(n: Nat, depth: i64) -> NCtl {
+    n.ctl[len(n.ctl) - 1 - depth]
+}
+
+// The function's results, the top `k` values: the first to rax, the others to the caller's
+// outgoing area (above the return address and the saved rbp).
+fn n_results(inout n: Nat, k: i64) {
+    if k == 0 { return }
+    x_load(inout n.x, rax(), rbp(), n_slot(n, n.h - k))
+    for i in 1..k {
+        x_load(inout n.x, rcx(), rbp(), n_slot(n, n.h - k + i))
+        x_store(inout n.x, rbp(), 16 + 8 * (i - 1), rcx())
+    }
+}
+
+// A branch to the block `depth` levels out: its value (if it takes one) to its slot, then the jump.
+fn n_branch(inout n: Nat, depth: i64) {
+    let c = n_ctl(n, depth)
+    if c.kind == 3 {
+        n_results(inout n, c.results)
+        x_jmp(inout n.x, c.label)
+        return
+    }
+    if c.kind != 1 and c.results == 1 {
+        let from = n_top(n)
+        let to = n_slot(n, c.height)
+        if from != to {
+            x_load(inout n.x, rax(), rbp(), from)
+            x_store(inout n.x, rbp(), to, rax())
+        }
+    }
+    x_jmp(inout n.x, c.label)
+}
+
+// Whether a branch to the block `depth` levels out moves a value.
+fn n_branch_moves(n: Nat, depth: i64) -> bool {
+    let c = n_ctl(n, depth)
+    if c.kind == 3 { return c.results >= 1 }
+    c.kind != 1 and c.results == 1 and n_top(n) != n_slot(n, c.height)
+}
+
+fn n_open(inout n: Nat, kind: i64, results: i64) {
+    let l = x_label(inout n.x)
+    if kind == 1 { x_bind(inout n.x, l) }
+    var e = -1
+    if kind == 2 {
+        // the condition
+        let d = n_pop(inout n)
+        x_load32(inout n.x, rax(), rbp(), d)
+        x_test(inout n.x, false, rax(), rax())
+        e = x_label(inout n.x)
+        x_jcc(inout n.x, cc_e(), e)
+    }
+    n.ctl.push(NCtl { kind: kind, label: l, else_l: e, height: n.h, results: results, has_else: false })
+}
+
+fn n_else(inout n: Nat) {
+    let k = len(n.ctl) - 1
+    let c = n.ctl[k]
+    if not n.dead { x_jmp(inout n.x, c.label) }
+    x_bind(inout n.x, c.else_l)
+    n.ctl[k].has_else = true
+    n.h = c.height
+    n.dead = false
+}
+
+// The end of a block, or of the function (true).
+fn n_end(inout n: Nat) -> bool {
+    let k = len(n.ctl) - 1
+    let c = n.ctl[k]
+    if c.kind == 3 {
+        if not n.dead { n_results(inout n, c.results) }
+        x_bind(inout n.x, c.label)
+        x_leave(inout n.x)
+        x_ret(inout n.x)
+        n.ctl.pop()
+        return true
+    }
+    if c.kind == 2 and not c.has_else { x_bind(inout n.x, c.else_l) }
+    if c.kind != 1 { x_bind(inout n.x, c.label) }
+    n.ctl.pop()
+    n.h = c.height + c.results
+    if n.h > n.max_h { n.max_h = n.h }
+    n.dead = false
+    false
+}
+
+// The immediates of an instruction in dead code, skipped (with the blocks it opens and closes).
+fn n_skip(inout n: Nat, op: i64) {
+    if op == 2 or op == 3 or op == 4 {
+        let _ = n_blocktype(inout n)
+        n.dead_depth += 1
+    } else if op == 12 or op == 13 or op == 16 or (op >= 32 and op <= 38) {
+        let _ = n_u(inout n)
+    } else if op == 14 {
+        let k = n_u(inout n)
+        for i in 0..k + 1 { let _ = n_u(inout n) }
+    } else if op == 17 {
+        let _ = n_u(inout n)
+        let _ = n_u(inout n)
+    } else if op == 28 {
+        let k = n_u(inout n)
+        n.pos += k
+    } else if op >= 40 and op <= 62 {
+        let _ = n_u(inout n)
+        let _ = n_u(inout n)
+    } else if op == 63 or op == 64 {
+        n.pos += 1
+    } else if op == 65 or op == 66 {
+        let _ = n_s(inout n)
+    } else if op == 67 {
+        n.pos += 4
+    } else if op == 68 {
+        n.pos += 8
+    } else if op == 252 {
+        let sub = n_u(inout n)
+        if sub == 8 {
+            let _ = n_u(inout n)
+            n.pos += 1
+        } else if sub == 9 {
+            let _ = n_u(inout n)
+        } else if sub == 10 {
+            n.pos += 2
+        } else if sub == 11 {
+            n.pos += 1
+        } else if sub >= 12 {
+            let _ = n_u(inout n)
+            let _ = n_u(inout n)
+        }
+    }
+}
+
+// ------------------------------------------------------------------ calls
+
+// The arguments of a call to a function of `ptypes`, from the slots to the outgoing area (a 32-bit
+// one zero-extended: WASI's functions written in Kairós take i64).
+fn n_args(inout n: Nat, ptypes: List[i64]) {
+    let k = len(ptypes)
+    n.h -= k
+    for i in 0..k {
+        let d = n_slot(n, n.h + i)
+        if ptypes[i] == wt_i32() { x_load32(inout n.x, rax(), rbp(), d) } else { x_load(inout n.x, rax(), rbp(), d) }
+        x_store(inout n.x, rsp(), 8 * i, rax())
+    }
+    n_out(inout n, 8 * k)
+}
+
+// The results of a call, to the slots: the first from rax, the others from the outgoing area.
+fn n_take_results(inout n: Nat, k: i64) {
+    if k == 0 { return }
+    x_store(inout n.x, rbp(), n_push(inout n), rax())
+    for i in 1..k {
+        x_load(inout n.x, rcx(), rsp(), 8 * (i - 1))
+        x_store(inout n.x, rbp(), n_push(inout n), rcx())
+    }
+    n_out(inout n, 8 * (k - 1))
+}
+
+fn n_call(inout n: Nat, f: i64) {
+    var target = f
+    var ptypes: List[i64] = []
+    var results = 0
+    if f < n.nimp {
+        let ti = n.m.imports[f].2
+        ptypes = n.m.tparams[ti]
+        results = len(n.m.tresults[ti])
+        target = n.impl_of[f]
+        if target < 0 {
+            n_fail(inout n, "a call to `" + n.m.imports[f].0 + "." + n.m.imports[f].1 + "`, which has no native function")
+            return
+        }
+    } else {
+        let ti = n.m.funcs[f - n.nimp].tidx
+        ptypes = n.m.tparams[ti]
+        results = len(n.m.tresults[ti])
+    }
+    n_args(inout n, ptypes)
+    x_call(inout n.x, n.labels[target])
+    n_take_results(inout n, results)
+}
+
+fn n_call_indirect(inout n: Nat, ti: i64) {
+    let ptypes = n.m.tparams[ti]
+    let results = len(n.m.tresults[ti])
+    let at = n_pop(inout n)
+    n_args(inout n, ptypes)
+    // the table's entry: its index (checked), times 5
+    x_load32(inout n.x, rax(), rbp(), at)
+    x_alu_i(inout n.x, 7, false, rax(), len(n.m.table))
+    x_jcc(inout n.x, cc_ae(), n.trap_l)
+    x_imul_i(inout n.x, false, rax(), rax(), 5)
+    x_lea_label(inout n.x, rcx(), n.table_l)
+    x_alu(inout n.x, op_add(), true, rax(), rcx())
+    x_call_r(inout n.x, rax())
+    n_take_results(inout n, results)
+}
+
+// ------------------------------------------------------------------ instructions
+
+// the condition codes of eq ne lt_s lt_u gt_s gt_u le_s le_u ge_s ge_u
+fn n_int_cc(k: i64) -> i64 {
+    [4, 5, 12, 2, 15, 7, 14, 6, 13, 3][k]
+}
+
+// an integer comparison (w: 64 bits)
+fn n_compare(inout n: Nat, w: bool, cc: i64) {
+    let b = n_pop(inout n)
+    let a = n_top(n)
+    if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
+    x_alu_m(inout n.x, op_cmp(), w, rax(), rbp(), b)
+    x_setcc(inout n.x, cc, rax())
+    x_movzx8(inout n.x, rax())
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+fn n_eqz(inout n: Nat, w: bool) {
+    let a = n_top(n)
+    if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
+    x_test(inout n.x, w, rax(), rax())
+    x_setcc(inout n.x, cc_e(), rax())
+    x_movzx8(inout n.x, rax())
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+// a float comparison: eq ne lt gt le ge (k 0..5)
+fn n_fcompare(inout n: Nat, k: i64) {
+    let b = n_pop(inout n)
+    let a = n_top(n)
+    x_movsd_load(inout n.x, 0, rbp(), -1, a)
+    x_movsd_load(inout n.x, 1, rbp(), -1, b)
+    if k == 0 or k == 1 {
+        x_ucomisd(inout n.x, 0, 1)
+        if k == 0 {
+            x_setcc(inout n.x, cc_e(), rax())
+            x_setcc(inout n.x, cc_np(), rcx())
+            x_alu(inout n.x, op_and(), false, rax(), rcx())
+        } else {
+            x_setcc(inout n.x, cc_ne(), rax())
+            x_setcc(inout n.x, cc_p(), rcx())
+            x_alu(inout n.x, op_or(), false, rax(), rcx())
+        }
+    } else if k == 2 or k == 4 {
+        // a < b is b > a (false on NaN: "above" needs CF = 0)
+        x_ucomisd(inout n.x, 1, 0)
+        x_setcc(inout n.x, if k == 2 { cc_a() } else { cc_ae() }, rax())
+    } else {
+        x_ucomisd(inout n.x, 0, 1)
+        x_setcc(inout n.x, if k == 3 { cc_a() } else { cc_ae() }, rax())
+    }
+    x_movzx8(inout n.x, rax())
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+// integer arithmetic: add sub mul div_s div_u rem_s rem_u and or xor shl shr_s shr_u rotl rotr (k 0..14)
+fn n_arith(inout n: Nat, w: bool, k: i64) {
+    let b = n_pop(inout n)
+    let a = n_top(n)
+    if k == 0 or k == 1 or k == 7 or k == 8 or k == 9 {
+        let op = [op_add(), op_sub(), 0, 0, 0, 0, 0, op_and(), op_or(), op_xor()][k]
+        x_load(inout n.x, rax(), rbp(), a)
+        x_alu_m(inout n.x, op, w, rax(), rbp(), b)
+        x_store(inout n.x, rbp(), a, rax())
+        return
+    }
+    if k == 2 {
+        x_load(inout n.x, rax(), rbp(), a)
+        x_imul_m(inout n.x, w, rax(), rbp(), b)
+        x_store(inout n.x, rbp(), a, rax())
+        return
+    }
+    if k >= 3 and k <= 6 {
+        // division: by zero traps; rem_s by -1 is 0 (idiv would fault on the most negative)
+        if w { x_load(inout n.x, rcx(), rbp(), b) } else { x_load32(inout n.x, rcx(), rbp(), b) }
+        x_test(inout n.x, w, rcx(), rcx())
+        x_jcc(inout n.x, cc_e(), n.trap_l)
+        if w { x_load(inout n.x, rax(), rbp(), a) } else { x_load32(inout n.x, rax(), rbp(), a) }
+        let signed = k == 3 or k == 5
+        let done = x_label(inout n.x)
+        if k == 5 {
+            let go = x_label(inout n.x)
+            x_alu_i(inout n.x, 7, w, rcx(), -1)
+            x_jcc(inout n.x, cc_ne(), go)
+            x_imm(inout n.x, rdx(), 0)
+            x_jmp(inout n.x, done)
+            x_bind(inout n.x, go)
+        }
+        if signed {
+            x_cqo(inout n.x, w)
+            x_div(inout n.x, 7, w, rcx())
+        } else {
+            x_imm(inout n.x, rdx(), 0)
+            x_div(inout n.x, 6, w, rcx())
+        }
+        x_bind(inout n.x, done)
+        x_store(inout n.x, rbp(), a, if k == 3 or k == 4 { rax() } else { rdx() })
+        return
+    }
+    // shifts and rotations: the count in cl (the processor takes it modulo the width, as WebAssembly)
+    let ext = [4, 7, 5, 0, 1][k - 10]
+    x_load(inout n.x, rcx(), rbp(), b)
+    x_load(inout n.x, rax(), rbp(), a)
+    x_shift_cl(inout n.x, ext, w, rax())
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+// clz ctz popcnt (k 0..2)
+fn n_count(inout n: Nat, w: bool, k: i64) {
+    let a = n_top(n)
+    x_load(inout n.x, rcx(), rbp(), a)
+    x_bitcount(inout n.x, [189, 188, 184][k], w, rax(), rcx())
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+// float arithmetic: abs neg ceil floor trunc nearest sqrt add sub mul div min max copysign (k 0..13)
+fn n_farith(inout n: Nat, k: i64) {
+    if k <= 6 {
+        let a = n_top(n)
+        if k <= 1 {
+            x_load(inout n.x, rax(), rbp(), a)
+            x_bit_i(inout n.x, if k == 0 { 6 } else { 7 }, rax(), 63)
+            x_store(inout n.x, rbp(), a, rax())
+            return
+        }
+        x_movsd_load(inout n.x, 0, rbp(), -1, a)
+        if k == 6 { x_sse(inout n.x, 81, 0, 0) } else { x_roundsd(inout n.x, 0, 0, [10, 9, 11, 8][k - 2]) }
+        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        return
+    }
+    let b = n_pop(inout n)
+    let a = n_top(n)
+    if k <= 10 {
+        x_movsd_load(inout n.x, 0, rbp(), -1, a)
+        x_sse_m(inout n.x, [88, 92, 89, 94][k - 7], 0, rbp(), b)
+        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+        return
+    }
+    if k == 13 {
+        // copysign: a's magnitude, b's sign
+        x_load(inout n.x, rax(), rbp(), a)
+        x_bit_i(inout n.x, 6, rax(), 63)
+        x_load(inout n.x, rcx(), rbp(), b)
+        x_shift_i(inout n.x, 5, true, rcx(), 63)
+        x_shift_i(inout n.x, 4, true, rcx(), 63)
+        x_alu(inout n.x, op_or(), true, rax(), rcx())
+        x_store(inout n.x, rbp(), a, rax())
+        return
+    }
+    // min and max: NaN if either is; -0 below +0
+    let nan = x_label(inout n.x)
+    let diff = x_label(inout n.x)
+    let done = x_label(inout n.x)
+    x_movsd_load(inout n.x, 0, rbp(), -1, a)
+    x_movsd_load(inout n.x, 1, rbp(), -1, b)
+    x_ucomisd(inout n.x, 0, 1)
+    x_jcc(inout n.x, cc_p(), nan)
+    x_jcc(inout n.x, cc_ne(), diff)
+    // equal (or zeros of either sign): the bits or-ed (min) or and-ed (max)
+    x_load(inout n.x, rax(), rbp(), a)
+    x_alu_m(inout n.x, if k == 11 { op_or() } else { op_and() }, true, rax(), rbp(), b)
+    x_store(inout n.x, rbp(), a, rax())
+    x_jmp(inout n.x, done)
+    x_bind(inout n.x, diff)
+    x_sse(inout n.x, if k == 11 { 93 } else { 95 }, 0, 1)
+    x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    x_jmp(inout n.x, done)
+    x_bind(inout n.x, nan)
+    x_sse(inout n.x, 88, 0, 1)
+    x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    x_bind(inout n.x, done)
+}
+
+// i32/i64.trunc_f64_s: toward zero, trapping on NaN and out of range
+fn n_trunc(inout n: Nat, w: bool) {
+    let a = n_top(n)
+    let ok = x_label(inout n.x)
+    x_movsd_load(inout n.x, 0, rbp(), -1, a)
+    if w {
+        x_cvttsd2si(inout n.x, true, rax(), 0)
+        // 2^63 marks an invalid one, unless the float is exactly -2^63
+        x_imm(inout n.x, rcx(), -9223372036854775807 - 1)
+        x_alu(inout n.x, op_cmp(), true, rax(), rcx())
+        x_jcc(inout n.x, cc_ne(), ok)
+        x_imm(inout n.x, rdx(), to_bits(-9223372036854775808.0))
+        x_movq_xr(inout n.x, 1, rdx())
+        x_ucomisd(inout n.x, 0, 1)
+        x_jcc(inout n.x, cc_p(), n.trap_l)
+        x_jcc(inout n.x, cc_ne(), n.trap_l)
+    } else {
+        // through 64 bits: in range when it fits in 32 with its sign
+        x_cvttsd2si(inout n.x, true, rax(), 0)
+        x_movsxd(inout n.x, rcx(), rax())
+        x_alu(inout n.x, op_cmp(), true, rax(), rcx())
+        x_jcc(inout n.x, cc_ne(), n.trap_l)
+        x_ucomisd(inout n.x, 0, 0)
+        x_jcc(inout n.x, cc_p(), n.trap_l)
+    }
+    x_bind(inout n.x, ok)
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+fn n_load(inout n: Nat, op: i64) {
+    let _ = n_u(inout n)
+    var off = n_u(inout n)
+    let a = n_top(n)
+    x_load32(inout n.x, rax(), rbp(), a)
+    if off > 2147483647 {
+        x_imm(inout n.x, rcx(), off)
+        x_alu(inout n.x, op_add(), true, rax(), rcx())
+        off = 0
+    }
+    let k = op - 40
+    let kind = [4, 6, 4, 6, 1, 0, 3, 2, 1, 0, 3, 2, 5, 4][k]
+    x_load_kind(inout n.x, kind, op == 48 or op == 50, rax(), r15(), rax(), off)
+    x_store(inout n.x, rbp(), a, rax())
+}
+
+fn n_store(inout n: Nat, op: i64) {
+    let _ = n_u(inout n)
+    var off = n_u(inout n)
+    let v = n_pop(inout n)
+    let a = n_pop(inout n)
+    x_load32(inout n.x, rax(), rbp(), a)
+    if off > 2147483647 {
+        x_imm(inout n.x, rcx(), off)
+        x_alu(inout n.x, op_add(), true, rax(), rcx())
+        off = 0
+    }
+    x_load(inout n.x, rcx(), rbp(), v)
+    x_store_n(inout n.x, [4, 8, 4, 8, 1, 2, 1, 2, 4][op - 54], rcx(), r15(), rax(), off)
+}
+
+// One instruction (its opcode read). True at the function's end.
+fn n_inst(inout n: Nat, op: i64) -> bool {
+    if n.dead {
+        if op == 11 {
+            if n.dead_depth > 0 {
+                n.dead_depth -= 1
+                return false
+            }
+            return n_end(inout n)
+        }
+        if op == 5 and n.dead_depth == 0 {
+            n_else(inout n)
+            return false
+        }
+        n_skip(inout n, op)
+        return false
+    }
+    if op == 0 {
+        x_jmp(inout n.x, n.trap_l)
+        n.dead = true
+    } else if op == 1 {
+    } else if op == 2 or op == 3 or op == 4 {
+        let r = n_blocktype(inout n)
+        n_open(inout n, op - 2, r)
+    } else if op == 5 {
+        n_else(inout n)
+    } else if op == 11 {
+        return n_end(inout n)
+    } else if op == 12 {
+        n_branch(inout n, n_u(inout n))
+        n.dead = true
+    } else if op == 13 {
+        let depth = n_u(inout n)
+        let d = n_pop(inout n)
+        x_load32(inout n.x, rax(), rbp(), d)
+        x_test(inout n.x, false, rax(), rax())
+        if n_branch_moves(n, depth) {
+            let skip = x_label(inout n.x)
+            x_jcc(inout n.x, cc_e(), skip)
+            n_branch(inout n, depth)
+            x_bind(inout n.x, skip)
+        } else {
+            let c = n_ctl(n, depth)
+            x_jcc(inout n.x, cc_ne(), c.label)
+        }
+    } else if op == 14 {
+        let k = n_u(inout n)
+        var ds: List[i64] = []
+        for i in 0..k + 1 { ds.push(n_u(inout n)) }
+        let d = n_pop(inout n)
+        for i in 0..k {
+            let next = x_label(inout n.x)
+            x_load32(inout n.x, rax(), rbp(), d)
+            x_alu_i(inout n.x, 7, false, rax(), i)
+            x_jcc(inout n.x, cc_ne(), next)
+            n_branch(inout n, ds[i])
+            x_bind(inout n.x, next)
+        }
+        n_branch(inout n, ds[k])
+        n.dead = true
+    } else if op == 15 {
+        n_branch(inout n, len(n.ctl) - 1)
+        n.dead = true
+    } else if op == 16 {
+        n_call(inout n, n_u(inout n))
+    } else if op == 17 {
+        let ti = n_u(inout n)
+        let _ = n_u(inout n)
+        n_call_indirect(inout n, ti)
+    } else if op == 26 {
+        let _ = n_pop(inout n)
+    } else if op == 27 or op == 28 {
+        if op == 28 {
+            let k = n_u(inout n)
+            n.pos += k
+        }
+        let c = n_pop(inout n)
+        let v2 = n_pop(inout n)
+        let v1 = n_top(n)
+        x_load32(inout n.x, rcx(), rbp(), c)
+        x_load(inout n.x, rax(), rbp(), v1)
+        x_test(inout n.x, false, rcx(), rcx())
+        x_cmov_m(inout n.x, cc_e(), rax(), rbp(), v2)
+        x_store(inout n.x, rbp(), v1, rax())
+    } else if op == 32 {
+        let j = n_u(inout n)
+        x_load(inout n.x, rax(), rbp(), n_local(n, j))
+        x_store(inout n.x, rbp(), n_push(inout n), rax())
+    } else if op == 33 {
+        let j = n_u(inout n)
+        x_load(inout n.x, rax(), rbp(), n_pop(inout n))
+        x_store(inout n.x, rbp(), n_local(n, j), rax())
+    } else if op == 34 {
+        let j = n_u(inout n)
+        x_load(inout n.x, rax(), rbp(), n_top(n))
+        x_store(inout n.x, rbp(), n_local(n, j), rax())
+    } else if op == 35 {
+        let g = n_u(inout n)
+        x_load(inout n.x, rax(), r15(), n_global(g))
+        x_store(inout n.x, rbp(), n_push(inout n), rax())
+    } else if op == 36 {
+        let g = n_u(inout n)
+        x_load(inout n.x, rax(), rbp(), n_pop(inout n))
+        x_store(inout n.x, r15(), n_global(g), rax())
+    } else if op >= 40 and op <= 53 {
+        n_load(inout n, op)
+    } else if op >= 54 and op <= 62 {
+        n_store(inout n, op)
+    } else if op == 63 {
+        n.pos += 1
+        x_load(inout n.x, rax(), r15(), n_pages_at())
+        x_store(inout n.x, rbp(), n_push(inout n), rax())
+    } else if op == 64 {
+        n.pos += 1
+        let a = n_top(n)
+        x_load32(inout n.x, rcx(), rbp(), a)
+        x_call(inout n.x, n.grow_l)
+        x_store(inout n.x, rbp(), a, rax())
+    } else if op == 65 or op == 66 or op == 67 or op == 68 {
+        let v = if op == 65 or op == 66 { n_s(inout n) } else { n_fixed(inout n, if op == 67 { 4 } else { 8 }) }
+        let d = n_push(inout n)
+        if fits32(v) {
+            x_store_imm(inout n.x, rbp(), d, v)
+        } else {
+            x_imm(inout n.x, rax(), v)
+            x_store(inout n.x, rbp(), d, rax())
+        }
+    } else if op == 69 {
+        n_eqz(inout n, false)
+    } else if op >= 70 and op <= 79 {
+        n_compare(inout n, false, n_int_cc(op - 70))
+    } else if op == 80 {
+        n_eqz(inout n, true)
+    } else if op >= 81 and op <= 90 {
+        n_compare(inout n, true, n_int_cc(op - 81))
+    } else if op >= 97 and op <= 102 {
+        n_fcompare(inout n, op - 97)
+    } else if op >= 103 and op <= 105 {
+        n_count(inout n, false, op - 103)
+    } else if op >= 106 and op <= 120 {
+        n_arith(inout n, false, op - 106)
+    } else if op >= 121 and op <= 123 {
+        n_count(inout n, true, op - 121)
+    } else if op >= 124 and op <= 138 {
+        n_arith(inout n, true, op - 124)
+    } else if op >= 153 and op <= 166 {
+        n_farith(inout n, op - 153)
+    } else if op == 167 or op == 188 or op == 189 or op == 190 or op == 191 {
+        // wrap and the reinterpretations: the same bits
+    } else if op == 170 {
+        n_trunc(inout n, false)
+    } else if op == 176 {
+        n_trunc(inout n, true)
+    } else if op == 172 or op == 196 {
+        let a = n_top(n)
+        x_load32s(inout n.x, rax(), rbp(), a)
+        x_store(inout n.x, rbp(), a, rax())
+    } else if op == 173 {
+        let a = n_top(n)
+        x_load32(inout n.x, rax(), rbp(), a)
+        x_store(inout n.x, rbp(), a, rax())
+    } else if op >= 192 and op <= 195 {
+        // extend8_s, extend16_s of i32 and i64
+        let a = n_top(n)
+        let w = op >= 194
+        let kind = if op == 192 or op == 194 { 1 } else { 3 }
+        x_load_kind(inout n.x, kind, w, rax(), rbp(), -1, a)
+        x_store(inout n.x, rbp(), a, rax())
+    } else if op == 183 or op == 184 or op == 185 {
+        let a = n_top(n)
+        if op == 183 { x_load32s(inout n.x, rax(), rbp(), a) } else if op == 184 { x_load32(inout n.x, rax(), rbp(), a) } else { x_load(inout n.x, rax(), rbp(), a) }
+        x_cvtsi2sd(inout n.x, 0, rax())
+        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    } else if op == 182 {
+        let a = n_top(n)
+        x_movsd_load(inout n.x, 0, rbp(), -1, a)
+        x_cvtsd2ss(inout n.x, 0, 0)
+        x_movss_store(inout n.x, rbp(), -1, a, 0)
+    } else if op == 187 {
+        let a = n_top(n)
+        x_movss_load(inout n.x, 0, rbp(), -1, a)
+        x_cvtss2sd(inout n.x, 0, 0)
+        x_movsd_store(inout n.x, rbp(), -1, a, 0)
+    } else {
+        n_fail(inout n, "the instruction " + to_hex(op, 2))
+    }
+    false
+}
+
+// ------------------------------------------------------------------ functions
+
+fn n_func(inout n: Nat, k: i64) {
+    let f = n.m.funcs[k]
+    let fi = n.nimp + k
+    x_bind(inout n.x, n.labels[fi])
+    n.np = len(n.m.tparams[f.tidx])
+    n.nl = len(f.locals)
+    n.result = len(n.m.tresults[f.tidx])
+    // a function marked for kernel32: the call, in Windows' convention
+    if contains(n.k32_of, fi) {
+        let slot = n.k32_of[fi]
+        let stack = if n.np > 4 { 8 * (n.np - 4) } else { 0 }
+        x_push(inout n.x, rbp())
+        x_mov(inout n.x, rbp(), rsp())
+        x_alu_i(inout n.x, 5, true, rsp(), (32 + stack + 15) / 16 * 16)
+        let regs = [rcx(), rdx(), r8(), r9()]
+        for i in 0..n.np {
+            if i < 4 {
+                x_load(inout n.x, regs[i], rbp(), 16 + 8 * i)
+            } else {
+                x_load(inout n.x, rax(), rbp(), 16 + 8 * i)
+                x_store(inout n.x, rsp(), 32 + 8 * (i - 4), rax())
+            }
+        }
+        x_call_rdata(inout n.x, n.iat_at + 8 * slot)
+        x_leave(inout n.x)
+        x_ret(inout n.x)
+        return
+    }
+    if fi == n.base_fn {
+        x_mov(inout n.x, rax(), r15())
+        x_ret(inout n.x)
+        return
+    }
+    n.code = f.code
+    n.pos = 0
+    n.h = 0
+    n.max_h = 0
+    n.max_out = 0
+    n.dead = false
+    n.dead_depth = 0
+    n.ctl = [NCtl { kind: 3, label: x_label(inout n.x), else_l: -1, height: 0, results: n.result, has_else: false }]
+    x_push(inout n.x, rbp())
+    x_mov(inout n.x, rbp(), rsp())
+    // sub rsp, the frame (written at the end)
+    x_rr(inout n.x, 0, true, [129], 5, rsp())
+    n.frame_at = len(n.x.code)
+    x_i32(inout n.x, 0)
+    if n.nl > 0 {
+        x_imm(inout n.x, rax(), 0)
+        for j in 0..n.nl { x_store(inout n.x, rbp(), -8 * (1 + j), rax()) }
+    }
+    var done = false
+    while not done and not n.failed {
+        if n.pos >= len(n.code) {
+            n_fail(inout n, "a function without its end")
+            return
+        }
+        done = n_inst(inout n, n_byte(inout n))
+    }
+    let frame = (8 * (n.nl + n.max_h) + n.max_out + 15) / 16 * 16
+    x_patch32(inout n.x, n.frame_at, frame)
+}
+
+// memory.grow: rcx the pages to add (32 bits); rax the old count, or -1 (32 bits) when it cannot
+fn n_grow_fn(inout n: Nat, va_slot: i64) {
+    x_bind(inout n.x, n.grow_l)
+    x_push(inout n.x, rbp())
+    x_mov(inout n.x, rbp(), rsp())
+    // (its locals above the 32 bytes of shadow space VirtualAlloc may use)
+    x_alu_i(inout n.x, 5, true, rsp(), 64)
+    let fail = x_label(inout n.x)
+    let done = x_label(inout n.x)
+    x_mov32(inout n.x, rcx(), rcx())
+    x_load(inout n.x, rax(), r15(), n_pages_at())
+    x_store(inout n.x, rbp(), -8, rax())
+    x_store(inout n.x, rbp(), -16, rcx())
+    x_alu(inout n.x, op_add(), true, rax(), rcx())
+    x_alu_i(inout n.x, 7, true, rax(), 65536)
+    x_jcc(inout n.x, cc_a(), fail)
+    x_store(inout n.x, rbp(), -24, rax())
+    x_test(inout n.x, true, rcx(), rcx())
+    x_jcc(inout n.x, cc_e(), done)
+    // VirtualAlloc(memory + old * 64 KiB, pages * 64 KiB, MEM_COMMIT, PAGE_READWRITE)
+    x_load(inout n.x, rcx(), rbp(), -8)
+    x_shift_i(inout n.x, 4, true, rcx(), 16)
+    x_alu(inout n.x, op_add(), true, rcx(), r15())
+    x_load(inout n.x, rdx(), rbp(), -16)
+    x_shift_i(inout n.x, 4, true, rdx(), 16)
+    x_imm(inout n.x, r8(), 4096)
+    x_imm(inout n.x, r9(), 4)
+    x_call_rdata(inout n.x, n.iat_at + 8 * va_slot)
+    x_test(inout n.x, true, rax(), rax())
+    x_jcc(inout n.x, cc_e(), fail)
+    x_load(inout n.x, rax(), rbp(), -24)
+    x_store(inout n.x, r15(), n_pages_at(), rax())
+    x_bind(inout n.x, done)
+    x_load(inout n.x, rax(), rbp(), -8)
+    x_leave(inout n.x)
+    x_ret(inout n.x)
+    x_bind(inout n.x, fail)
+    x_imm(inout n.x, rax(), 4294967295)
+    x_leave(inout n.x)
+    x_ret(inout n.x)
+}
+
+// The index of a kernel32 function in the import table, added when new.
+fn n_k32(inout n: Nat, name: str) -> i64 {
+    for i in 0..len(n.k32) {
+        if n.k32[i] == name { return i }
+    }
+    n.k32.push(name)
+    len(n.k32) - 1
+}
+
+// The module as a Windows executable: (no error, its bytes, the error).
+fn native_exe(m: WMod) -> (bool, Bytes, str) {
+    var n = Nat {
+        x: x64_new(), m: m, nimp: len(m.imports), labels: [], impl_of: [], k32: [], k32_of: [:], base_fn: -1,
+        grow_l: 0, trap_l: 0, table_l: 0, iat_at: 0, failed: false, msg: "",
+        code: [], pos: 0, np: 0, nl: 0, ltypes: [], result: 0, h: 0, max_h: 0, max_out: 0, ctl: [], dead: false, dead_depth: 0, frame_at: 0,
+    }
+    let total = n.nimp + len(m.funcs)
+    for i in 0..total { n.labels.push(if i < n.nimp { -1 } else { x_label(inout n.x) }) }
+    for i in 0..n.nimp { n.impl_of.push(-1) }
+    let va = n_k32(inout n, "VirtualAlloc")
+    let exit_slot = n_k32(inout n, "ExitProcess")
+    var start = -1
+    for e in m.exports {
+        if e.1 != 0 { continue }
+        if e.0 == "_start" { start = e.2 }
+        if starts_with(e.0, "__k32_") { n.k32_of[e.2] = n_k32(inout n, substr(e.0, 6, len(e.0) - 6)) }
+        if e.0 == "__mem_base" { n.base_fn = e.2 }
+        if starts_with(e.0, "__wasi_") {
+            let name = substr(e.0, 7, len(e.0) - 7)
+            for i in 0..n.nimp {
+                if m.imports[i].0 == "wasi_snapshot_preview1" and m.imports[i].1 == name { n.impl_of[i] = e.2 }
+            }
+        }
+    }
+    if start < 0 { return (false, bytes(), "a module without _start") }
+    n.iat_at = pe_iat_at(len(n.k32))
+    n.grow_l = x_label(inout n.x)
+    n.trap_l = x_label(inout n.x)
+    n.table_l = x_label(inout n.x)
+    // the entry: memory, globals, data, then _start and ExitProcess(0)
+    let entry = len(n.x.code)
+    x_alu_i(inout n.x, 5, true, rsp(), 40)
+    let fail = x_label(inout n.x)
+    // VirtualAlloc(0, 8 GiB + 64 KiB, MEM_RESERVE, PAGE_NOACCESS)
+    x_imm(inout n.x, rcx(), 0)
+    x_imm(inout n.x, rdx(), 8589934592 + 65536)
+    x_imm(inout n.x, r8(), 8192)
+    x_imm(inout n.x, r9(), 1)
+    x_call_rdata(inout n.x, n.iat_at + 8 * va)
+    x_test(inout n.x, true, rax(), rax())
+    x_jcc(inout n.x, cc_e(), fail)
+    x_mov(inout n.x, r15(), rax())
+    // VirtualAlloc(it, (1 + pages) * 64 KiB, MEM_COMMIT, PAGE_READWRITE)
+    x_mov(inout n.x, rcx(), rax())
+    x_imm(inout n.x, rdx(), 65536 * (1 + m.pages))
+    x_imm(inout n.x, r8(), 4096)
+    x_imm(inout n.x, r9(), 4)
+    x_call_rdata(inout n.x, n.iat_at + 8 * va)
+    x_test(inout n.x, true, rax(), rax())
+    x_jcc(inout n.x, cc_e(), fail)
+    x_alu_i(inout n.x, 0, true, r15(), 65536)
+    x_imm(inout n.x, rax(), m.pages)
+    x_store(inout n.x, r15(), n_pages_at(), rax())
+    for g in 0..len(m.globals) {
+        x_imm(inout n.x, rax(), m.globals[g].1)
+        x_store(inout n.x, r15(), n_global(g), rax())
+    }
+    let data_off = pe_data_at(n.k32)
+    if len(m.data) > 0 {
+        x_lea_rdata(inout n.x, rsi(), data_off)
+        x_lea(inout n.x, rdi(), r15(), m.data_at)
+        x_imm(inout n.x, rcx(), len(m.data))
+        x_rep_movsb(inout n.x)
+    }
+    x_call(inout n.x, n.labels[start])
+    x_imm(inout n.x, rcx(), 0)
+    x_call_rdata(inout n.x, n.iat_at + 8 * exit_slot)
+    x_bind(inout n.x, fail)
+    x_imm(inout n.x, rcx(), 3)
+    x_call_rdata(inout n.x, n.iat_at + 8 * exit_slot)
+    // the trap: stop (an illegal instruction)
+    x_bind(inout n.x, n.trap_l)
+    x_ud2(inout n.x)
+    n_grow_fn(inout n, va)
+    for k in 0..len(m.funcs) {
+        n_func(inout n, k)
+        if n.failed { return (false, bytes(), "function " + str(n.nimp + k) + ": " + n.msg) }
+    }
+    // the table: a jump to each function
+    x_bind(inout n.x, n.table_l)
+    for f in m.table {
+        let t = if f < n.nimp { n.impl_of[f] } else { f }
+        if t < 0 { return (false, bytes(), "an import in the table") }
+        x_jmp(inout n.x, n.labels[t])
+    }
+    if not x_resolve(inout n.x) { return (false, bytes(), "a label never placed") }
+    let data_rva = pe_data_rva(len(n.x.code))
+    x_resolve_rdata(inout n.x, pe_text_rva(), data_rva)
+    var data = pe_imports(n.k32, data_rva)
+    while len(data) < data_off { data.push(0) }
+    for b in m.data { data.push(b) }
+    (true, pe_image(n.x.code, entry, data, data_rva, len(n.k32)), "")
+}

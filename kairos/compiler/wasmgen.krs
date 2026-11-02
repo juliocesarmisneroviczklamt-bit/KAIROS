@@ -6224,6 +6224,20 @@ fn runtime_fns(inout g: WGen) {
 // The module of a checked program named `prog`: (it compiled, the module, the error: file lo hi
 // message).
 fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
+    let r = wasm_gen(ck, srcs, prog, false)
+    if not r.0 { return (false, bytes(), r.2) }
+    (true, module_bytes(r.1), "")
+}
+
+// The module for the native back end (M21, native.krs): the same, with the operating system
+// written in Kairós (rt_win.krs, checked with the program) compiled in and marked by exports:
+// `__wasi_<name>` does WASI's <name> (win_<name>), `__k32_<Name>` is kernel32's <Name>
+// (k32_<Name>), `__mem_base` the memory's address (rt_win_base).
+fn wasm_module_native(ck: Checker, srcs: List[str], prog: str) -> (bool, WMod, str) {
+    wasm_gen(ck, srcs, prog, true)
+}
+
+fn wasm_gen(ck: Checker, srcs: List[str], prog: str, native: bool) -> (bool, WMod, str) {
     var g = WGen {
         m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog, hooks: [], insts: [], inst_idx: [:], subst: [], tr_fn: [:], grad_fns: [:], tr_slots: [], tr_orig: [],
         code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], live: [], pool: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
@@ -6245,6 +6259,16 @@ fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     let empty: List[i64] = []
     let start = finish(inout g, 0, wtype(inout g.m, params, empty))
     g.m.funcs.push(start)
+    if native {
+        for name in keys(ck.fn_ids) {
+            let id = ck.fn_ids[name]
+            var mark = ""
+            if starts_with(name, "win_") { mark = "__wasi_" + substr(name, 4, len(name) - 4) }
+            if starts_with(name, "k32_") { mark = "__k32_" + substr(name, 4, len(name) - 4) }
+            if name == "rt_win_base" { mark = "__mem_base" }
+            if mark != "" { g.m.exports.push((mark, 0, fn_index(inout g, id))) }
+        }
+    }
     var k = 0
     while k < len(g.order) and not g.failed {
         let id = g.order[k]
@@ -6253,8 +6277,8 @@ fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     }
     if g.failed {
         // "b3": the program reaches `b3`, whose runtime (rt_b3.krs) was not checked with it
-        if g.msg == "b3" { return (false, bytes(), "b3") }
-        return (false, bytes(), str(g.efile) + " " + str(g.elo) + " " + str(g.ehi) + " " + g.msg)
+        if g.msg == "b3" { return (false, g.m, "b3") }
+        return (false, g.m, str(g.efile) + " " + str(g.elo) + " " + str(g.ehi) + " " + g.msg)
     }
     g.m.exports.push(("_start", 0, f_start()))
     g.m.exports.push(("memory", 2, 0))
@@ -6262,5 +6286,5 @@ fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     let heap_at = (g.m.data_at + len(g.m.data) + 7) / 8 * 8
     g.m.globals.push((i32t, heap_at))
     g.m.pages = 1 + heap_at / 65536
-    (true, module_bytes(g.m), "")
+    (true, g.m, "")
 }
