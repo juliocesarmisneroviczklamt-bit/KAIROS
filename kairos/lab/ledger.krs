@@ -259,3 +259,55 @@ fn ledger_set_opened_note(results: str, inout rows: List[LRow], sha: str, note: 
     }
     ledger_save(results, rows)
 }
+
+// ------------------------------------------------------------------ the command (src/ledger.rs)
+
+fn ledger_short(sha: str) -> str {
+    "[" + (if len(sha) >= 8 { substr(sha, 0, 8) } else { sha }) + "]"
+}
+
+// The text of `kairos ledger`: the ledger's rows, the months seen, what programs see.
+fn ledger_describe(path: str, rows: List[LRow]) -> str {
+    let nl = from_codes([10])
+    let q = from_codes([34])
+    var s = ""
+    if path != "" { s = s + "holdout ledger: " + path + nl }
+    if len(rows) == 0 { return s + "empty: no Kairós program has seen the data yet" + nl }
+    for r in rows {
+        var what = "withdrew protocol " + q + r.proto + q + " " + ledger_short(r.sha256)
+        if r.kind == "seen" {
+            what = "saw data up to " + ledger_ym(r.data_until)
+        } else if r.kind == "protocol" {
+            what = "protocol " + q + r.proto + q + " " + ledger_short(r.sha256) + " reserves the holdout from " + ledger_ym(r.holdout_from)
+        } else if r.kind == "opened" {
+            what = "opened the holdout of " + q + r.proto + q + " " + ledger_short(r.sha256) + " (" + ledger_ym(r.holdout_from) + ".." + ledger_ym(r.data_until) + ")"
+        }
+        let note = if r.note == "" { "" } else { " — " + r.note }
+        s = s + "  " + ledger_date(r.date) + "  " + what + note + nl
+    }
+    let w = watermark(rows)
+    if w > 0 { s = s + "months seen up to " + ledger_ym(w) + ": a new holdout must start in " + ledger_ym(next_ym(w)) + " or later" + nl }
+    let f = fence(rows)
+    if f.0 > 0 {
+        s = s + "data visible to programs: up to " + ledger_ym(f.0) + " (the holdout of " + q + f.1.proto + q + " is reserved)" + nl
+    } else {
+        s = s + "no pending holdout: programs see all the data" + nl
+    }
+    s
+}
+
+// `kairos ledger withdraw <protocol>`: gives up a pending protocol (by its name or the start of
+// its hash): (the error or "", the text).
+fn ledger_withdraw(results: str, inout rows: List[LRow], which: str, today_: i64) -> (str, str) {
+    let q = from_codes([34])
+    var found: List[LRow] = []
+    for r in pending(rows) {
+        if r.proto == which or (len(which) >= 8 and starts_with(r.sha256, which)) { found.push(r) }
+    }
+    if len(found) == 0 { return ("no pending protocol named " + q + which + q + " (see `kairos ledger`)", "") }
+    if len(found) > 1 { return ("more than one pending protocol is named " + q + which + q + ": give the start of its hash instead", "") }
+    let r = found[0]
+    rows.push(LRow { kind: "withdrawn", proto: r.proto, sha256: r.sha256, holdout_from: r.holdout_from, data_until: 0, date: today_, note: "withdrawn before opening" })
+    ledger_save(results, rows)
+    ("", "protocol " + q + r.proto + q + " (" + substr(r.sha256, 0, 8) + ") withdrawn: its holdout from " + ledger_ym(r.holdout_from) + " is no longer reserved")
+}

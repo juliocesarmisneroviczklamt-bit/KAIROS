@@ -36,6 +36,7 @@ fn cli_main(a: List[str]) -> i64 {
         }
         return cli_dump(cli_checker("", std_embedded()), a[1], cmd == "hir")
     }
+    if cmd == "ledger" { return cli_ledger(cli_rest(a, 1)) }
     if cmd == "--version" or cmd == "-V" {
         print("kairos " + std_version())
         return 0

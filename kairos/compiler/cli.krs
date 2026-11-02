@@ -163,3 +163,46 @@ fn cli_dump(base: Checker, path: str, hir: bool) -> i64 {
     }
     0
 }
+
+// `kairos ledger` and `kairos ledger withdraw <protocol>` (src/main.rs ledger_cmd): the exit code.
+fn cli_ledger(rest: List[str]) -> i64 {
+    if not (len(rest) == 0 or (len(rest) == 2 and rest[0] == "withdraw")) {
+        eprint(cli_usage())
+        return 2
+    }
+    let none: List[RtProto] = []
+    let s = rt_b3_fresh(none, "")
+    var code = ""
+    var msg = ""
+    var text = ""
+    if s.results == "" {
+        code = "R0100"
+        msg = "no results folder: the ledger lives next to the B3 data"
+    } else {
+        let lo = open_ledger(s.results, 201901)
+        if lo.0 != "" {
+            code = "R0500"
+            msg = lo.0
+        } else if len(rest) == 0 {
+            text = ledger_describe(s.results + "/holdout_ledger.csv", lo.1)
+        } else {
+            var rows = lo.1
+            let w = ledger_withdraw(s.results, inout rows, rest[1], today())
+            if w.0 != "" {
+                code = "R0502"
+                msg = w.0
+            } else {
+                text = w.1
+            }
+        }
+    }
+    if code != "" {
+        eprint("error[" + code + "]: " + msg)
+        // (the Rust command gives a hint to these two only)
+        let hint = if code == "R0100" { "set KAIROS_DATA to the quant-b3 `data` folder" } else if code == "R0500" { rt_b3_hint(code, msg) } else { "" }
+        if hint != "" { eprint("  = hint: " + hint) }
+        return 1
+    }
+    print(cli_chomp(text))
+    0
+}
