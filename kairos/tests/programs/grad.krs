@@ -1,0 +1,64 @@
+// Reverse-mode differentiation (M4): `grad(f)` is a function that returns the gradient.
+axis feature
+axis hidden
+
+fn f(x: f64) -> f64 { x * x * x + 2.0 * x }
+print(grad(f)(2.0))                                  // out: 14.0
+print(value_and_grad(f)(2.0))                        // out: (12.0, 14.0)
+fn two(a: f64, b: f64) -> f64 { a * b + b }
+print(grad(two, wrt: 2)(3.0, 5.0))                   // out: 4.0
+print(grad(|x: f64| exp(x) * x)(0.0))                // out: 1.0
+
+// tensors, checked against finite differences
+fn fd(f: fn(Tensor[feature; f64]) -> f64, w: Tensor[feature; f64]) -> Tensor[feature; f64] {
+    var g = zeros_like(w)
+    for i in 0..size(w, feature) {
+        var e = zeros_like(w)
+        e[feature: i] = 1e-6
+        g[feature: i] = (f(w + e) - f(w - e)) / 2e-6
+    }
+    g
+}
+fn h(w: Tensor[feature; f64]) -> f64 { sum(w * w) + mean(exp(w)) + max(w, over: feature) }
+let w = tensor([0.5, -1.0, 2.0], feature)
+print(max(abs(grad(h)(w) - fd(h, w))) < 1e-6)       // out: true
+
+// a matrix through contract, tanh, a slice assignment, where, prod, relu
+fn fd2(f: fn(Tensor[feature, hidden; f64]) -> f64, w: Tensor[feature, hidden; f64]) -> Tensor[feature, hidden; f64] {
+    var g = zeros_like(w)
+    for i in 0..size(w, feature) {
+        for j in 0..size(w, hidden) {
+            var e = zeros_like(w)
+            e[feature: i, hidden: j] = 1e-6
+            g[feature: i, hidden: j] = (f(w + e) - f(w - e)) / 2e-6
+        }
+    }
+    g
+}
+fn net(m: Tensor[feature, hidden; f64]) -> f64 {
+    let x = tensor([1.0, 2.0, -3.0], feature)
+    let y = contract(x, m, over: feature)
+    var z = tanh(y) ^ 2.0
+    z[hidden: 0] = z[hidden: 0] * 3.0
+    sum(where(y > 0.0, z, sigmoid(y))) + prod(1.0 + m[feature: 1] * 0.1, over: hidden) + sum(relu(m)) * 0.5
+}
+let m = randn(seed: 3, feature: 3, hidden: 2)
+print(max(abs(grad(net)(m) - fd2(net, m))) < 1e-6)  // out: true
+
+// structs: the gradient has the shape of the parameters
+struct Line { a: f64, b: Tensor[feature; f64] }
+fn fit(p: Line) -> f64 { (p.a - 1.0) ^ 2.0 + sum(p.b * p.b) }
+let p0 = Line { a: 3.0, b: tensor([1.0, -2.0], feature) }
+print(grad(fit)(p0))                                 // out: Line { a: 4.0, b: Tensor[feature: 2; f64] [2.0, -4.0] }
+
+// the tangent space: `p - lr * g` works on structs, and the optimizers are generic
+var p = p0
+for i in 0..100 {
+    sgd_step(inout p, grad(fit)(p), 0.1)
+}
+print(round(p.a * 1000.0) / 1000.0, round(sum(abs(p.b)) * 1000.0) / 1000.0)   // out: 1.0 0.0
+
+// smooth rules: exact outside `grad`, smooth inside it
+print(smooth_max(-1.0, 0.0, scale: 0.5))             // out: 0.0
+print(grad(|x: f64| smooth_max(x, 0.0, scale: 1.0))(0.0))   // out: 0.5
+print(grad(|x: f64| smooth_step(x, scale: 2.0))(0.0))       // out: 0.125

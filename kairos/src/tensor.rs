@@ -474,6 +474,133 @@ pub fn contract(x: &TensorVal, y: &TensorVal, ax: u32) -> TResult<TensorVal> {
     Ok(TensorVal::new_f(axes, shape, out))
 }
 
+/// Sum over every axis in `over` of x * y: the general named-axis contraction (`contract` is the
+/// one-axis case, and the gradients of a contraction are contractions too). Axes shared by x and
+/// y that are not in `over` are batch axes; the others form an outer product.
+pub fn contract_over(x: &TensorVal, y: &TensorVal, over: &[u32]) -> TResult<TensorVal> {
+    let mut axes: Vec<u32> = Vec::new();
+    let mut shape = Vec::new();
+    for (k, a) in x.axes.iter().enumerate() {
+        if !over.contains(a) {
+            axes.push(*a);
+            shape.push(x.shape[k]);
+        }
+    }
+    for (k, a) in y.axes.iter().enumerate() {
+        match x.pos(*a) {
+            Some(p) if x.shape[p] != y.shape[k] => return Err(TErr::SizeMismatch { axis: *a, a: x.shape[p], b: y.shape[k] }),
+            Some(_) => {}
+            None if !over.contains(a) => {
+                axes.push(*a);
+                shape.push(y.shape[k]);
+            }
+            None => {}
+        }
+    }
+    let mut full_axes = axes.clone();
+    let mut full_shape = shape.clone();
+    for a in over {
+        let n = x.size(*a).or(y.size(*a)).ok_or_else(|| TErr::Shape("contraction over an axis neither tensor has".into()))?;
+        full_axes.push(*a);
+        full_shape.push(n);
+    }
+    let inner: usize = full_shape[axes.len()..].iter().product();
+    let n_out: usize = shape.iter().product();
+    if inner == 0 {
+        return Ok(TensorVal::new_f(axes, shape, vec![0.0; n_out]));
+    }
+    let (sx, sy) = (mapped(x, &full_axes), mapped(y, &full_axes));
+    let (xf, yf) = (x.f(), y.f());
+    let mut out = Vec::with_capacity(n_out);
+    let (mut acc, mut k) = (0.0, 0usize);
+    walk(&full_shape, &[sx, sy], |offs| {
+        acc += xf[offs[0]] * yf[offs[1]];
+        k += 1;
+        if k == inner {
+            out.push(acc);
+            acc = 0.0;
+            k = 0;
+        }
+    });
+    Ok(TensorVal::new_f(axes, shape, out))
+}
+
+/// Gradient of a product over `ax` (None: all elements): for each element, the product of the
+/// others times the upstream gradient `g` (already in the shape and axis order of `a`). Prefix
+/// and suffix products, so zeros are handled exactly.
+pub fn prod_grad(a: &TensorVal, ax: Option<u32>, g: &TensorVal) -> TResult<TensorVal> {
+    let (av, gv) = (a.f(), g.f());
+    let mut out = vec![0.0; av.len()];
+    let mut one = |offs: &[usize]| {
+        let n = offs.len();
+        let mut prefix = vec![1.0; n + 1];
+        for k in 0..n {
+            prefix[k + 1] = prefix[k] * av[offs[k]];
+        }
+        let mut suffix = 1.0;
+        for k in (0..n).rev() {
+            out[offs[k]] = prefix[k] * suffix * gv[offs[k]];
+            suffix *= av[offs[k]];
+        }
+    };
+    match ax {
+        None => one(&(0..av.len()).collect::<Vec<_>>()),
+        Some(axis) => {
+            let p = a.pos(axis).ok_or_else(|| TErr::Shape("product over an axis the tensor does not have".into()))?;
+            fibers(a, p, one);
+        }
+    }
+    Ok(TensorVal::new_f(a.axes.clone(), a.shape.clone(), out))
+}
+
+/// Sums `t` over every axis not in `keep` (undoing a broadcast).
+pub fn sum_to(t: &TensorVal, keep: &[u32]) -> TResult<TensorVal> {
+    let mut cur = t.clone();
+    let extra: Vec<u32> = t.axes.iter().copied().filter(|a| !keep.contains(a)).collect();
+    for a in extra {
+        cur = reduce(&cur, Some(a), Red::Sum)?;
+    }
+    Ok(cur)
+}
+
+/// Deterministic normal samples: SplitMix64 seeds a xoshiro256** stream, Box-Muller turns pairs
+/// of uniforms into normals. Integer arithmetic plus `libm`, so every system draws the same bits.
+pub fn randn(seed: u64, axes: Vec<u32>, shape: Vec<usize>) -> TensorVal {
+    let mut sm = seed;
+    let mut next_sm = || {
+        sm = sm.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = sm;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut s = [next_sm(), next_sm(), next_sm(), next_sm()];
+    let mut next = || {
+        let r = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = s[1] << 17;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = s[3].rotate_left(45);
+        r
+    };
+    // uniform in (0, 1]: 53 random bits
+    let mut unif = || ((next() >> 11) as f64 + 1.0) / (1u64 << 53) as f64;
+    let n: usize = shape.iter().product();
+    let mut v = Vec::with_capacity(n + 1);
+    while v.len() < n {
+        let (u1, u2) = (unif(), unif());
+        let r = (-2.0 * libm::log(u1)).sqrt();
+        let th = 2.0 * std::f64::consts::PI * u2;
+        v.push(r * libm::cos(th));
+        v.push(r * libm::sin(th));
+    }
+    v.truncate(n);
+    TensorVal::new_f(axes, shape, v)
+}
+
 pub fn full(axes: Vec<u32>, shape: Vec<usize>, v: f64) -> TensorVal {
     let n = shape.iter().product();
     TensorVal::new_f(axes, shape, vec![v; n])

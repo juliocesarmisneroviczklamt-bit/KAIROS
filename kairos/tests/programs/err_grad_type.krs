@@ -1,0 +1,3 @@
+// Only f64, f64 tensors and structs/tuples/lists of them can be differentiated.
+fn f(n: i64, x: f64) -> f64 { x * float(n) }
+print(grad(f)(2, 1.0))   // error: E0402

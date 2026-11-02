@@ -359,7 +359,185 @@ impl Checker {
                 | B::BottomK
                 | B::Contract
                 | B::Observed
+                | B::Grad
+                | B::ValueAndGrad
+                | B::Tanh
+                | B::Sigmoid
+                | B::Relu
+                | B::Softplus
+                | B::Randn
+                | B::SmoothMax
+                | B::SmoothMin
+                | B::SmoothStep
         )
+    }
+
+    /// f64, f64 tensors, and structs, tuples and lists of them (the types `grad` works on).
+    pub(super) fn differentiable(&self, t: &Ty) -> bool {
+        fn go(ck: &Checker, t: &Ty, seen: &mut Vec<u32>) -> bool {
+            match ck.resolve(t) {
+                Ty::Float => true,
+                Ty::Tensor(_, e) => *e == Ty::Float,
+                Ty::Struct(id) => {
+                    if seen.contains(&id) {
+                        return false;
+                    }
+                    seen.push(id);
+                    let ok = ck.structs[id as usize].fields.iter().all(|(_, ft)| go(ck, ft, seen));
+                    seen.pop();
+                    ok
+                }
+                Ty::Tuple(ts) => ts.iter().all(|x| go(ck, x, seen)),
+                Ty::List(e) => go(ck, &e, seen),
+                Ty::Param(_) => true,
+                _ => false,
+            }
+        }
+        go(self, t, &mut Vec::new())
+    }
+
+    /// A struct, tuple or type parameter made of differentiable values: the tangent space, where
+    /// `p - 0.01 * g` works field by field.
+    pub(super) fn tangent(&self, t: &Ty) -> bool {
+        matches!(self.resolve(t), Ty::Struct(_) | Ty::Tuple(_) | Ty::Param(_)) && self.differentiable(t)
+    }
+
+    /// `+ - * /` on the tangent space: two values of the same type, or one with an `f64`.
+    pub(super) fn tangent_binary(&mut self, op: BinOp, tl: &Ty, tr: &Ty, sp: Span) -> KResult<Option<Ty>> {
+        let (a, b) = (self.tangent(tl), self.tangent(tr));
+        if !(a || b) || !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+            return Ok(None);
+        }
+        let sym = op_str(op);
+        let bad = |me: &Self| {
+            Diag::new("E0101", sp, format!("cannot apply `{sym}` to `{}` and `{}`", me.show(tl), me.show(tr)))
+                .hint("field-by-field arithmetic takes two values of the same type, or one of them and an `f64`")
+        };
+        let (s, other) = if a { (tl, tr) } else { (tr, tl) };
+        if a && b {
+            if self.unify(tl, tr).is_err() {
+                return Err(bad(self));
+            }
+        } else if self.unify(other, &Ty::Float).is_err() {
+            return Err(bad(self));
+        }
+        Ok(Some(self.resolve(s)))
+    }
+
+    fn int_const(e: &Expr, what: &str) -> KResult<i64> {
+        match &e.kind {
+            ExprKind::Int(v) => Ok(*v),
+            ExprKind::Unary(UnOp::Neg, x) => match x.kind {
+                ExprKind::Int(v) => Ok(-v),
+                _ => Err(Diag::new("E0101", e.span, format!("`{what}` must be an integer constant"))),
+            },
+            _ => Err(Diag::new("E0101", e.span, format!("`{what}` must be an integer constant"))),
+        }
+    }
+
+    /// `grad(f)` / `grad(f, wrt: k)` / `value_and_grad(f)`: f returns f64 (a loss); the result is
+    /// a function with the same parameters returning the gradient (and the value) with respect
+    /// to parameter k (from 1).
+    fn grad_ty(&mut self, b: Builtin, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        let name = builtin_name(b);
+        if all.len() != 1 {
+            return Err(Diag::new("E0103", sp, format!("`{name}` takes the function to differentiate")).hint(format!("e.g. `{name}(loss)` or `{name}(loss, wrt: 2)`")));
+        }
+        let mut wrt = 1i64;
+        for (nm, nsp, e) in named {
+            if *nm != "wrt" {
+                return Err(Diag::new("E0120", *nsp, format!("`{name}` has no argument `{nm}`")).hint("choose the parameter with `wrt: k` (from 1)"));
+            }
+            wrt = Self::int_const(e, "wrt:")?;
+        }
+        let (hf, tf) = self.expr(all[0].0, None)?;
+        let (ps, r) = match self.resolve(&tf) {
+            Ty::Fn(ps, r) => (ps, *r),
+            other => {
+                return Err(Diag::new("E0101", all[0].0.span, format!("`{name}` needs a function, found `{}`", self.show(&other)))
+                    .hint("pass a named function, or a lambda with typed parameters: `|x: f64| x * x`"));
+            }
+        };
+        if self.unify(&r, &Ty::Float).is_err() {
+            return Err(Diag::new("E0401", all[0].0.span, format!("`{name}` needs a function that returns `f64` (a loss), found one returning `{}`", self.show(&r))));
+        }
+        let Some(k) = usize::try_from(wrt - 1).ok().filter(|k| *k < ps.len()) else {
+            return Err(Diag::new("E0103", sp, format!("`wrt: {wrt}`, but the function has {} parameter(s)", ps.len())));
+        };
+        let p = ps[k].clone();
+        if !self.differentiable(&p) {
+            return Err(Diag::new("E0402", all[0].0.span, format!("cannot differentiate with respect to a `{}`", self.show(&p)))
+                .hint("differentiable types: f64, f64 tensors, and structs, tuples and lists of them"));
+        }
+        let ret = if b == Builtin::ValueAndGrad { Ty::Tuple(vec![Ty::Float, p]) } else { p };
+        let lit = |v: Value| HArg::Val(HExpr::Lit(v));
+        let args = vec![HArg::Val(hf), lit(Value::Int(k as i64)), lit(Value::Bool(b == Builtin::ValueAndGrad))];
+        Ok((HExpr::CallBuiltin(b, args, sp), Ty::Fn(ps, Box::new(ret))))
+    }
+
+    /// `randn(seed: k, month: 12, asset: 3)`: reproducible normal samples.
+    fn randn_ty(&mut self, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        if !all.is_empty() {
+            return Err(Diag::new("E0103", sp, "`randn` takes only named arguments").hint("e.g. `randn(seed: 7, feature: 4, hidden: 16)`"));
+        }
+        let Some((_, _, seed_e)) = named.iter().find(|(n, _, _)| *n == "seed") else {
+            return Err(Diag::new("E0103", sp, "`randn` needs `seed:` (results must be reproducible)").hint("e.g. `randn(seed: 7, feature: 4, hidden: 16)`"));
+        };
+        let mut hs = vec![HArg::Val(self.int_expr(seed_e)?)];
+        let mut axes = Vec::new();
+        for (nm, nsp, e) in named {
+            if *nm == "seed" {
+                continue;
+            }
+            let id = self.axis_id(nm, *nsp)?;
+            if axes.contains(&id) {
+                return Err(Diag::new("E0112", *nsp, format!("axis `{nm}` is given twice")));
+            }
+            hs.push(HArg::Val(HExpr::Lit(Value::Int(i64::from(id)))));
+            hs.push(HArg::Val(self.int_expr(e)?));
+            axes.push(id);
+        }
+        if axes.is_empty() {
+            return Err(Diag::new("E0103", sp, "`randn` needs the size of each axis").hint("e.g. `randn(seed: 7, feature: 4, hidden: 16)`"));
+        }
+        Ok((HExpr::CallBuiltin(Builtin::Randn, hs, sp), Self::mk_tensor(axes, Ty::Float)))
+    }
+
+    /// `smooth_max(x, y, scale: s)`, `smooth_min`, `smooth_step(x, scale: s)`: the exact rule
+    /// outside `grad`, a smooth relaxation (softplus, sigmoid) inside it.
+    fn smooth_ty(&mut self, b: Builtin, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        let name = builtin_name(b);
+        let want = if b == Builtin::SmoothStep { 1 } else { 2 };
+        if all.len() != want {
+            return Err(Diag::new("E0103", sp, format!("`{name}` takes {want} value(s) and `scale:`")));
+        }
+        let Some((_, _, scale_e)) = named.iter().find(|(n, _, _)| *n == "scale") else {
+            return Err(Diag::new("E0103", sp, format!("`{name}` needs `scale:`: how wide the smooth transition is")).hint(format!("e.g. `{name}(x{}, scale: 100.0)`", if want == 2 { ", 0.0" } else { "" })));
+        };
+        if let Some((nm, nsp, _)) = named.iter().find(|(n, _, _)| *n != "scale") {
+            return Err(Diag::new("E0120", *nsp, format!("`{name}` has no argument `{nm}`")));
+        }
+        let float = Ty::Float;
+        let (hs, t) = if b == Builtin::SmoothStep {
+            let (h, t) = self.expr(all[0].0, Some(&float))?;
+            match self.tensor_parts(&t) {
+                Some((_, e)) => self.need_elem(name, &t, &e, &float, all[0].0)?,
+                None => self.expect_ty(&t, &float, all[0].0.span)?,
+            }
+            (vec![HArg::Val(h)], t)
+        } else {
+            let (h, t) = self.max_min2(if b == Builtin::SmoothMax { Builtin::Max } else { Builtin::Min }, all, sp)?;
+            let HExpr::CallBuiltin(_, hs, _) = h else { unreachable!("max/min call") };
+            if self.resolve(&t) == Ty::Int {
+                return Err(Diag::new("E0101", sp, format!("`{name}` needs `f64` values")));
+            }
+            (hs, t)
+        };
+        let (hsc, tsc) = self.expr(scale_e, Some(&float))?;
+        self.expect_ty(&tsc, &float, scale_e.span)?;
+        let mut args = hs;
+        args.push(HArg::Val(hsc));
+        Ok((HExpr::CallBuiltin(b, args, sp), t))
     }
 
     /// `observed(x)` / `observed(x, lag: k)`: declares that row `t` of `x` (over its temporal
@@ -449,8 +627,12 @@ impl Checker {
     /// "all axes".
     pub(super) fn tensor_builtin(&mut self, b: Builtin, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
         use Builtin as B;
-        if b == B::Observed {
-            return self.observed(all, named, sp);
+        match b {
+            B::Observed => return self.observed(all, named, sp),
+            B::Grad | B::ValueAndGrad => return self.grad_ty(b, all, named, sp),
+            B::Randn => return self.randn_ty(all, named, sp),
+            B::SmoothMax | B::SmoothMin | B::SmoothStep => return self.smooth_ty(b, all, named, sp),
+            _ => {}
         }
         let name = builtin_name(b);
         let n = all.len();
@@ -533,12 +715,16 @@ impl Checker {
                     _ => Err(Diag::new("E0101", e0.span, format!("`{name}` needs a tensor, found `{}`", self.show(&t)))),
                 }
             }
-            B::Abs | B::Sqrt | B::Exp | B::Ln | B::Floor | B::Ceil | B::Round => {
+            B::Abs | B::Sqrt | B::Exp | B::Ln | B::Floor | B::Ceil | B::Round | B::Tanh | B::Sigmoid | B::Relu | B::Softplus => {
                 arity(1)?;
                 let want = if b == B::Abs { None } else { Some(&float) };
                 let (h, t) = self.expr(all[0].0, want)?;
                 if let Some((_, elem)) = self.tensor_parts(&t) {
                     self.need_elem(name, &t, &elem, &float, all[0].0)?;
+                    return call(vec![HArg::Val(h)], t);
+                }
+                // field by field on the tangent space (rounding is not differentiable)
+                if self.tangent(&t) && !matches!(b, B::Floor | B::Ceil | B::Round) {
                     return call(vec![HArg::Val(h)], t);
                 }
                 if b == B::Abs {
@@ -635,6 +821,10 @@ impl Checker {
             B::ZerosLike | B::FullLike => {
                 arity(if b == B::FullLike { 2 } else { 1 })?;
                 let (h, t) = self.expr(all[0].0, None)?;
+                // the zero of the tangent space (optimizer state, accumulated gradients)
+                if b == B::ZerosLike && (self.tangent(&t) || self.resolve(&t) == Ty::Float) {
+                    return call(vec![HArg::Val(h)], t);
+                }
                 let (axes, _) = self.need_tensor(name, &t, all[0].0)?;
                 let mut hs = vec![HArg::Val(h)];
                 let mut elem = Ty::Float;

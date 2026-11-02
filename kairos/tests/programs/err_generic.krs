@@ -1,0 +1,3 @@
+// A type parameter stands for a differentiable type.
+var s = "text"
+sgd_step(inout s, "x", 0.1)   // error: E0402

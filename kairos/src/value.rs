@@ -20,12 +20,16 @@ pub enum Value {
     Func(Rc<FuncVal>),
     /// named-axis tensor (M2); a tensor with no axes left is always a scalar `Float`/`Bool`
     Tensor(Rc<TensorVal>),
+    /// a float or float tensor tracked by `grad` (M4): index of its node on the active tape
+    Node(u32),
 }
 
 #[derive(Debug)]
 pub enum FuncVal {
     User(u32),
     Closure { def: u32, captured: Vec<Value> },
+    /// `grad(f, wrt: k)` / `value_and_grad(f, wrt: k)` (argument index from 0)
+    Grad { f: Value, wrt: usize, with_value: bool },
 }
 
 impl PartialEq for Value {
@@ -42,6 +46,7 @@ impl PartialEq for Value {
             (Enum(e, v, a), Enum(f, w, b)) => e == f && v == w && a == b,
             (Func(a), Func(b)) => Rc::ptr_eq(a, b),
             (Tensor(a), Tensor(b)) => a == b,
+            (Node(a), Node(b)) => a == b,
             _ => false,
         }
     }

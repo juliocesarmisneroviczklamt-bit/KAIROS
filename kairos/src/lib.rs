@@ -9,6 +9,7 @@
 //! (Cranelift) is M7. Spec: `docs/spec.md`.
 
 pub mod ast;
+pub mod autodiff;
 pub mod bridge;
 pub mod diag;
 pub mod hir;

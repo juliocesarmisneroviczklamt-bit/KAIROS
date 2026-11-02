@@ -29,6 +29,8 @@ pub enum Ty {
     Enum(u32),
     Fn(Vec<Ty>, Box<Ty>),
     Var(u32),
+    /// type parameter of a generic function (`fn adam[P](...)`): a differentiable type
+    Param(u32),
     /// named-axis tensor: axis ids kept sorted (the order of axes never matters for typing),
     /// element `f64` or `bool`; never empty (a tensor with no axes is a scalar)
     Tensor(Vec<u32>, Box<Ty>),
@@ -70,6 +72,8 @@ pub struct FnSig {
     /// (name, type, inout)
     pub params: Vec<(String, Ty, bool)>,
     pub ret: Ty,
+    /// `Ty::Param` ids of `fn f[P](...)` (instantiated at each call)
+    pub type_params: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +132,10 @@ pub struct Checker {
     /// declared axes (ids 0..3 are the built-in `month`, `day`, `asset`)
     pub axes: Vec<AxisDef>,
     axis_ids: HashMap<String, u32>,
+    /// type parameters in scope while checking a generic function (name -> `Ty::Param` id)
+    generic_scope: HashMap<String, u32>,
+    /// names of the type parameters of generic functions (`Ty::Param` ids)
+    type_param_names: Vec<String>,
     /// knowledge times of the top-level variables (kept across REPL inputs)
     temporal: crate::temporal::State,
 }
@@ -189,6 +197,8 @@ impl Checker {
             axes,
             axis_ids,
             temporal: crate::temporal::State::default(),
+            type_param_names: Vec::new(),
+            generic_scope: HashMap::new(),
         }
     }
 
@@ -253,21 +263,36 @@ impl Checker {
         for it in items {
             if let Item::Fn(f) = it {
                 self.ensure_new_name(&f.name, f.span, true)?;
+                // `fn f[P](...)`: each type parameter is a differentiable type
+                let mut type_params = Vec::new();
+                self.generic_scope.clear();
+                for (tp, tsp) in &f.type_params {
+                    if self.generic_scope.contains_key(tp) {
+                        return Err(Diag::new("E0112", *tsp, format!("type parameter `{tp}` is declared twice")));
+                    }
+                    let pid = self.type_param_names.len() as u32;
+                    self.type_param_names.push(tp.clone());
+                    self.generic_scope.insert(tp.clone(), pid);
+                    type_params.push(pid);
+                }
                 let mut params: Vec<(String, Ty, bool)> = Vec::new();
                 for p in &f.params {
                     if params.iter().any(|(n, _, _)| *n == p.name) {
+                        self.generic_scope.clear();
                         return Err(Diag::new("E0112", p.span, format!("parameter `{}` is declared twice", p.name)));
                     }
-                    let t = self.resolve_type(&p.ty)?;
+                    let t = self.resolve_type(&p.ty);
+                    let t = t.inspect_err(|_| self.generic_scope.clear())?;
                     params.push((p.name.clone(), t, p.inout));
                 }
                 let ret = match &f.ret {
-                    Some(t) => self.resolve_type(t)?,
+                    Some(t) => self.resolve_type(t).inspect_err(|_| self.generic_scope.clear())?,
                     None => Ty::Unit,
                 };
+                self.generic_scope.clear();
                 let id = self.sigs.len() as u32;
                 self.fn_ids.insert(f.name.clone(), id);
-                self.sigs.push(FnSig { name: f.name.clone(), params, ret });
+                self.sigs.push(FnSig { name: f.name.clone(), params, ret, type_params });
                 self.bodies.push(None);
                 new_fns.push((id, f));
             }
@@ -343,6 +368,8 @@ impl Checker {
             ctx.scopes[0].insert(name.clone(), Local { slot, ty: ty.clone(), mutable: *inout });
         }
         self.ctxs.push(ctx);
+        // the type parameters are in scope in the body (`let z: P = ...`)
+        self.generic_scope = sig.type_params.iter().map(|p| (self.type_param_names[*p as usize].clone(), *p)).collect();
         // `@ end(e)`: an integer expression over the parameters (checked by the temporal pass)
         let known_at = match &f.known_at {
             Some((e, sp)) => match self.expr(e, Some(&Ty::Int)) {
@@ -356,6 +383,7 @@ impl Checker {
         };
         let r = known_at.and_then(|k| self.block(&f.body, Some(&sig.ret)).map(|b| (b, k)));
         let ctx = self.ctxs.pop().expect("fn context");
+        self.generic_scope.clear();
         let ((body, t), known_at) = r?;
         if self.unify(&t, &sig.ret).is_err() {
             let span = f.body.tail.as_ref().map(|e| e.span).unwrap_or(f.body.span);
@@ -491,6 +519,7 @@ impl Checker {
             Ty::Fn(ps, r) => {
                 format!("fn({}) -> {}", ps.iter().map(|x| self.show(x)).collect::<Vec<_>>().join(", "), self.show(&r))
             }
+            Ty::Param(p) => self.type_param_names.get(p as usize).cloned().unwrap_or_else(|| format!("T{p}")),
             Ty::Tensor(axes, e) => {
                 let names: Vec<&str> = axes.iter().map(|a| self.axes[*a as usize].name.as_str()).collect();
                 format!("Tensor[{}; {}]", names.join(", "), self.show(&e))
@@ -575,6 +604,10 @@ impl Checker {
                         return Err(Diag::new("E0002", *span, format!("type `{name}` is not available yet")).hint(
                             "Kairós supports i64, f64, bool, str, List[T], Tensor[axes; f64|bool], tuples, structs, enums and fn types",
                         ));
+                    }
+                    n if self.generic_scope.contains_key(n) => {
+                        arity(0)?;
+                        Ty::Param(self.generic_scope[n])
                     }
                     n => {
                         if let Some(&id) = self.struct_ids.get(n) {
@@ -996,6 +1029,7 @@ impl Checker {
                     return Ok((HExpr::Unary(*op, Box::new(h), sp), t));
                 }
                 match op {
+                    UnOp::Neg if self.tangent(&t) => {}
                     UnOp::Neg => self.ensure_numeric(&t, sp, "`-`")?,
                     UnOp::Not => self.expect_ty(&t, &Ty::Bool, x.span)?,
                 }
@@ -1241,6 +1275,9 @@ impl Checker {
         }
         if let Some(&fid) = self.fn_ids.get(n) {
             let sig = &self.sigs[fid as usize];
+            if !sig.type_params.is_empty() {
+                return Err(Diag::new("E0114", sp, format!("generic function `{n}` cannot be used as a value yet")).hint("call it directly, or wrap it in a lambda with concrete types"));
+            }
             if sig.params.iter().any(|p| p.2) {
                 return Err(Diag::new("E0114", sp, format!("`{n}` has `inout` parameters and cannot be used as a value")));
             }
@@ -1328,6 +1365,10 @@ impl Checker {
         let (hr, tr) = self.expr(r, Some(&tl))?;
         if self.tensor_parts(&tl).is_some() || self.tensor_parts(&tr).is_some() {
             let t = self.tensor_binary(op, &tl, &tr, l, r, sp)?;
+            return Ok((HExpr::Binary(op, Box::new(hl), Box::new(hr), sp), t));
+        }
+        // the tangent space: structs/tuples/type parameters of differentiable values
+        if let Some(t) = self.tangent_binary(op, &tl, &tr, sp)? {
             return Ok((HExpr::Binary(op, Box::new(hl), Box::new(hr), sp), t));
         }
         if self.unify(&tl, &tr).is_err() {
@@ -1427,8 +1468,40 @@ impl Checker {
         Err(Diag::new("E0100", sp, format!("no function named `{name}`")).hint("`x.f(y)` calls the function `f(x, y)`"))
     }
 
+    /// Replaces type parameters by their instances.
+    fn subst_params(&self, t: &Ty, inst: &[(u32, Ty)]) -> Ty {
+        match t {
+            Ty::Param(p) => inst.iter().find(|(q, _)| q == p).map(|(_, t)| t.clone()).unwrap_or(Ty::Param(*p)),
+            Ty::List(x) => Ty::List(Box::new(self.subst_params(x, inst))),
+            Ty::Tuple(xs) => Ty::Tuple(xs.iter().map(|x| self.subst_params(x, inst)).collect()),
+            Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|x| self.subst_params(x, inst)).collect(), Box::new(self.subst_params(r, inst))),
+            Ty::Tensor(a, e) => Ty::Tensor(a.clone(), Box::new(self.subst_params(e, inst))),
+            other => other.clone(),
+        }
+    }
+
     fn call_user(&mut self, fid: u32, recv: Option<&Expr>, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
-        let sig = self.sigs[fid as usize].clone();
+        let mut sig = self.sigs[fid as usize].clone();
+        // a generic function: fresh instances of its type parameters at every call
+        let inst: Vec<(u32, Ty)> = sig.type_params.iter().map(|p| (*p, self.fresh(Kind::Any).0)).collect();
+        if !inst.is_empty() {
+            for p in sig.params.iter_mut() {
+                p.1 = self.subst_params(&p.1, &inst);
+            }
+            sig.ret = self.subst_params(&sig.ret, &inst);
+        }
+        let (h, t) = self.call_user_sig(fid, &sig, recv, args, sp)?;
+        for (p, t) in &inst {
+            if !self.differentiable(t) {
+                let name = &self.type_param_names[*p as usize];
+                return Err(Diag::new("E0402", sp, format!("`{}` needs `{name}` to be differentiable, found `{}`", sig.name, self.show(t)))
+                    .hint("differentiable types: f64, f64 tensors, and structs, tuples and lists of them"));
+            }
+        }
+        Ok((h, t))
+    }
+
+    fn call_user_sig(&mut self, fid: u32, sig: &FnSig, recv: Option<&Expr>, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
         Self::no_named_args(args, &format!("`{}`", sig.name))?;
         let mut all: Vec<(&Expr, bool, bool)> = Vec::new();
         if let Some(r) = recv {
@@ -1469,7 +1542,7 @@ impl Checker {
                 hargs.push(HArg::Val(h));
             }
         }
-        Ok((HExpr::CallFn(fid, hargs, sp), sig.ret))
+        Ok((HExpr::CallFn(fid, hargs, sp), sig.ret.clone()))
     }
 
     fn call_builtin(&mut self, b: Builtin, recv: Option<&Expr>, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {

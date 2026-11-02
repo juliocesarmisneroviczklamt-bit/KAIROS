@@ -15,6 +15,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+mod diff;
 mod tensors;
 
 pub enum Ctl {
@@ -136,11 +137,13 @@ pub struct Interp<'a> {
     host: &'a Host,
     depth: u32,
     max_depth: u32,
+    /// the tape of the `grad` being computed (M4)
+    tape: std::cell::RefCell<Option<crate::autodiff::Tape>>,
 }
 
 impl<'a> Interp<'a> {
     pub fn new(ck: &'a Checker, out: &'a mut dyn Write, host: &'a Host) -> Self {
-        Interp { ck, out, host, depth: 0, max_depth: max_depth() }
+        Interp { ck, out, host, depth: 0, max_depth: max_depth(), tape: std::cell::RefCell::new(None) }
     }
 
     fn eval_all(&mut self, xs: &[HExpr], f: &mut Vec<Value>) -> R<Vec<Value>> {
@@ -204,6 +207,8 @@ impl<'a> Interp<'a> {
                 (UnOp::Neg, Value::Float(x)) => Ok(Value::Float(-x)),
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (op, Value::Tensor(t)) => self.tensor_unary(*op, &t, *sp),
+                // tracked values and structs/tuples of them (the tangent space)
+                (UnOp::Neg, v @ (Value::Node(_) | Value::Struct(..) | Value::Tuple(_))) => self.neg(v, *sp),
                 (op, v) => unreachable!("unary {op:?} on {v:?}"),
             },
             HExpr::Binary(op, a, b, sp) => {
@@ -359,14 +364,32 @@ impl<'a> Interp<'a> {
         let body = ck.bodies[id as usize].as_ref().expect("checked body");
         let mut frame = vec![Value::Unit; body.n_slots as usize];
         let mut back: Vec<(usize, usize, Vec<Step>)> = Vec::new();
+        // values first: they may read a variable that is also passed as `inout` (`f(inout p, g(p))`)
         for (i, a) in args.iter().enumerate() {
-            match a {
-                HArg::Val(e) => frame[i] = self.eval(e, f)?,
-                HArg::InOut(p) => {
-                    let (root, path) = self.resolve_place(p, f)?;
+            if let HArg::Val(e) = a {
+                frame[i] = self.eval(e, f)?;
+            }
+        }
+        // then move the `inout` places into the call (and back afterwards)
+        for (i, a) in args.iter().enumerate() {
+            if let HArg::InOut(p) = a {
+                let moved = self.resolve_place(p, f).and_then(|(root, path)| {
                     let slot = place_mut(&mut f[root], &path)?;
-                    frame[i] = std::mem::take(slot);
-                    back.push((i, root, path));
+                    Ok((std::mem::take(slot), root, path))
+                });
+                match moved {
+                    Ok((v, root, path)) => {
+                        frame[i] = v;
+                        back.push((i, root, path));
+                    }
+                    Err(e) => {
+                        for (j, root, path) in back {
+                            if let Ok(slot) = place_mut(&mut f[root], &path) {
+                                *slot = std::mem::take(&mut frame[j]);
+                            }
+                        }
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -402,6 +425,7 @@ impl<'a> Interp<'a> {
                 }
                 self.enter(sp, |me| me.eval(&lb.body, &mut frame))
             }
+            FuncVal::Grad { f, wrt, with_value } => self.run_grad(f, *wrt, *with_value, args, sp),
         }
     }
 
@@ -439,6 +463,10 @@ impl<'a> Interp<'a> {
         let mut v = Vec::with_capacity(args.len());
         for a in args {
             v.push(self.val(a, f)?);
+        }
+        // M4: grad, the tangent space and the AI builtins (also strips tracked values elsewhere)
+        if let Some(r) = self.diff_builtin(b, &mut v, sp)? {
+            return Ok(r);
         }
         if let Some(r) = self.tensor_builtin(b, &v, sp)? {
             return Ok(r);
@@ -594,8 +622,10 @@ impl<'a> Interp<'a> {
             Value::Func(fv) => match &**fv {
                 FuncVal::User(id) => format!("<fn {}>", self.ck.sigs[*id as usize].name),
                 FuncVal::Closure { .. } => "<closure>".into(),
+                FuncVal::Grad { with_value, .. } => if *with_value { "<value_and_grad>" } else { "<grad>" }.into(),
             },
             Value::Tensor(t) => crate::tensor::describe(t, |a| self.ck.axes[a as usize].name.clone()),
+            Value::Node(_) => self.display(&self.fwd(v), top),
         }
     }
 }

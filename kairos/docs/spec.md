@@ -14,7 +14,8 @@
   - erros de eixo saem na compilação;
   - o momentum escrito em Kairós sobre os dados reais da B3 reproduz **bit a bit** o resultado do laboratório em Rust (`tests/b3_bridge.rs`).
 - **M3 (tipos temporais) pronto:** usar informação do futuro numa decisão é erro de compilação (§6.1). A versão do momentum que olha o mês corrente não compila.
-- As garantias de holdout e `grad` chegam nos marcos M4–M5 (§13).
+- **M4 (diferenciação nativa + motor de IA) pronto:** `grad` reverso sobre o caminho executado, espaço tangente (aritmética de structs), funções genéricas, regras suaves e um MLP com Adam escritos em Kairós que aprende (§8.1).
+- A garantia de holdout chega no M5 (§13).
 
 ## 1. Por que mais uma linguagem
 
@@ -369,6 +370,53 @@ fn monthly_tax(sales: f64, result: f64, carried_loss: f64) -> f64 {
 
 A escala pode cair durante o treino (recozimento). O compilador avisa quando uma regra discreta sem `smooth` está no caminho de um `grad`.
 
+### 8.1 O que o M4 implementa (v0.4.0)
+
+**`grad` reverso, sobre o caminho executado** (`src/autodiff.rs`)
+- `grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)`: `f` devolve `f64` (uma perda), e o resultado é uma função com os mesmos parâmetros que devolve o gradiente (e o valor).
+- Durante a chamada, os `f64` e tensores de `f64` do argumento viram valores rastreados numa fita. `if`, laços, chamadas e lambdas simplesmente rodam, e a fita é percorrida de trás pra frente a partir da perda.
+- Derivadas implementadas:
+  - `+ − × ÷ ^` e negação, com broadcasting por nome de eixo (o gradiente soma sobre os eixos repetidos);
+  - `exp`, `ln`, `sqrt`, `abs`, `tanh`, `sigmoid`, `relu`, `softplus`, `fill_nan`;
+  - reduções `sum`, `mean`, `prod`, `max`, `min`, `nan_sum`, `nan_mean`;
+  - seleção `x[month: i]`, atribuição em fatia `x[month: i] = v`, `where`, `max`/`min` de dois valores;
+  - `contract`, cujos gradientes também são contrações;
+  - `tensor([...])` e `to_list`.
+- O que não é diferenciável (contagens, ranks, arredondamentos, comparações) entra como constante.
+- `grad` dentro de `grad` ainda não existe (R0401).
+
+**Tipos diferenciáveis:** `f64`, tensores de `f64`, e structs, tuplas e listas deles. O gradiente tem a mesma forma do parâmetro. Fora disso é E0402; uma função que não devolve `f64` dá E0401.
+
+**Espaço tangente:**
+- `+ − × ÷` funcionam campo a campo entre dois valores do mesmo tipo, ou entre um deles e um `f64`: `p - 0.01 * g`.
+- `sqrt`, `exp`, `ln`, `abs`, as ativações e `zeros_like` também valem para structs.
+
+**Funções genéricas:** `fn adam_step[P](inout p: P, g: P, ...)`.
+- Cada parâmetro de tipo representa um tipo diferenciável.
+- Em cada chamada ele é instanciado, e o tipo concreto é conferido (E0402).
+
+**Regras suaves:**
+- `smooth_max(x, y, scale: s)` e `smooth_min` viram softplus dentro do `grad`;
+- `smooth_step(x, scale: s)`, o degrau, vira sigmoide dentro do `grad`;
+- fora do `grad` valem as regras exatas.
+
+**Aleatoriedade reprodutível:** `randn(seed: k, feature: 4, hidden: 16)` usa SplitMix64, xoshiro256** e Box-Muller, todos em Rust puro, e dá os mesmos números em qualquer sistema.
+
+**Motor de IA escrito em Kairós** (`std/prelude.krs`):
+- eixos `sample`, `feature`, `hidden`, `output`;
+- `Mlp`, `mlp_init`, `mlp`, `mse`;
+- `sgd_step[P]` e `adam_step[P]`, genéricos.
+
+**Aceitação**
+- `tests/programs/grad.krs`: os gradientes conferem com diferenças finitas (diferença de até 10⁻¹⁰).
+- `tests/programs/mlp_learns.krs`: um MLP de 16 unidades aprende `y = x³ − x`. A perda vai de 0,566 para 0,00017 em 1.500 passos de Adam, conferida até o último bit em todos os sistemas da CI.
+
+**Ainda não:**
+- `if … smooth` como sintaxe;
+- ordenação e `top_k` diferenciáveis;
+- segunda derivada;
+- gradiente através do simulador `b3.evaluate`. Este último é o objetivo do M6.
+
 ## 9. Eficiência
 
 **Pipeline:**
@@ -468,7 +516,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M1 | léxico, sintaxe, tipos, interpretador, REPL, `kairos run/check/repl`, biblioteca padrão em Kairós | ✅ 18 testes dourados (funcionalidade, erros de compilação e de execução) |
 | M2 | tensores com eixos nomeados + ponte com os dados da B3 | ✅ erros de eixo na compilação (E0200–E0202); o momentum em Kairós (`examples/momentum.krs`) reproduz **bit a bit** os 9 números do `quant-b3` (CAGR, vol, Sharpe, maxDD, beta, alpha, t, giro, custo) |
 | M3 | tipos temporais | ✅ o momentum continua idêntico ao `quant-b3` e a versão que olha `ret[month: m]` (o futuro) **não compila** (E0301); 14 testes de vazamento: `if`, `continue`, laços, estatística do histórico inteiro, funções anotadas, escolha por backtest |
-| M4 | `grad` nativo + `smooth` + motor de IA em Kairós (Dense, Attention, Adam) | gradiente confere com diferença finita; MLP converge |
+| M4 | `grad` nativo + `smooth` + motor de IA em Kairós (MLP, MSE, SGD, Adam) | ✅ gradiente confere com diferença finita (até 10⁻¹⁰); o MLP escrito em Kairós aprende `y = x³ − x` (perda 0,566 → 0,00017), com os mesmos bits em todos os sistemas |
 | M5 | holdout de uso único + protocolo + registro e DSR automáticos | 2º acesso = erro; tentativas no registro |
 | M6 | primeiro modelo inédito (carteira com IR suave) | protocolo antes; simulador real; DSR; paper trading |
 | M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ≤ 1,2× Rust nos benchmarks numéricos |

@@ -16,20 +16,20 @@ O repositório tem duas partes que trabalham juntas:
 
 1. **Tipos temporais** (M3, pronto). Usar dado do futuro numa decisão é erro de compilação: o compilador sabe quando cada valor fica conhecido.
 2. **Holdout de uso único** (M5). Os dados de validação só podem ser abertos uma vez, e cada avaliação entra sozinha no registro de tentativas.
-3. **Diferenciação nativa** (M4), inclusive através de regras discretas como IR, isenção e custos, via relaxações declaradas.
+3. **Diferenciação nativa** (M4, pronto). `grad` é parte da linguagem, inclusive através de regras discretas, via relaxações declaradas (`smooth_max`, `smooth_step`). O motor de IA (MLP, Adam) é escrito em Kairós.
 4. **Tensores com eixos nomeados** (M2, pronto). Misturar eixos é erro de compilação.
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.3.0 (M3)
+## Estado: v0.4.0 (M4)
 
 | marco | entrega | estado |
 |---|---|---|
 | M1 | núcleo: tipos, inferência, `match`, closures, `inout`, interpretador, REPL | ✅ |
 | M2 | tensores com eixos nomeados + módulo `b3` sobre os dados reais | ✅ |
 | M3 | tipos temporais: usar dado do futuro numa decisão não compila | ✅ |
-| M4 | `grad` nativo + motor de IA escrito em Kairós | próximo |
-| M5 | holdout de uso único + registro de testes e DSR automáticos | planejado |
+| M4 | `grad` nativo + motor de IA escrito em Kairós (MLP, Adam genérico) | ✅ |
+| M5 | holdout de uso único + registro de testes e DSR automáticos | próximo |
 | M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR) | planejado |
 | M7 | back-end nativo (Cranelift) | planejado |
 

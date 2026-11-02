@@ -2,6 +2,46 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.4.0 — M4: diferenciação nativa e o motor de IA em Kairós
+
+**`grad` faz parte da linguagem, e uma rede neural escrita em Kairós aprende.**
+
+```krs
+var p = mlp_init(7, 1, 16, 1)
+var m = zeros_like(p)
+var v = zeros_like(p)
+for t in 1..=1500 {
+    adam_step(inout p, grad(loss)(p, x, y), inout m, inout v, t, 0.02)
+}
+```
+
+- **`grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)`:** diferenciação reversa sobre o caminho executado, com uma fita, para escalares, tensores, structs, tuplas e listas.
+  - Cobre aritmética com broadcasting por eixo, `exp`, `ln`, `sqrt`, ativações, reduções, seleção e atribuição em fatias, `where` e `contract`.
+  - Confere com diferenças finitas até 10⁻¹⁰.
+- **Espaço tangente:** `p - 0.01 * g` funciona com `p` sendo uma struct; `sqrt`, `zeros_like` e as ativações também.
+- **Funções genéricas:** `fn adam_step[P](...)` vale para quaisquer parâmetros diferenciáveis.
+- **Funções novas:**
+  - `tanh`, `sigmoid`, `relu`, `softplus`;
+  - `randn(seed:, eixos...)`, reprodutível em qualquer sistema;
+  - `smooth_max`, `smooth_min` e `smooth_step`: regras exatas fora do `grad`, suaves dentro.
+- **Motor de IA escrito em Kairós** (`std/prelude.krs`):
+  - `Mlp`, `mlp_init` e `mlp`;
+  - `mse`;
+  - `sgd_step` e `adam_step`.
+- **Aceitação:**
+  - `tests/programs/mlp_learns.krs`: o MLP aprende `y = x³ − x`, com perda de 0,566 para 0,00017;
+  - o valor final da perda é conferido até o último bit, igual em todos os sistemas e arquiteturas da CI.
+- **Novos erros:**
+
+  | código | situação |
+  |---|---|
+  | E0401 | a função diferenciada não devolve `f64` |
+  | E0402 | o tipo não é diferenciável |
+  | R0401 | `grad` dentro de `grad` |
+
+- **Correção:** em `f(inout p, g(p))`, os argumentos por valor agora são avaliados antes de `p` ser movido para a chamada.
+- **Exemplo:** `examples/mlp.krs`.
+
 ## 0.3.0 — M3: tipos temporais
 
 **Usar informação do futuro numa decisão é erro de compilação.** É a garantia nº 1 da linguagem: a causa mais comum de alpha falso deixa de compilar.

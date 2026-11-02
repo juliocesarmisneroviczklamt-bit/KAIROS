@@ -156,7 +156,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.kairos",
-      "match": "\\b(print|len|push|pop|sort|reverse|contains|map|filter|sum|min|max|minimum|maximum|abs|sqrt|exp|ln|floor|ceil|round|float|int|str|assert|mean|prod|nan_sum|nan_mean|nan_prod|nan_count|count|is_nan|fill_nan|where|size|zeros|ones|full|zeros_like|full_like|tensor|to_list|rank|top_k|bottom_k|contract|observed|variance|std_dev|product|compound|wealth|max_drawdown|sharpe)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|push|pop|sort|reverse|contains|map|filter|sum|min|max|minimum|maximum|abs|sqrt|exp|ln|floor|ceil|round|float|int|str|assert|mean|prod|nan_sum|nan_mean|nan_prod|nan_count|count|is_nan|fill_nan|where|size|zeros|ones|full|zeros_like|full_like|tensor|to_list|rank|top_k|bottom_k|contract|observed|grad|value_and_grad|tanh|sigmoid|relu|softplus|randn|smooth_max|smooth_min|smooth_step|variance|std_dev|product|compound|wealth|max_drawdown|sharpe|mlp|mlp_init|mse|sgd_step|adam_step)\\b(?=\\s*\\()"
     },
     "constants": {
       "patterns": [

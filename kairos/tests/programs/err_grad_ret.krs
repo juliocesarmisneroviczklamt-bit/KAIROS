@@ -1,0 +1,2 @@
+// `grad` needs a function that returns f64 (a loss).
+print(grad(|x: f64| x > 0.0)(1.0))   // error: E0401

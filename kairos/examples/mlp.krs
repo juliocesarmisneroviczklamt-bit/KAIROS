@@ -1,0 +1,30 @@
+// A neural network learns y = x³ - x. Everything here is Kairós: the network (`mlp`), the loss
+// (`mse`), the optimizer (`adam_step`, generic over the parameters) and the gradient (`grad`).
+let n = 64
+var xs = []
+var ys = []
+for i in 0..n {
+    let x = -1.5 + 3.0 * float(i) / float(n - 1)
+    xs.push(x)
+    ys.push(x * x * x - x)
+}
+// one input feature and one output, `n` samples
+let x = zeros(sample: n, feature: 1) + tensor(xs, sample)
+let y = zeros(sample: n, output: 1) + tensor(ys, sample)
+
+fn loss(p: Mlp, x: Tensor[sample, feature; f64], y: Tensor[sample, output; f64]) -> f64 {
+    mse(mlp(p, x), y)
+}
+
+var p = mlp_init(7, 1, 16, 1)
+var m = zeros_like(p)
+var v = zeros_like(p)
+let before = loss(p, x, y)
+for t in 1..=1500 {
+    let g = grad(loss)(p, x, y)
+    adam_step(inout p, g, inout m, inout v, t, 0.02)
+}
+let after = loss(p, x, y)
+print("loss before", before)
+print("loss after", after)
+print("learned", after < 0.001)

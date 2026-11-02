@@ -114,6 +114,9 @@ impl Interp<'_> {
     pub(super) fn tensor_index(&mut self, x: &HExpr, sels: &[(u32, HSel)], f: &mut Vec<Value>, sp: Span) -> R<Value> {
         let v = self.eval(x, f)?;
         let sels = self.eval_sels(sels, f, sp)?;
+        if matches!(v, Value::Node(_)) {
+            return self.select_diff(&v, &sels, sp);
+        }
         let t = tensor_of(&v);
         let r = tensor::select(t, &sels).map_err(|e| self.terr(e, sp))?;
         Ok(wrap(r))
@@ -134,6 +137,24 @@ impl Interp<'_> {
         let sels = self.eval_sels(sels, f, sp)?;
         let (root, path) = self.resolve_place(p, f)?;
         let slot = place_mut(&mut f[root], &path)?;
+        if matches!(slot, Value::Node(_)) || matches!(rhs, Value::Node(_)) {
+            // inside `grad`: the assignment becomes a node of the tape
+            let old = slot.clone();
+            let rhs = match op {
+                None => rhs,
+                Some(bop) => {
+                    let cur = if matches!(old, Value::Node(_)) {
+                        self.select_diff(&old, &sels, sp)?
+                    } else {
+                        wrap(tensor::select(tensor_of(&old), &sels).map_err(|e| self.terr(e, sp))?)
+                    };
+                    self.bin(bop, cur, rhs, sp)?
+                }
+            };
+            let new = self.assign_diff(&old, &sels, &rhs, sp)?;
+            *place_mut(&mut f[root], &path)? = new;
+            return Ok(Value::Unit);
+        }
         let Value::Tensor(t) = slot else { unreachable!("tensor assignment to a non-tensor") };
         let rhs = match op {
             None => rhs,
@@ -148,6 +169,13 @@ impl Interp<'_> {
 
     /// Binary operator: scalars as in M1, element-wise (aligned by axis name) with tensors.
     pub(super) fn bin(&self, op: BinOp, a: Value, b: Value, sp: Span) -> R<Value> {
+        let plain = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Str(_) | Value::Tensor(_) | Value::Unit);
+        if !plain(&a) || !plain(&b) {
+            // tracked values (grad) and structs/tuples of floats (the tangent space)
+            if let Some(r) = self.bin_diff(op, a.clone(), b.clone(), sp)? {
+                return Ok(r);
+            }
+        }
         if !is_tensor(&a) && !is_tensor(&b) {
             return binop(op, a, b, sp);
         }
@@ -385,6 +413,8 @@ impl Interp<'_> {
 
     /// `b3.f(...)`: data and the realistic simulator of the quant-b3 lab.
     pub(super) fn host_call(&mut self, hf: HostFn, v: Vec<Value>, sp: Span) -> R<Value> {
+        // the simulator has no gradient (yet): it sees plain values
+        let v: Vec<Value> = v.iter().map(|x| self.deep_fwd(x)).collect();
         let host = self.host;
         let herr = |e: HostErr| {
             let mut d = Diag::new(e.code, sp, e.msg);

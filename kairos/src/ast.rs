@@ -22,6 +22,8 @@ pub struct AxisDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: String,
+    /// `fn f[P](...)`: type parameters, each standing for a differentiable type
+    pub type_params: Vec<(String, Span)>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     /// `-> T @ end(e)`: the result may only use what is known at the end of month `e`

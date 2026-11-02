@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.3.0**, com o M1 (núcleo), o M2 (tensores com eixos nomeados + dados da B3) e o M3 (tipos temporais) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.4.0**, com o M1 (núcleo), o M2 (tensores + dados da B3), o M3 (tipos temporais) e o M4 (diferenciação nativa + motor de IA em Kairós) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
 ```text
 cargo build --release -p kairos              # gera target/release/kairos (kairos.exe no Windows)
@@ -62,13 +62,18 @@ cargo test -p kairos                         # testes dourados + teste de aceita
 - **Até isto não compila:** escolher a estratégia pelo resultado do backtest e avaliar a escolha no mesmo histórico.
 - **Testes:** 14 casos de vazamento em [`tests/temporal.rs`](tests/temporal.rs). A versão do momentum com `m - 12 ..= m` dá E0301.
 
-A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs), com `variance`, `std_dev`, `compound`, `wealth`, `max_drawdown`, `sharpe` e a struct `Evaluation`.
+**M4 (diferenciação nativa + motor de IA)**
+- `grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)`: diferenciação reversa sobre o caminho executado, para escalares, tensores, structs, tuplas e listas. O gradiente confere com diferenças finitas até 10⁻¹⁰.
+- Espaço tangente: `p - 0.01 * g` funciona com structs, e funções genéricas como `fn adam_step[P](...)` valem para quaisquer parâmetros.
+- `tanh`, `sigmoid`, `relu`, `softplus`, `randn(seed:, ...)` reprodutível, e regras suaves (`smooth_max`, `smooth_step`) que são exatas fora do `grad` e suaves dentro.
+- O motor de IA é escrito em Kairós: `Mlp`, `mse`, `sgd_step`, `adam_step` ([`std/prelude.krs`](std/prelude.krs)). Em [`examples/mlp.krs`](examples/mlp.krs) uma rede aprende `y = x³ − x` (perda 0,566 → 0,00017) em 0,14 s.
+
+A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs), com `variance`, `std_dev`, `compound`, `wealth`, `max_drawdown`, `sharpe`, a struct `Evaluation` e o motor de IA.
 
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M4 | `grad` nativo + `smooth` + motor de IA em Kairós |
 | M5 | holdout de uso único + registro de testes |
 | M6 | primeiro modelo inédito |
 | M7 | back-end nativo (Cranelift); candidato: pesos ternários `t3` |

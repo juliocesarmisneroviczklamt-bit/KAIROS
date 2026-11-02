@@ -70,3 +70,56 @@ struct Evaluation {
     turnover: f64,     // traded value per year, as a fraction of wealth (buys + sells)
     cost_bps: f64,     // average cost paid per traded real, in basis points
 }
+
+// ------------------------------------------------------------------ AI engine (M4)
+// Written in Kairós itself: `grad` differentiates any of it, and the optimizers are generic over
+// the parameters (any struct/tuple of f64 and f64 tensors: the tangent space).
+
+axis sample      // rows of a data set
+axis feature     // inputs
+axis hidden      // hidden units
+axis output      // outputs
+
+// Multilayer perceptron with one hidden layer of `tanh` units.
+struct Mlp {
+    w1: Tensor[feature, hidden; f64],
+    b1: Tensor[hidden; f64],
+    w2: Tensor[hidden, output; f64],
+    b2: Tensor[output; f64],
+}
+
+// Reproducible initialization (Xavier/Glorot scale for tanh).
+fn mlp_init(seed: i64, inputs: i64, width: i64, outputs: i64) -> Mlp {
+    Mlp {
+        w1: randn(seed: seed, feature: inputs, hidden: width) * sqrt(1.0 / float(inputs)),
+        b1: zeros(hidden: width),
+        w2: randn(seed: seed + 1, hidden: width, output: outputs) * sqrt(1.0 / float(width)),
+        b2: zeros(output: outputs),
+    }
+}
+
+fn mlp(p: Mlp, x: Tensor[sample, feature; f64]) -> Tensor[sample, output; f64] {
+    let h = tanh(contract(x, p.w1, over: feature) + p.b1)
+    contract(h, p.w2, over: hidden) + p.b2
+}
+
+// mean squared error
+fn mse(pred: Tensor[sample, output; f64], target: Tensor[sample, output; f64]) -> f64 {
+    mean((pred - target) ^ 2.0)
+}
+
+// One step of gradient descent, for any differentiable parameters.
+fn sgd_step[P](inout p: P, g: P, lr: f64) {
+    p = p - lr * g
+}
+
+// One step of Adam (Kingma & Ba, 2015). `m` and `v` start as `zeros_like(p)`; `t` counts from 1.
+fn adam_step[P](inout p: P, g: P, inout m: P, inout v: P, t: i64, lr: f64) {
+    let b1 = 0.9
+    let b2 = 0.999
+    m = b1 * m + (1.0 - b1) * g
+    v = b2 * v + (1.0 - b2) * (g * g)
+    let mh = m / (1.0 - b1 ^ float(t))
+    let vh = v / (1.0 - b2 ^ float(t))
+    p = p - lr * mh / (sqrt(vh) + 1e-8)
+}

@@ -1,0 +1,25 @@
+// M4 acceptance: a neural network written in Kairós learns y = x³ - x. The network (`mlp`), the
+// loss (`mse`), the optimizer (`adam_step`, generic) and `grad` are all Kairós. The math is the
+// same on every system, so the trained loss is checked to the last bit.
+let n = 64
+var xs = []
+var ys = []
+for i in 0..n {
+    let x = -1.5 + 3.0 * float(i) / float(n - 1)
+    xs.push(x)
+    ys.push(x * x * x - x)
+}
+let x = zeros(sample: n, feature: 1) + tensor(xs, sample)
+let y = zeros(sample: n, output: 1) + tensor(ys, sample)
+fn loss(p: Mlp, x: Tensor[sample, feature; f64], y: Tensor[sample, output; f64]) -> f64 {
+    mse(mlp(p, x), y)
+}
+var p = mlp_init(7, 1, 16, 1)
+var m = zeros_like(p)
+var v = zeros_like(p)
+print(loss(p, x, y))                 // out: 0.5655535704756606
+for t in 1..=1500 {
+    adam_step(inout p, grad(loss)(p, x, y), inout m, inout v, t, 0.02)
+}
+print(loss(p, x, y))                 // out: 0.00016948192924102
+print(loss(p, x, y) < 0.001)         // out: true

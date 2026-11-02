@@ -150,6 +150,17 @@ impl Parser {
     fn fn_decl(&mut self) -> KResult<FnDecl> {
         let start = self.expect(Tok::Fn, "`fn`")?;
         let (name, _) = self.ident("a function name")?;
+        // `fn adam[P](...)`: type parameters (differentiable types: the tangent space)
+        let mut type_params = Vec::new();
+        if self.eat(&Tok::LBracket) {
+            while *self.peek() != Tok::RBracket {
+                type_params.push(self.ident("a type parameter name")?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBracket, "`]`")?;
+        }
         self.expect(Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
@@ -184,7 +195,7 @@ impl Parser {
             None
         };
         let body = self.block()?;
-        Ok(FnDecl { name, params, ret, known_at, span: start.to(body.span), body })
+        Ok(FnDecl { name, type_params, params, ret, known_at, span: start.to(body.span), body })
     }
 
     fn axis_decl(&mut self) -> KResult<AxisDecl> {
