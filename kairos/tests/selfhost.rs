@@ -137,3 +137,50 @@ fn the_parser_in_kairos_is_the_rust_one() {
         }
     })
 }
+
+/// The checker written in Kairós (kairos/compiler/check.krs) registers what each file declares
+/// (structs, enums, axes, protocols, the functions' signatures, through its imports) as the Rust
+/// checker does, and fails with the same errors there. The bodies come in a later part: a file
+/// whose error is in a body is left out here.
+#[test]
+fn the_declarations_in_kairos_are_the_rust_ones() {
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        krs_files(root, &mut files);
+        if cfg!(target_family = "wasm") {
+            files.retain(|f| f.parent().and_then(|d| d.file_name()).is_some_and(|d| d == "parser" || d == "lexer"));
+        }
+        let mut args = vec![root.join("std").to_string_lossy().into_owned()];
+        args.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
+        let got = run_compiler("types.krs", args);
+        let mut sections: Vec<(String, String)> = Vec::new();
+        for l in got.lines() {
+            match l.strip_prefix("== ") {
+                Some(p) => sections.push((p.to_string(), String::new())),
+                None => {
+                    let s = &mut sections.last_mut().expect("a file").1;
+                    s.push_str(l);
+                    s.push('\n');
+                }
+            }
+        }
+        assert_eq!(sections.len(), files.len());
+        let (mut compared, mut errors) = (0, 0);
+        for (path, krs) in &sections {
+            let src = std::fs::read_to_string(path).unwrap();
+            let mut s = Session::new(Box::new(std::io::sink()));
+            s.mark_imported(path);
+            let rust = s.types_dump(path, &src);
+            if krs.starts_with("error") {
+                errors += 1;
+                assert_eq!(krs, &rust, "the checkers differ on {path}");
+            } else if !rust.starts_with("error") {
+                compared += 1;
+                assert_eq!(krs, &rust, "the declarations differ in {path}");
+            }
+        }
+        assert!(cfg!(target_family = "wasm") || compared > 80, "the repository's programs ({compared})");
+        println!("{compared} files with the same declarations, {errors} with the same errors");
+    })
+}

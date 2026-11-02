@@ -1,0 +1,21 @@
+// The names of the builtin functions (src/hir.rs BUILTINS), generated from it: a function of the
+// program cannot take one of them.
+
+fn builtin_names() -> List[str] {
+    [
+    "print", "len", "push", "pop", "sort", "reverse", "contains", "map", "filter", "sum", "min", "max",
+    "minimum", "maximum", "abs", "sqrt", "exp", "ln", "floor", "ceil", "round", "float", "int", "str",
+    "format_fixed", "substr", "split", "lines", "trim", "starts_with", "ends_with", "find", "replace",
+    "upper", "lower", "parse_int", "parse_float", "join", "codes", "from_codes", "read_text", "write_text",
+    "append_text", "file_exists", "list_dir", "make_dir", "env", "args", "today", "http_get", "download",
+    "read_lines", "bytes", "put_u8", "put_u32", "put_u64", "put_i64", "put_f64", "put_f32", "put_str",
+    "utf8_len", "get_u8", "get_u32", "get_u64", "get_i64", "get_f64", "get_f32", "get_str", "write_bytes",
+    "read_bytes", "bit_and", "bit_or", "bit_xor", "shl", "shr", "wrapping_add", "wrapping_mul", "to_hex",
+    "file_size", "file_date", "http_get_all", "is_alphabetic", "is_alphanumeric", "is_whitespace",
+    "is_uppercase", "keys", "values", "items", "get", "remove", "nan_quantile", "merge_days", "assert",
+    "mean", "prod", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "is_nan", "fill_nan", "where",
+    "size", "zeros", "ones", "full", "zeros_like", "full_like", "tensor", "to_list", "rank", "top_k",
+    "bottom_k", "contract", "observed", "grad", "value_and_grad", "tanh", "sigmoid", "relu", "softplus",
+    "randn", "smooth_max", "smooth_min", "smooth_step", "open_once", "and", "or",
+    ]
+}

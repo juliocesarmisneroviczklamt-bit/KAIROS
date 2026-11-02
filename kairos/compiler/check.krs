@@ -1,0 +1,706 @@
+// The type checker of Kairós, written in Kairós (M12). It is src/types.rs; this first part
+// registers what a program declares (structs, enums, axes, protocols, the signatures of its
+// functions, with their imports) with the same types and the same errors.
+import "parser.krs"
+import "builtins.krs"
+
+enum Ty {
+    TInt,
+    TFloat,
+    TBool,
+    TStr,
+    TUnit,
+    TNever,
+    TBytes,
+    THoldout,
+    TList(Ty),
+    TMap(Ty, Ty),
+    TTuple(List[Ty]),
+    TStruct(i64),
+    TEnum(i64),
+    TFn(List[Ty], Ty),
+    TVar(i64),
+    TParam(i64),
+    TTensor(List[i64], Ty),     // the axis ids, sorted
+}
+
+struct StructDef {
+    name: str,
+    fields: List[(str, Ty)],
+}
+
+struct EnumDef {
+    name: str,
+    variants: List[(str, List[Ty])],
+}
+
+struct AxisDef {
+    name: str,
+    temporal: str,      // "", "daily", "monthly"
+}
+
+struct ProtoDef {
+    name: str,
+    research_until: i64,
+    holdout_from: i64,
+    min_months: i64,
+    rule: str,
+}
+
+struct FnSig {
+    name: str,
+    params: List[(str, Ty, bool)],    // (name, type, inout)
+    ret: Ty,
+    type_params: List[i64],
+}
+
+struct Checker {
+    structs: List[StructDef],
+    struct_ids: Map[str, i64],
+    enums: List[EnumDef],
+    enum_ids: Map[str, i64],
+    axes: List[AxisDef],
+    axis_ids: Map[str, i64],
+    protocols: List[ProtoDef],
+    sigs: List[FnSig],
+    fn_ids: Map[str, i64],
+    // type variables: what each is bound to, and its kind (0 any, 1 number, 2 map key)
+    subst: List[Ty],
+    bound: List[bool],
+    kinds: List[i64],
+    generic_scope: Map[str, i64],
+    type_param_names: List[str],
+    builtins: Map[str, bool],
+    imported: Map[str, bool],
+    std_dir: str,
+    // the first error
+    failed: bool,
+    code: str,
+    elo: i64,
+    ehi: i64,
+    msg: str,
+    hint: str,
+}
+
+fn new_checker(std_dir: str) -> Checker {
+    var b: Map[str, bool] = [:]
+    for n in builtin_names() { b[n] = true }
+    let axes = [AxisDef { name: "month", temporal: "monthly" }, AxisDef { name: "day", temporal: "daily" }, AxisDef { name: "asset", temporal: "" }, AxisDef { name: "session", temporal: "" }]
+    var axis_ids: Map[str, i64] = [:]
+    for i in 0..len(axes) { axis_ids[axes[i].name] = i }
+    Checker {
+        structs: [], struct_ids: [:], enums: [], enum_ids: [:], axes: axes, axis_ids: axis_ids, protocols: [],
+        sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
+        builtins: b, imported: [:], std_dir: std_dir,
+        failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
+    }
+}
+
+fn ck_fail(inout ck: Checker, code: str, lo: i64, hi: i64, msg: str, hint: str) {
+    if ck.failed { return }
+    ck.failed = true
+    ck.code = code
+    ck.elo = lo
+    ck.ehi = hi
+    ck.msg = msg
+    ck.hint = hint
+}
+
+// ------------------------------------------------------------------ type variables
+
+fn fresh(inout ck: Checker, kind: i64) -> Ty {
+    let id = len(ck.subst)
+    ck.subst.push(Ty.TUnit)
+    ck.bound.push(false)
+    ck.kinds.push(kind)
+    Ty.TVar(id)
+}
+
+fn resolve(ck: Checker, t: Ty) -> Ty {
+    var cur = t
+    while true {
+        match cur {
+            TVar(v) => {
+                if not ck.bound[v] { return cur }
+                cur = ck.subst[v]
+            },
+            _ => return cur,
+        }
+    }
+    cur
+}
+
+fn occurs(ck: Checker, v: i64, t: Ty) -> bool {
+    match resolve(ck, t) {
+        TVar(w) => w == v,
+        TList(x) => occurs(ck, v, x),
+        TMap(k, x) => occurs(ck, v, k) or occurs(ck, v, x),
+        TTuple(xs) => {
+            for x in xs {
+                if occurs(ck, v, x) { return true }
+            }
+            false
+        },
+        TFn(ps, r) => {
+            for x in ps {
+                if occurs(ck, v, x) { return true }
+            }
+            occurs(ck, v, r)
+        },
+        TTensor(a, e) => occurs(ck, v, e),
+        _ => false,
+    }
+}
+
+fn bind(inout ck: Checker, v: i64, t: Ty) -> bool {
+    match t {
+        TVar(w) => {
+            let kv = ck.kinds[v]
+            let kw = ck.kinds[w]
+            ck.subst[v] = Ty.TVar(w)
+            ck.bound[v] = true
+            if kv == 0 {
+            } else if kw == 0 {
+                ck.kinds[w] = kv
+            } else if kv != kw {
+                // a number that is also a map key: an integer
+                ck.subst[w] = Ty.TInt
+                ck.bound[w] = true
+            }
+            return true
+        },
+        _ => {},
+    }
+    let is_int = t == Ty.TInt
+    if ck.kinds[v] == 1 and not (is_int or t == Ty.TFloat) { return false }
+    if ck.kinds[v] == 2 and not (is_int or t == Ty.TStr) { return false }
+    if occurs(ck, v, t) { return false }
+    ck.subst[v] = t
+    ck.bound[v] = true
+    true
+}
+
+fn unify(inout ck: Checker, a0: Ty, b0: Ty) -> bool {
+    let a = resolve(ck, a0)
+    let b = resolve(ck, b0)
+    if a == Ty.TNever or b == Ty.TNever { return true }
+    match a {
+        TVar(x) => {
+            match b {
+                TVar(y) => {
+                    if x == y { return true }
+                },
+                _ => {},
+            }
+            return bind(inout ck, x, b)
+        },
+        _ => {},
+    }
+    match b {
+        TVar(y) => return bind(inout ck, y, a),
+        _ => {},
+    }
+    match a {
+        TList(p) => match b {
+            TList(q) => unify(inout ck, p, q),
+            _ => false,
+        },
+        TMap(k1, v1) => match b {
+            TMap(k2, v2) => unify(inout ck, k1, k2) and unify(inout ck, v1, v2),
+            _ => false,
+        },
+        TTuple(p) => match b {
+            TTuple(q) => {
+                if len(p) != len(q) { return false }
+                for i in 0..len(p) {
+                    if not unify(inout ck, p[i], q[i]) { return false }
+                }
+                true
+            },
+            _ => false,
+        },
+        TFn(pa, ra) => match b {
+            TFn(pb, rb) => {
+                if len(pa) != len(pb) { return false }
+                for i in 0..len(pa) {
+                    if not unify(inout ck, pa[i], pb[i]) { return false }
+                }
+                unify(inout ck, ra, rb)
+            },
+            _ => false,
+        },
+        TTensor(xa, ea) => match b {
+            TTensor(xb, eb) => xa == xb and unify(inout ck, ea, eb),
+            _ => false,
+        },
+        _ => a == b,
+    }
+}
+
+fn show(ck: Checker, t0: Ty) -> str {
+    let t = resolve(ck, t0)
+    match t {
+        TInt => "i64",
+        TFloat => "f64",
+        TBool => "bool",
+        TStr => "str",
+        TUnit => "()",
+        TNever => "!",
+        TBytes => "Bytes",
+        THoldout => "Holdout",
+        TList(x) => "List[" + show(ck, x) + "]",
+        TMap(k, x) => "Map[" + show(ck, k) + ", " + show(ck, x) + "]",
+        TTuple(xs) => {
+            var parts = []
+            for x in xs { parts.push(show(ck, x)) }
+            "(" + join(parts, ", ") + ")"
+        },
+        TStruct(i) => ck.structs[i].name,
+        TEnum(i) => ck.enums[i].name,
+        TFn(ps, r) => {
+            var parts = []
+            for x in ps { parts.push(show(ck, x)) }
+            "fn(" + join(parts, ", ") + ") -> " + show(ck, r)
+        },
+        TParam(p) => if p < len(ck.type_param_names) { ck.type_param_names[p] } else { "T" + str(p) },
+        TTensor(axes, e) => {
+            var names = []
+            for a in axes { names.push(ck.axes[a].name) }
+            "Tensor[" + join(names, ", ") + "; " + show(ck, e) + "]"
+        },
+        TVar(v) => if ck.kinds[v] == 1 { "{integer}" } else { "_" },
+    }
+}
+
+// ------------------------------------------------------------------ types written in the program
+
+fn sorted_ids(xs: List[i64]) -> List[i64] {
+    var s = xs
+    s.sort()
+    s
+}
+
+fn resolve_type(inout ck: Checker, te: Node) -> Ty {
+    if ck.failed { return Ty.TUnit }
+    if te.kind == "ty" {
+        let name = te.text
+        let n = len(te.kids)
+        let arity_msg = "`" + name + "` takes "
+        var want = 0
+        if name == "List" { want = 1 } else if name == "Map" { want = 2 }
+        let known = contains(["i64", "f64", "bool", "str", "List", "Map", "Holdout", "Bytes"], name)
+        if known and n != want {
+            ck_fail(inout ck, "E0101", te.lo, te.hi, arity_msg + str(want) + " type argument(s)", "")
+            return Ty.TUnit
+        }
+        if name == "i64" { return Ty.TInt }
+        if name == "f64" { return Ty.TFloat }
+        if name == "bool" { return Ty.TBool }
+        if name == "str" { return Ty.TStr }
+        if name == "Holdout" { return Ty.THoldout }
+        if name == "Bytes" { return Ty.TBytes }
+        if name == "List" {
+            let e = resolve_type(inout ck, te.kids[0])
+            return Ty.TList(e)
+        }
+        if name == "Map" {
+            let k = resolve_type(inout ck, te.kids[0])
+            if ck.failed { return Ty.TUnit }
+            if not (k == Ty.TInt or k == Ty.TStr) {
+                ck_fail(inout ck, "E0101", te.kids[0].lo, te.kids[0].hi, "map keys must be `i64` or `str`, found `" + show(ck, k) + "`", "")
+                return Ty.TUnit
+            }
+            let v = resolve_type(inout ck, te.kids[1])
+            return Ty.TMap(k, v)
+        }
+        if name == "Tensor" {
+            ck_fail(inout ck, "E0101", te.lo, te.hi, "`Tensor` needs its axes and element type", "write it like `Tensor[month, asset; f64]`")
+            return Ty.TUnit
+        }
+        if contains(["f32", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "Money", "date", "Option", "Result", "Simd"], name) {
+            ck_fail(inout ck, "E0002", te.lo, te.hi, "type `" + name + "` is not available yet", "Kairós supports i64, f64, bool, str, List[T], Tensor[axes; f64|bool], tuples, structs, enums and fn types")
+            return Ty.TUnit
+        }
+        let arity0 = arity_msg + "0 type argument(s)"
+        if contains(ck.generic_scope, name) {
+            if n != 0 {
+                ck_fail(inout ck, "E0101", te.lo, te.hi, arity0, "")
+                return Ty.TUnit
+            }
+            return Ty.TParam(ck.generic_scope[name])
+        }
+        if contains(ck.struct_ids, name) {
+            if n != 0 {
+                ck_fail(inout ck, "E0101", te.lo, te.hi, arity0, "")
+                return Ty.TUnit
+            }
+            return Ty.TStruct(ck.struct_ids[name])
+        }
+        if contains(ck.enum_ids, name) {
+            if n != 0 {
+                ck_fail(inout ck, "E0101", te.lo, te.hi, arity0, "")
+                return Ty.TUnit
+            }
+            return Ty.TEnum(ck.enum_ids[name])
+        }
+        ck_fail(inout ck, "E0100", te.lo, te.hi, "unknown type `" + name + "`", "")
+        return Ty.TUnit
+    }
+    if te.kind == "tytuple" {
+        if len(te.kids) == 0 { return Ty.TUnit }
+        var ts = []
+        for k in te.kids {
+            ts.push(resolve_type(inout ck, k))
+            if ck.failed { return Ty.TUnit }
+        }
+        return Ty.TTuple(ts)
+    }
+    if te.kind == "tyfn" {
+        var ps = []
+        for k in te.kids[0].kids {
+            ps.push(resolve_type(inout ck, k))
+            if ck.failed { return Ty.TUnit }
+        }
+        let r = resolve_type(inout ck, te.kids[1])
+        return Ty.TFn(ps, r)
+    }
+    // a tensor
+    let axes = te.kids[0].kids
+    if len(axes) == 0 {
+        ck_fail(inout ck, "E0200", te.lo, te.hi, "a tensor type needs at least one axis", "e.g. `Tensor[asset; f64]`")
+        return Ty.TUnit
+    }
+    var ids = []
+    for a in axes {
+        let id = axis_id(inout ck, a.text, a.lo, a.hi)
+        if ck.failed { return Ty.TUnit }
+        if contains(ids, id) {
+            ck_fail(inout ck, "E0112", a.lo, a.hi, "axis `" + a.text + "` appears twice", "")
+            return Ty.TUnit
+        }
+        ids.push(id)
+    }
+    let elem = te.kids[1]
+    let e = resolve_type(inout ck, elem)
+    if ck.failed { return Ty.TUnit }
+    if not (e == Ty.TFloat or e == Ty.TBool) {
+        ck_fail(inout ck, "E0101", elem.lo, elem.hi, "tensor elements must be `f64` or `bool`, found `" + show(ck, e) + "`", "")
+        return Ty.TUnit
+    }
+    Ty.TTensor(sorted_ids(ids), e)
+}
+
+fn axis_id(inout ck: Checker, n: str, lo: i64, hi: i64) -> i64 {
+    if contains(ck.axis_ids, n) { return ck.axis_ids[n] }
+    ck_fail(inout ck, "E0200", lo, hi, "unknown axis `" + n + "`", "declare it with `axis " + n + "`; the built-in axes are `month`, `day` and `asset`")
+    -1
+}
+
+// ------------------------------------------------------------------ declarations
+
+fn ensure_new_name(inout ck: Checker, name: str, lo: i64, hi: i64, is_fn: bool) {
+    if contains(ck.struct_ids, name) or contains(ck.enum_ids, name) or contains(ck.fn_ids, name) {
+        ck_fail(inout ck, "E0112", lo, hi, "`" + name + "` is already defined", "")
+    } else if is_fn and contains(ck.builtins, name) {
+        ck_fail(inout ck, "E0112", lo, hi, "`" + name + "` is a builtin function and cannot be redefined", "")
+    }
+}
+
+fn temporal_words(t: str) -> str {
+    if t == "daily" { "`temporal(daily)`" } else if t == "monthly" { "`temporal(monthly)`" } else { "a plain axis" }
+}
+
+fn declare_axis(inout ck: Checker, a: Node) {
+    var temporal = ""
+    let tn = a.kids[0]
+    if tn.kind != "-" {
+        if tn.text != "daily" and tn.text != "monthly" {
+            ck_fail(inout ck, "E0001", tn.lo, tn.hi, "unknown frequency `" + tn.text + "`", "use `temporal(daily)` or `temporal(monthly)`")
+            return
+        }
+        temporal = tn.text
+    }
+    if contains(ck.axis_ids, a.text) {
+        let old = ck.axes[ck.axis_ids[a.text]].temporal
+        if old == temporal { return }
+        ck_fail(inout ck, "E0112", a.lo, a.hi, "axis `" + a.text + "` is already defined as " + temporal_words(old), "")
+        return
+    }
+    ck.axis_ids[a.text] = len(ck.axes)
+    ck.axes.push(AxisDef { name: a.text, temporal: temporal })
+}
+
+// "s(41 42)" -> "AB"
+fn unhex(t: str) -> str {
+    let inner = substr(t, 2, len(t) - 3)
+    var cs = []
+    for h in split(inner, " ") {
+        if h == "" { continue }
+        var v = 0
+        for c in codes(h) { v = v * 16 + (if c >= 97 { c - 87 } else { c - 48 }) }
+        cs.push(v)
+    }
+    from_codes(cs)
+}
+
+fn declare_protocol(inout ck: Checker, p: Node) {
+    // the text: s(name) until from min_months s(rule)
+    let name_end = find(p.text, ")")
+    let after = substr(p.text, name_end + 2, len(p.text))
+    let nums = split(after, " ")
+    let def = ProtoDef {
+        name: unhex(substr(p.text, 0, name_end + 1)),
+        research_until: parse_int(nums[0]),
+        holdout_from: parse_int(nums[1]),
+        min_months: parse_int(nums[2]),
+        rule: unhex(substr(after, len(nums[0]) + len(nums[1]) + len(nums[2]) + 3, len(after))),
+    }
+    for q in ck.protocols {
+        if q.name == def.name {
+            if q == def { return }
+            ck_fail(inout ck, "E0112", p.lo, p.hi, "protocol `" + def.name + "` is already defined with other terms", "changing a protocol after seeing results is exactly what protocols prevent: give the new one another name")
+            return
+        }
+    }
+    ck.protocols.push(def)
+}
+
+// Registers a batch of items' declarations (a file, after its imports).
+fn declare_items(inout ck: Checker, items: List[Node]) {
+    var new_structs = []
+    var new_enums = []
+    for it in items {
+        if ck.failed { return }
+        if it.kind == "struct" {
+            ensure_new_name(inout ck, it.text, it.lo, it.hi, false)
+            if ck.failed { return }
+            ck.struct_ids[it.text] = len(ck.structs)
+            new_structs.push((len(ck.structs), it))
+            ck.structs.push(StructDef { name: it.text, fields: [] })
+        } else if it.kind == "enum" {
+            ensure_new_name(inout ck, it.text, it.lo, it.hi, false)
+            if ck.failed { return }
+            ck.enum_ids[it.text] = len(ck.enums)
+            new_enums.push((len(ck.enums), it))
+            ck.enums.push(EnumDef { name: it.text, variants: [] })
+        } else if it.kind == "axis" {
+            declare_axis(inout ck, it)
+        } else if it.kind == "protocol" {
+            declare_protocol(inout ck, it)
+        }
+    }
+    if ck.failed { return }
+    for ns in new_structs {
+        var fields: List[(str, Ty)] = []
+        for f in ns.1.kids {
+            for g in fields {
+                if g.0 == f.text {
+                    ck_fail(inout ck, "E0112", f.kids[0].lo, f.kids[0].hi, "field `" + f.text + "` is declared twice", "")
+                    return
+                }
+            }
+            let t = resolve_type(inout ck, f.kids[0])
+            if ck.failed { return }
+            fields.push((f.text, t))
+        }
+        ck.structs[ns.0].fields = fields
+    }
+    for ne in new_enums {
+        var variants: List[(str, List[Ty])] = []
+        for v in ne.1.kids {
+            for w in variants {
+                if w.0 == v.text {
+                    ck_fail(inout ck, "E0112", ne.1.lo, ne.1.hi, "variant `" + v.text + "` is declared twice", "")
+                    return
+                }
+            }
+            var ts = []
+            for k in v.kids {
+                ts.push(resolve_type(inout ck, k))
+                if ck.failed { return }
+            }
+            variants.push((v.text, ts))
+        }
+        ck.enums[ne.0].variants = variants
+    }
+    for it in items {
+        if it.kind != "fn" { continue }
+        ensure_new_name(inout ck, it.text, it.lo, it.hi, true)
+        if ck.failed { return }
+        // `fn f[P](...)`: each type parameter is a differentiable type
+        var tps = []
+        ck.generic_scope = [:]
+        for tp in it.kids[0].kids {
+            if contains(ck.generic_scope, tp.text) {
+                ck_fail(inout ck, "E0112", tp.lo, tp.hi, "type parameter `" + tp.text + "` is declared twice", "")
+                return
+            }
+            let pid = len(ck.type_param_names)
+            ck.type_param_names.push(tp.text)
+            ck.generic_scope[tp.text] = pid
+            tps.push(pid)
+        }
+        var params: List[(str, Ty, bool)] = []
+        for pn in it.kids[1].kids {
+            let io = starts_with(pn.text, "inout ")
+            let pname = if io { substr(pn.text, 6, len(pn.text)) } else { pn.text }
+            for q in params {
+                if q.0 == pname {
+                    ck.generic_scope = [:]
+                    ck_fail(inout ck, "E0112", pn.lo, pn.hi, "parameter `" + pname + "` is declared twice", "")
+                    return
+                }
+            }
+            let t = resolve_type(inout ck, pn.kids[0])
+            if ck.failed {
+                ck.generic_scope = [:]
+                return
+            }
+            params.push((pname, t, io))
+        }
+        var ret = Ty.TUnit
+        if it.kids[2].kind != "-" {
+            ret = resolve_type(inout ck, it.kids[2])
+            if ck.failed {
+                ck.generic_scope = [:]
+                return
+            }
+        }
+        ck.generic_scope = [:]
+        ck.fn_ids[it.text] = len(ck.sigs)
+        ck.sigs.push(FnSig { name: it.text, params: params, ret: ret, type_params: tps })
+    }
+}
+
+// ------------------------------------------------------------------ files and imports
+
+fn dir_of(path: str) -> str {
+    let p = replace(path, from_codes([92]), "/")
+    var cut = -1
+    let cs = codes(p)
+    for i in 0..len(cs) {
+        if cs[i] == 47 { cut = i }
+    }
+    if cut < 0 { "" } else { substr(p, 0, cut) }
+}
+
+// a path written the same way however it was reached (`a/./b`, `a/x/../b`, backslashes)
+fn norm_path(path: str) -> str {
+    let p = replace(path, from_codes([92]), "/")
+    var out = []
+    for part in split(p, "/") {
+        if part == "." { continue }
+        if part == ".." and len(out) > 0 and out[len(out) - 1] != ".." and out[len(out) - 1] != "" {
+            let _ = out.pop()
+            continue
+        }
+        out.push(part)
+    }
+    join(out, "/")
+}
+
+fn join_path(dir: str, path: str) -> str {
+    if dir == "" { path } else { dir + "/" + path }
+}
+
+fn std_files() -> List[str] {
+    ["std/json.krs", "std/csv.krs", "std/dates.krs", "std/base64.krs", "std/stats.krs", "std/sim.krs"]
+}
+
+// The file an `import` means: (its path, the key it is known by), or ("", "") with the error set.
+fn resolve_import(inout ck: Checker, from: str, path: str, lo: i64, hi: i64) -> (str, str) {
+    for s in std_files() {
+        if s == path or substr(s, 0, len(s) - 4) == path {
+            return (join_path(ck.std_dir, substr(s, 4, len(s))), "<" + s + ">")
+        }
+    }
+    if starts_with(path, "std/") {
+        ck_fail(inout ck, "E0100", lo, hi, "there is no `" + path + "` in the standard library", "the standard library has " + join(std_files(), ", "))
+        return ("", "")
+    }
+    var cands = [join_path(dir_of(from), path), path]
+    let kp = env("KAIROS_PATH")
+    if kp != "" {
+        for d in split(kp, ";") { cands.push(join_path(d, path)) }
+    }
+    for c in cands {
+        if file_exists(c) and file_size(c) >= 0 { return (c, norm_path(c)) }
+    }
+    ck_fail(inout ck, "E0100", lo, hi, "cannot find `" + path + "` to import", "the path is relative to the importing file (or to a folder of KAIROS_PATH)")
+    ("", "")
+}
+
+// Checks a file: its imports first (each file once), then its own declarations.
+fn check_file(inout ck: Checker, name: str, src: str) {
+    let r = parse_program(src)
+    if not r.0 {
+        ck_fail(inout ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
+        return
+    }
+    var items = []
+    for it in r.1 {
+        if it.kind == "import" {
+            let rp = resolve_import(inout ck, name, unhex(it.text), it.lo, it.hi)
+            if ck.failed { return }
+            if contains(ck.imported, rp.1) { continue }
+            ck.imported[rp.1] = true
+            check_file(inout ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, read_text(rp.0))
+            if ck.failed { return }
+        } else {
+            items.push(it)
+        }
+    }
+    declare_items(inout ck, items)
+}
+
+// ------------------------------------------------------------------ the description
+
+fn mark(ck: Checker) -> List[i64] {
+    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs)]
+}
+
+fn hex_of(s: str) -> str {
+    hex_text(codes(s))
+}
+
+fn declarations_since(ck: Checker, m: List[i64]) -> List[str] {
+    var out = []
+    for i in m[0]..len(ck.structs) {
+        let s = ck.structs[i]
+        var fs = []
+        for f in s.fields { fs.push(f.0 + ": " + show(ck, f.1)) }
+        out.push("struct " + s.name + " { " + join(fs, ", ") + " }")
+    }
+    for i in m[1]..len(ck.enums) {
+        let e = ck.enums[i]
+        var vs = []
+        for v in e.variants {
+            if len(v.1) == 0 {
+                vs.push(v.0)
+            } else {
+                var ts = []
+                for t in v.1 { ts.push(show(ck, t)) }
+                vs.push(v.0 + "(" + join(ts, ", ") + ")")
+            }
+        }
+        out.push("enum " + e.name + " { " + join(vs, ", ") + " }")
+    }
+    for i in m[2]..len(ck.axes) {
+        let a = ck.axes[i]
+        out.push("axis " + a.name + (if a.temporal == "" { "" } else { ": temporal(" + a.temporal + ")" }))
+    }
+    for i in m[3]..len(ck.protocols) {
+        let p = ck.protocols[i]
+        out.push("protocol " + hex_of(p.name) + " " + str(p.research_until) + " " + str(p.holdout_from) + " " + str(p.min_months) + " " + hex_of(p.rule))
+    }
+    for i in m[4]..len(ck.sigs) {
+        let f = ck.sigs[i]
+        var tps = []
+        for p in f.type_params { tps.push(ck.type_param_names[p]) }
+        var ps = []
+        for p in f.params { ps.push((if p.2 { "inout " } else { "" }) + p.0 + ": " + show(ck, p.1)) }
+        let tp = if len(tps) == 0 { "" } else { "[" + join(tps, ", ") + "]" }
+        out.push("fn " + f.name + tp + "(" + join(ps, ", ") + ") -> " + show(ck, f.ret))
+    }
+    out
+}

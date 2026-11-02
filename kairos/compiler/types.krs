@@ -1,0 +1,23 @@
+// What files declare, by the checker written in Kairós (as `kairos types file.krs` prints it).
+//
+//   kairos run kairos/compiler/types.krs <std folder> file.krs [more.krs ...]
+import "check.krs"
+
+let std_dir = args()[0]
+var base = new_checker(std_dir)
+check_file(inout base, "<prelude>", read_text(std_dir + "/prelude.krs"))
+assert(not base.failed, "the prelude does not check: " + base.code + " " + base.msg)
+for k in 1..len(args()) {
+    let path = args()[k]
+    if len(args()) > 2 { print("== " + path) }
+    var ck = base
+    ck.imported[norm_path(path)] = true
+    let m = mark(ck)
+    check_file(inout ck, path, read_text(path))
+    if ck.failed {
+        print("error " + ck.code + " " + str(ck.elo) + " " + str(ck.ehi) + " " + ck.msg)
+        if ck.hint != "" { print("hint " + ck.hint) }
+    } else {
+        for l in declarations_since(ck, m) { print(l) }
+    }
+}

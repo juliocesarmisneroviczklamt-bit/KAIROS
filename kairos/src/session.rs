@@ -94,6 +94,24 @@ impl Session {
         self.front(name, src, false).map(|_| ())
     }
 
+    /// Checks a file and describes what it declared (its imports included), as `kairos types`
+    /// prints it; or its first error.
+    pub fn types_dump(&mut self, name: &str, src: &str) -> String {
+        let m = self.checker.mark();
+        match self.front(name, src, false) {
+            Ok(_) => self.checker.declarations_since(m),
+            Err(d) => {
+                let mut out = format!("error {} {} {} {}
+", d.code, d.span.lo, d.span.hi, d.msg);
+                if let Some(h) = &d.hint {
+                    out.push_str(&format!("hint {h}
+"));
+                }
+                out
+            }
+        }
+    }
+
     /// The file being run is not imported again (a library that imports it back is fine).
     pub fn mark_imported(&mut self, path: &str) {
         let p = PathBuf::from(path);

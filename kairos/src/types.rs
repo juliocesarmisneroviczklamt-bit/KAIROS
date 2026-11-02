@@ -263,6 +263,59 @@ impl Checker {
         self.main.n_slots
     }
 
+    /// What a check registered from (structs, enums, axes, protocols, functions) counts: the
+    /// declarations `since` a previous mark, as text (`kairos types`; M12 compares the checker
+    /// written in Kairós with this).
+    pub fn mark(&self) -> [usize; 5] {
+        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len()]
+    }
+
+    pub fn declarations_since(&self, m: [usize; 5]) -> String {
+        let mut out = String::new();
+        for s in &self.structs[m[0]..] {
+            let fs: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect();
+            out.push_str(&format!("struct {} {{ {} }}
+", s.name, fs.join(", ")));
+        }
+        for e in &self.enums[m[1]..] {
+            let vs: Vec<String> = e
+                .variants
+                .iter()
+                .map(|(n, ts)| if ts.is_empty() { n.clone() } else { format!("{n}({})", ts.iter().map(|t| self.show(t)).collect::<Vec<_>>().join(", ")) })
+                .collect();
+            out.push_str(&format!("enum {} {{ {} }}
+", e.name, vs.join(", ")));
+        }
+        for a in &self.axes[m[2]..] {
+            let t = match a.temporal {
+                None => "",
+                Some(Freq::Daily) => ": temporal(daily)",
+                Some(Freq::Monthly) => ": temporal(monthly)",
+            };
+            out.push_str(&format!("axis {}{t}
+", a.name));
+        }
+        for p in &self.protocols[m[3]..] {
+            out.push_str(&format!(
+                "protocol {} {} {} {} {}
+",
+                crate::ast::hex_text(&p.name),
+                p.research_until,
+                p.holdout_from,
+                p.min_months,
+                crate::ast::hex_text(&p.rule)
+            ));
+        }
+        for f in &self.sigs[m[4]..] {
+            let tps: Vec<&str> = f.type_params.iter().map(|p| self.type_param_names[*p as usize].as_str()).collect();
+            let ps: Vec<String> = f.params.iter().map(|(n, t, io)| format!("{}{n}: {}", if *io { "inout " } else { "" }, self.show(t))).collect();
+            let tp = if tps.is_empty() { String::new() } else { format!("[{}]", tps.join(", ")) };
+            out.push_str(&format!("fn {}{tp}({}) -> {}
+", f.name, ps.join(", "), self.show(&f.ret)));
+        }
+        out
+    }
+
     // ------------------------------------------------------------------ entry point
 
     /// Checks one batch of items (a file or one REPL input) and returns the new top-level
