@@ -1,14 +1,15 @@
 // The WebAssembly back end of Kairós (M13), written in Kairós: the checked HIR of a program
-// becomes a WebAssembly module that runs under WASI (wasmtime, node, a browser...). This first
-// part compiles integers, booleans, functions and control flow with the interpreter's
-// semantics: the same output, and the same runtime errors with the same messages (checked
-// arithmetic: R0006 overflow, R0002 division by zero, R0007 negative exponent; R0003
-// assertions). What it does not compile yet stops with the code W0001.
+// becomes a WebAssembly module that runs under WASI (wasmtime, node, a browser...). It compiles
+// integers, booleans, texts, functions and control flow with the interpreter's semantics: the
+// same output, and the same runtime errors with the same messages (checked arithmetic: R0006
+// overflow, R0002 division by zero, R0007 negative exponent; R0003 assertions). What it does
+// not compile yet stops with the code W0001.
 //
 // The module imports `fd_write` and `proc_exit` from WASI and exports `_start` and `memory`.
 // Memory: an iovec at 0, the byte count at 8, 32 bytes of scratch for numbers at 16, the
-// constant texts (the program's, and every runtime error message, rendered when compiling) from
-// 1024.
+// constant data from 1024 (the program's texts, and every runtime error message, rendered when
+// compiling), then the heap (global 0 is its next free byte). The functions of the runtime
+// (rt.krs, written in Kairós) are compiled with the program, as it uses them.
 import "wasm.krs"
 import "front.krs"
 
@@ -17,7 +18,9 @@ struct WGen {
     ck: Checker,
     srcs: List[str],                // the source of each file (for messages)
     fidx: Map[i64, i64],            // Kairós function -> WebAssembly function
+    order: List[i64],               // the Kairós functions to compile, in their order
     strs: Map[str, (i64, i64)],     // a constant text -> (address, byte length)
+    objs: Map[str, i64],            // a constant text -> the address of its object
     // the function being generated
     code: List[i64],
     ltypes: List[i64],              // the type of each local (the parameters first)
@@ -25,6 +28,7 @@ struct WGen {
     slot_local: List[i64],          // Kairós slot -> local (-1: no value)
     depth: i64,                     // blocks, loops and ifs open
     loops: List[(i64, i64)],        // the levels of a loop's exit and continue blocks
+    unchecked: bool,                // the runtime's own arithmetic is not checked
     failed: bool,
     msg: str,
     efile: i64,
@@ -53,8 +57,34 @@ fn f_print_i64() -> i64 {
     4
 }
 
-fn first_user_fn() -> i64 {
+fn f_alloc() -> i64 {
     5
+}
+
+fn f_print_str() -> i64 {
+    6
+}
+
+fn f_start() -> i64 {
+    7
+}
+
+fn first_user_fn() -> i64 {
+    8
+}
+
+// The function index of a Kairós function, which is compiled once its index is asked for.
+fn fn_index(inout g: WGen, id: i64) -> i64 {
+    if contains(g.fidx, id) { return g.fidx[id] }
+    let i = first_user_fn() + len(g.order)
+    g.fidx[id] = i
+    g.order.push(id)
+    i
+}
+
+// A function of the runtime (rt.krs), by name.
+fn rt_fn(inout g: WGen, name: str) -> i64 {
+    fn_index(inout g, g.ck.fn_ids[name])
 }
 
 fn wg_fail(inout g: WGen, e: H, what: str) {
@@ -145,6 +175,28 @@ fn emit_text(inout g: WGen, fd: i64, s: str) {
     call_f(inout g, f_write())
 }
 
+// A constant text as a value: the address of its object (the length, then the bytes), at a
+// multiple of 4.
+fn intern_obj(inout g: WGen, s: str) -> i64 {
+    if contains(g.objs, s) { return g.objs[s] }
+    while len(g.m.data) % 4 != 0 { g.m.data.push(0) }
+    let b = utf8_bytes(s)
+    let at = g.m.data_at + len(g.m.data)
+    let n = len(b)
+    g.m.data.push(bit_and(n, 255))
+    g.m.data.push(bit_and(shr(n, 8), 255))
+    g.m.data.push(bit_and(shr(n, 16), 255))
+    g.m.data.push(bit_and(shr(n, 24), 255))
+    append(inout g.m.data, b)
+    g.objs[s] = at
+    at
+}
+
+// A text's value from a literal `str s(...)`.
+fn lit_text(t: str) -> str {
+    unhex(substr(t, 4, len(t)))
+}
+
 // A diagnostic as `kairos` prints it (src/diag.rs `render`).
 fn render_diag(code: str, msg: str, hint: str, src: str, file: str, lo0: i64, hi0: i64) -> str {
     let cs = codes(src)
@@ -209,6 +261,7 @@ fn vt(t: Ty) -> i64 {
     match t {
         TInt => wt_i64(),
         TBool => wt_i32(),
+        TStr => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -240,6 +293,8 @@ fn gen(inout g: WGen, e: H) {
             i32c(inout g, 1)
         } else if e.text == "bool false" {
             i32c(inout g, 0)
+        } else if starts_with(e.text, "str ") {
+            i32c(inout g, intern_obj(inout g, lit_text(e.text)))
         } else if e.text != "unit" {
             wg_fail(inout g, e, "the literal `" + e.text + "`")
         }
@@ -368,7 +423,9 @@ fn gen(inout g: WGen, e: H) {
             if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
             gen(inout g, a.kids[0])
         }
-        call_f(inout g, g.fidx[e.n])
+        let name = g.ck.sigs[e.n].name
+        if starts_with(name, "wasm_") { return intrinsic(inout g, name, e) }
+        call_f(inout g, fn_index(inout g, e.n))
         return
     }
     if k == "builtin" { return builtin_w(inout g, e) }
@@ -377,6 +434,14 @@ fn gen(inout g: WGen, e: H) {
 
 // `x op y` on integers (both on the stack): the interpreter's checked arithmetic.
 fn arith(inout g: WGen, o: str, e: H) {
+    // the runtime's own arithmetic (addresses, lengths) cannot overflow
+    if g.unchecked and o != "^" {
+        if o == "+" { return op(inout g, 124) }
+        if o == "-" { return op(inout g, 125) }
+        if o == "*" { return op(inout g, 126) }
+        if o == "/" { return op(inout g, 127) }
+        if o == "%" { return op(inout g, 129) }
+    }
     let y = new_local(inout g, wt_i64())
     let x = new_local(inout g, wt_i64())
     lset(inout g, y)
@@ -548,6 +613,21 @@ fn binary_w(inout g: WGen, e: H) {
         if o == ">=" { return op(inout g, 89) }
         return arith(inout g, o, e)
     }
+    if a.t == Ty.TStr {
+        if o == "+" { return call_f(inout g, rt_fn(inout g, "rt_concat")) }
+        if o == "==" or o == "!=" {
+            call_f(inout g, rt_fn(inout g, "rt_str_eq"))
+            if o == "!=" { op(inout g, 69) }
+            return
+        }
+        // an ordering: the comparison of rt_str_cmp's -1, 0 or 1 with 0
+        call_f(inout g, rt_fn(inout g, "rt_str_cmp"))
+        i64c(inout g, 0)
+        if o == "<" { return op(inout g, 83) }
+        if o == ">" { return op(inout g, 85) }
+        if o == "<=" { return op(inout g, 87) }
+        return op(inout g, 89)
+    }
     if at == wt_i32() {
         if o == "==" { return op(inout g, 70) }
         if o == "!=" { return op(inout g, 71) }
@@ -611,6 +691,9 @@ fn pat_test(inout g: WGen, p: H, s: i64, st: i64) -> bool {
             op(inout g, 81)
         } else if p.text == "bool false" {
             op(inout g, 69)
+        } else if starts_with(p.text, "str ") {
+            i32c(inout g, intern_obj(inout g, lit_text(p.text)))
+            call_f(inout g, rt_fn(inout g, "rt_str_eq"))
         } else if p.text != "bool true" {
             wg_fail(inout g, p, "the pattern `" + p.text + "`")
         }
@@ -669,7 +752,10 @@ fn builtin_w(inout g: WGen, e: H) {
             let x = args[i].kids[0]
             let xt = vt(x.t)
             if x.kind == "lit" and starts_with(x.text, "str ") {
-                emit_text(inout g, 1, unhex(substr(x.text, 4, len(x.text))))
+                emit_text(inout g, 1, lit_text(x.text))
+            } else if x.t == Ty.TStr {
+                gen(inout g, x)
+                call_f(inout g, f_print_str())
             } else if xt == wt_i64() {
                 gen(inout g, x)
                 call_f(inout g, f_print_i64())
@@ -746,20 +832,80 @@ fn builtin_w(inout g: WGen, e: H) {
         return
     }
     if b == "int" and vt(args[0].kids[0].t) == wt_i64() { return gen(inout g, args[0].kids[0]) }
+    if b == "str" {
+        let x = args[0].kids[0]
+        gen(inout g, x)
+        if x.t == Ty.TInt { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
+        if x.t == Ty.TStr { return }
+        if x.t == Ty.TBool {
+            let t = intern_obj(inout g, "true")
+            let f = intern_obj(inout g, "false")
+            let c = new_local(inout g, wt_i32())
+            lset(inout g, c)
+            i32c(inout g, t)
+            i32c(inout g, f)
+            lget(inout g, c)
+            return op(inout g, 27)
+        }
+        if x.t == Ty.TUnit {
+            i32c(inout g, intern_obj(inout g, "()"))
+            return
+        }
+        return wg_fail(inout g, x, "`str` of values of type `" + show(g.ck, x.t) + "`")
+    }
+    if b == "len" and args[0].kids[0].t == Ty.TStr {
+        gen(inout g, args[0].kids[0])
+        return call_f(inout g, rt_fn(inout g, "rt_str_len"))
+    }
+    if b == "substr" {
+        for a in args { gen(inout g, a.kids[0]) }
+        return call_f(inout g, rt_fn(inout g, "rt_substr"))
+    }
+    if b == "bit_and" or b == "bit_or" or b == "bit_xor" {
+        gen(inout g, args[0].kids[0])
+        gen(inout g, args[1].kids[0])
+        return op(inout g, if b == "bit_and" { 131 } else if b == "bit_or" { 132 } else { 133 })
+    }
     wg_fail(inout g, e, "`" + b + "`")
 }
 
-// ------------------------------------------------------------------ functions and the module
-
-// The functions the top-level statements reach, in the order they are found.
-fn reach(ck: Checker, h: H, inout seen: Map[i64, bool], inout order: List[i64]) {
-    if h.kind == "call" and not contains(seen, h.n) {
-        seen[h.n] = true
-        order.push(h.n)
-        reach(ck, ck.fn_hir[h.n], inout seen, inout order)
+// The instructions behind the runtime's `wasm_*` functions (their arguments are on the stack).
+fn intrinsic(inout g: WGen, name: str, e: H) {
+    // the address (an i64 under the value) becomes an i32 for the memory instruction
+    if name == "wasm_store8" or name == "wasm_store32" {
+        let v = new_local(inout g, wt_i64())
+        lset(inout g, v)
+        op(inout g, 167)
+        lget(inout g, v)
+        if name == "wasm_store8" {
+            op_u(inout g, 60, 0)
+        } else {
+            op_u(inout g, 62, 2)
+        }
+        uleb(inout g.code, 0)
+        return
     }
-    for k in h.kids { reach(ck, k, inout seen, inout order) }
+    if name == "wasm_load8" or name == "wasm_load32" {
+        op(inout g, 167)
+        if name == "wasm_load8" {
+            op_u(inout g, 49, 0)
+        } else {
+            op_u(inout g, 53, 2)
+        }
+        uleb(inout g.code, 0)
+        return
+    }
+    if name == "wasm_alloc" {
+        op(inout g, 167)
+        call_f(inout g, f_alloc())
+        return op(inout g, 173)
+    }
+    if name == "wasm_str_addr" { return op(inout g, 173) }
+    if name == "wasm_str_at" { return op(inout g, 167) }
+    wg_fail(inout g, e, "the instruction `" + name + "`")
 }
+
+// ------------------------------------------------------------------ functions and the module
 
 // Sets up the locals of a frame: the slots' types, the first `np` of them parameters.
 fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
@@ -786,11 +932,12 @@ fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
     params
 }
 
-fn finish(inout g: WGen, np: i64, tidx: i64) {
+// The function just generated: its code ends, its locals follow its `np` parameters.
+fn finish(inout g: WGen, np: i64, tidx: i64) -> WFunc {
     op(inout g, 11)
     var locals: List[i64] = []
     for i in np..len(g.ltypes) { locals.push(g.ltypes[i]) }
-    g.m.funcs.push(WFunc { tidx: tidx, locals: locals, code: g.code })
+    WFunc { tidx: tidx, locals: locals, code: g.code }
 }
 
 fn gen_fn(inout g: WGen, id: i64) {
@@ -799,6 +946,7 @@ fn gen_fn(inout g: WGen, id: i64) {
     for p in sig.params {
         if p.2 { return wg_fail(inout g, body, "`inout` parameters") }
     }
+    g.unchecked = starts_with(sig.name, "rt_")
     let np = len(sig.params)
     let params = frame(inout g, g.ck.bodies[id], np, body)
     if g.failed { return }
@@ -811,7 +959,8 @@ fn gen_fn(inout g: WGen, id: i64) {
     if r < 0 { return wg_fail(inout g, body, "functions returning `" + show(g.ck, sig.ret) + "`") }
     let tidx = wtype(inout g.m, params, if r > 0 { [r] } else { [] })
     gen(inout g, body)
-    finish(inout g, wparams, tidx)
+    let f = finish(inout g, wparams, tidx)
+    g.m.funcs.push(f)
 }
 
 // The runtime's functions: write(fd, ptr, len), fail(ptr, len), print_i64(v).
@@ -906,39 +1055,81 @@ fn runtime_fns(inout g: WGen) {
     call_f(inout g, f_write())
     op(inout g, 11)
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i64t], []), locals: [i32t, i64t, i32t], code: g.code })
+    // alloc(n): the heap's next free byte (global 0), then rounded up to 8; the memory grows a
+    // page at a time when the heap passes its end
+    g.code = []
+    op_u(inout g, 35, 0)
+    lset(inout g, 1)
+    op_u(inout g, 35, 0)
+    lget(inout g, 0)
+    op(inout g, 106)
+    i32c(inout g, 7)
+    op(inout g, 106)
+    i32c(inout g, -8)
+    op(inout g, 113)
+    op_u(inout g, 36, 0)
+    open(inout g, 2, 0)
+    open(inout g, 3, 0)
+    op_u(inout g, 35, 0)
+    op_u(inout g, 63, 0)
+    i32c(inout g, 16)
+    op(inout g, 116)
+    op(inout g, 77)
+    op_u(inout g, 13, 1)
+    i32c(inout g, 1)
+    op_u(inout g, 64, 0)
+    op(inout g, 26)
+    op_u(inout g, 12, 0)
+    close(inout g)
+    close(inout g)
+    lget(inout g, 1)
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
+    // print_str(p): the bytes of the text at p
+    g.code = []
+    i32c(inout g, 1)
+    lget(inout g, 0)
+    i32c(inout g, 4)
+    op(inout g, 106)
+    lget(inout g, 0)
+    op_u(inout g, 40, 2)
+    uleb(inout g.code, 0)
+    call_f(inout g, f_write())
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], []), locals: [], code: g.code })
 }
 
 // The module of a checked program: (it compiled, the module, the error: file lo hi message).
 fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], strs: [:], code: [], ltypes: [], nparams: 0, slot_local: [],
-        depth: 0, loops: [], failed: false, msg: "", efile: 0, elo: 0, ehi: 0,
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], strs: [:], objs: [:], code: [], ltypes: [], nparams: 0,
+        slot_local: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "", efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()
     g.m.imports.push(("wasi_snapshot_preview1", "fd_write", wtype(inout g.m, [i32t, i32t, i32t, i32t], [i32t])))
     g.m.imports.push(("wasi_snapshot_preview1", "proc_exit", wtype(inout g.m, [i32t], [])))
     runtime_fns(inout g)
-    var seen: Map[i64, bool] = [:]
-    var order: List[i64] = []
-    for t in ck.all_tops { reach(ck, t, inout seen, inout order) }
-    for i in 0..len(order) { g.fidx[order[i]] = first_user_fn() + i }
-    for id in order {
-        gen_fn(inout g, id)
-        if g.failed { break }
-    }
-    if not g.failed {
-        // _start: the top-level statements, the top-level variables as its locals
-        let none: List[H] = []
-        let params = frame(inout g, ck.main.slot_tys, 0, if len(ck.all_tops) > 0 { ck.all_tops[0] } else { hk("-", none) })
-        for t in ck.all_tops { gen_stmt(inout g, t) }
-        let empty: List[i64] = []
-        finish(inout g, 0, wtype(inout g.m, params, empty))
-        g.m.exports.push(("_start", 0, len(g.m.funcs) + 1))
-        g.m.exports.push(("memory", 2, 0))
-        g.m.pages = 1 + (1024 + len(g.m.data)) / 65536
+    // _start: the top-level statements, the top-level variables as its locals; the functions
+    // they call are compiled after it, each one when first called
+    let none: List[H] = []
+    let params = frame(inout g, ck.main.slot_tys, 0, if len(ck.all_tops) > 0 { ck.all_tops[0] } else { hk("-", none) })
+    for t in ck.all_tops { gen_stmt(inout g, t) }
+    let empty: List[i64] = []
+    let start = finish(inout g, 0, wtype(inout g.m, params, empty))
+    g.m.funcs.push(start)
+    var k = 0
+    while k < len(g.order) and not g.failed {
+        gen_fn(inout g, g.order[k])
+        k += 1
     }
     if g.failed {
         return (false, bytes(), str(g.efile) + " " + str(g.elo) + " " + str(g.ehi) + " " + g.msg)
     }
+    g.m.exports.push(("_start", 0, f_start()))
+    g.m.exports.push(("memory", 2, 0))
+    // the heap starts after the data, at a multiple of 8
+    let heap = (g.m.data_at + len(g.m.data) + 7) / 8 * 8
+    g.m.globals.push((i32t, heap))
+    g.m.pages = 1 + heap / 65536
     (true, module_bytes(g.m), "")
 }

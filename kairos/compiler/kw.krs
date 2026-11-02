@@ -35,6 +35,11 @@ let out_dir = args()[1]
 var base = new_checker(std_dir)
 check_file(inout base, "<prelude>", read_text(std_dir + "/prelude.krs"))
 assert(not base.failed, "the prelude does not check: " + base.code + " " + base.msg)
+// the runtime of the modules (rt.krs, next to this compiler: `<std folder>/../compiler`)
+let up = dir_of(std_dir)
+let rt_path = (if up == "" { "" } else { up + "/" }) + "compiler/rt.krs"
+check_file(inout base, rt_path, read_text(rt_path))
+assert(not base.failed, "the runtime does not check: " + base.code + " " + base.msg)
 make_dir(out_dir)
 var failed = 0
 for k in 2..len(args()) {

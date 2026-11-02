@@ -97,13 +97,14 @@ struct WMod {
     imports: List[(str, str, i64)],     // (module, name, type)
     funcs: List[WFunc],
     exports: List[(str, i64, i64)],     // (name, kind: 0 function, 2 memory; index)
+    globals: List[(i64, i64)],          // mutable globals: (type, initial value)
     data_at: i64,                       // where the data is placed in memory
     data: List[i64],
     pages: i64,                         // 64 KiB each
 }
 
 fn wmod_new(data_at: i64) -> WMod {
-    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], data_at: data_at, data: [], pages: 1 }
+    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], globals: [], data_at: data_at, data: [], pages: 1 }
 }
 
 // The index of a function type, added when new.
@@ -162,6 +163,18 @@ fn module_bytes(m: WMod) -> Bytes {
     var mem: List[i64] = [1, 0]
     uleb(inout mem, m.pages)
     section(inout out, 5, mem)
+    if len(m.globals) > 0 {
+        var gl: List[i64] = []
+        uleb(inout gl, len(m.globals))
+        for x in m.globals {
+            gl.push(x.0)
+            gl.push(1)
+            if x.0 == wt_i64() { gl.push(66) } else { gl.push(65) }
+            sleb(inout gl, x.1)
+            gl.push(11)
+        }
+        section(inout out, 6, gl)
+    }
     var exps: List[i64] = []
     uleb(inout exps, len(m.exports))
     for x in m.exports {

@@ -1,0 +1,25 @@
+// Texts in the WebAssembly back end: made, joined, compared, cut and counted as the interpreter
+// does (the runtime that does it, compiler/rt.krs, is written in Kairós).
+fn greet(name: str) -> str {
+    "olá, " + name + "!"
+}
+
+let a = "Kairós"
+let b = greet(a)
+print(b)                                // out: olá, Kairós!
+print(len(a), len(b), len(""))          // out: 6 12 0
+print(a == "Kairós", a != "kairós", a < "Kairot", "abc" < "abd", "b" > "abc")  // out: true true false true true
+print(substr(b, 5, 6), substr(b, 0, 3), substr(b, 11, 99), substr(b, -2, 2), substr(b, 30, 2) == "")  // out: Kairós olá ! ol true
+print(str(42) + str(-7) + str(true) + str(()))  // out: 42-7true()
+print(str(-9223372036854775807 - 1))    // out: -9223372036854775808
+var s = ""
+for i in 0..5 { s = s + str(i) }
+print(s, len(s))                        // out: 01234 5
+
+fn kind(w: str) -> i64 {
+    match w { "um" => 1, "dois" => 2, _ => 0 }
+}
+
+print(kind("um"), kind("dois"), kind("três"))  // out: 1 2 0
+let t = if len(s) > 3 { "longo" } else { "curto" }
+print(t)                                // out: longo

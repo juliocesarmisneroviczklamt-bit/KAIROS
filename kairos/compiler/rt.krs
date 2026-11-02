@@ -1,0 +1,136 @@
+// The runtime of Kairós programs compiled to WebAssembly (M13), written in Kairós. The back end
+// (wasmgen.krs) compiles these functions with the program, as it needs them.
+//
+// A function named `wasm_*` is an instruction: the back end replaces each call with the
+// WebAssembly that does it, and its body here only lets the checkers type it. Addresses are
+// byte offsets in the module's memory.
+//
+// A text is the address of an object: its length in bytes (32 bits, little-endian), then its
+// UTF-8 bytes. Texts never change once made.
+
+fn wasm_load8(addr: i64) -> i64 {
+    addr * 0
+}
+
+fn wasm_store8(addr: i64, v: i64) {
+}
+
+fn wasm_load32(addr: i64) -> i64 {
+    addr * 0
+}
+
+fn wasm_store32(addr: i64, v: i64) {
+}
+
+// `n` bytes of new memory
+fn wasm_alloc(n: i64) -> i64 {
+    n * 0
+}
+
+// the address of a text's object, and the text at an address
+fn wasm_str_addr(s: str) -> i64 {
+    0
+}
+
+fn wasm_str_at(addr: i64) -> str {
+    ""
+}
+
+// ------------------------------------------------------------------ texts
+
+fn rt_new_str(n: i64) -> i64 {
+    let p = wasm_alloc(4 + n)
+    wasm_store32(p, n)
+    p
+}
+
+fn rt_concat(a: str, b: str) -> str {
+    let pa = wasm_str_addr(a)
+    let pb = wasm_str_addr(b)
+    let na = wasm_load32(pa)
+    let nb = wasm_load32(pb)
+    let p = rt_new_str(na + nb)
+    for i in 0..na { wasm_store8(p + 4 + i, wasm_load8(pa + 4 + i)) }
+    for i in 0..nb { wasm_store8(p + 4 + na + i, wasm_load8(pb + 4 + i)) }
+    wasm_str_at(p)
+}
+
+// -1, 0 or 1: byte order, which is the order of the characters
+fn rt_str_cmp(a: str, b: str) -> i64 {
+    let pa = wasm_str_addr(a)
+    let pb = wasm_str_addr(b)
+    let na = wasm_load32(pa)
+    let nb = wasm_load32(pb)
+    let n = if na < nb { na } else { nb }
+    for i in 0..n {
+        let x = wasm_load8(pa + 4 + i)
+        let y = wasm_load8(pb + 4 + i)
+        if x < y { return -1 }
+        if x > y { return 1 }
+    }
+    if na < nb { -1 } else if na > nb { 1 } else { 0 }
+}
+
+fn rt_str_eq(a: str, b: str) -> bool {
+    rt_str_cmp(a, b) == 0
+}
+
+// the number of characters: the bytes that do not continue a character
+fn rt_str_len(s: str) -> i64 {
+    let p = wasm_str_addr(s)
+    let n = wasm_load32(p)
+    var c = 0
+    for i in 0..n {
+        if bit_and(wasm_load8(p + 4 + i), 192) != 128 { c += 1 }
+    }
+    c
+}
+
+// the byte where character `k` starts (the length when there are fewer)
+fn rt_char_at_byte(p: i64, n: i64, k: i64) -> i64 {
+    var seen = 0
+    for i in 0..n {
+        if bit_and(wasm_load8(p + 4 + i), 192) != 128 {
+            if seen == k { return i }
+            seen += 1
+        }
+    }
+    n
+}
+
+// `substr(s, start, count)`: characters, both clamped at 0
+fn rt_substr(s: str, start: i64, count: i64) -> str {
+    let p = wasm_str_addr(s)
+    let n = wasm_load32(p)
+    let a = if start > 0 { start } else { 0 }
+    let c = if count > 0 { count } else { 0 }
+    let from = rt_char_at_byte(p, n, a)
+    let to = if c > n { n } else { rt_char_at_byte(p, n, a + c) }
+    let len_ = if to > from { to - from } else { 0 }
+    let q = rt_new_str(len_)
+    for i in 0..len_ { wasm_store8(q + 4 + i, wasm_load8(p + 4 + from + i)) }
+    wasm_str_at(q)
+}
+
+// The decimal digits of an integer (negative ones built downwards, so i64's minimum fits).
+fn rt_str_i64(v: i64) -> str {
+    var n = 1
+    if v < 0 { n += 1 }
+    var t = v / 10
+    while t != 0 {
+        n += 1
+        t = t / 10
+    }
+    let p = rt_new_str(n)
+    var x = v
+    var i = n - 1
+    while true {
+        let d = x % 10
+        wasm_store8(p + 4 + i, if d < 0 { 48 - d } else { 48 + d })
+        x = x / 10
+        i -= 1
+        if x == 0 { break }
+    }
+    if v < 0 { wasm_store8(p + 4, 45) }
+    wasm_str_at(p)
+}
