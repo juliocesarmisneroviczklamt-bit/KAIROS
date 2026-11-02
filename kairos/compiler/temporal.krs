@@ -1035,7 +1035,8 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
         return tv_no_int(tv_join(an.bounds, over_time(an, x, ax.0, ax.1, e.lo, e.hi), over_time(an, y, ax.0, ax.1, e.lo, e.hi)))
     }
     if contains(["read_text", "file_exists", "list_dir", "http_get", "download", "read_lines", "read_bytes", "file_size", "file_date", "http_get_all",
-        "try_read_text", "try_read_bytes", "try_list_dir", "try_read_lines", "try_http_get", "try_download", "read_line"], b) {
+        "try_read_text", "try_read_bytes", "try_list_dir", "try_read_lines", "try_http_get", "try_download", "read_line",
+        "zip_entries", "read_zip_lines", "try_zip_entries", "try_read_zip_lines"], b) {
         // what is in a file has no known time: it cannot reach a decision unless declared
         for a in args {
             let _ = val(inout an, ck, a, inout f)

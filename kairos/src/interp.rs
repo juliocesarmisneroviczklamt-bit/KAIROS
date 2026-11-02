@@ -92,6 +92,11 @@ fn curl(url: &str, out: Option<&str>) -> Result<Vec<u8>, String> {
 /// of `keep` (byte columns: B3's fixed-width files are Latin-1, one byte per character). A line
 /// is UTF-8 when it is valid UTF-8, Latin-1 otherwise; `\n` and `\r\n` are removed.
 fn read_lines_kept(path: &str, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec<String>> {
+    read_entry_lines(path, None, keep)
+}
+
+/// The same from the entry named `entry` of a ZIP archive (M19), or, with no name, as above.
+fn read_entry_lines(path: &str, entry: Option<&str>, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec<String>> {
     use std::io::{BufRead, BufReader};
     let mut out = Vec::new();
     let mut scan = |rd: &mut dyn BufRead| -> std::io::Result<()> {
@@ -113,7 +118,11 @@ fn read_lines_kept(path: &str, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec
         }
     };
     let f = std::fs::File::open(path)?;
-    if path.to_ascii_lowercase().ends_with(".zip") {
+    if let Some(name) = entry {
+        let mut z = zip::ZipArchive::new(f).map_err(std::io::Error::other)?;
+        let e = z.by_name(name).map_err(std::io::Error::other)?;
+        scan(&mut BufReader::with_capacity(1 << 20, e))?;
+    } else if path.to_ascii_lowercase().ends_with(".zip") {
         let mut z = zip::ZipArchive::new(f).map_err(std::io::Error::other)?;
         let entry = z.by_index(0).map_err(std::io::Error::other)?;
         scan(&mut BufReader::with_capacity(1 << 20, entry))?;
@@ -121,6 +130,29 @@ fn read_lines_kept(path: &str, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec
         scan(&mut BufReader::with_capacity(1 << 20, f))?;
     }
     Ok(out)
+}
+
+/// The names of the files in a ZIP archive, in the order of its directory (M19).
+fn zip_names(path: &str) -> std::io::Result<Vec<String>> {
+    let z = zip::ZipArchive::new(std::fs::File::open(path)?).map_err(std::io::Error::other)?;
+    let mut out = Vec::with_capacity(z.len());
+    for n in z.file_names() {
+        out.push(n.map_err(std::io::Error::other)?.into_owned());
+    }
+    Ok(out)
+}
+
+/// The `(column, text)` pairs of `keep` (a list of tuples); a negative column is R0010.
+fn keep_of(v: &Value, sp: Span) -> Result<Vec<(usize, Vec<u8>)>, Ctl> {
+    let Value::List(ks) = v else { unreachable!("keep is a list") };
+    let mut keep = Vec::with_capacity(ks.len());
+    for k in ks.iter() {
+        let Value::Tuple(t) = k else { unreachable!("keep holds (column, text)") };
+        let at = as_int(t[0].clone());
+        let Ok(at) = usize::try_from(at) else { return Err(Ctl::Err(Diag::new("R0010", sp, format!("column {at} is negative")))) };
+        keep.push((at, str_of(&t[1]).as_bytes().to_vec()));
+    }
+    Ok(keep)
 }
 
 /// GETs `parallel` at a time (each one a `curl`), in the order given.
@@ -976,6 +1008,32 @@ impl<'a> Interp<'a> {
                 Ok(bytes) => Ok(Value::Str(decode_text(bytes).into())),
                 Err(e) => err("R0013", sp, e),
             },
+            Builtin::ZipEntries => {
+                let p = str_of(&v[0]);
+                match zip_names(p) {
+                    Ok(ns) => Ok(str_list(ns)),
+                    Err(e) => err("R0011", sp, format!("cannot read {p}: {e}")),
+                }
+            }
+            Builtin::ReadZipLines | Builtin::TryReadZipLines => {
+                let (p, name) = (str_of(&v[0]), str_of(&v[1]));
+                let keep = keep_of(&v[2], sp)?;
+                let r = read_entry_lines(p, Some(name), &keep);
+                let pair = |a: Value, e: String| Value::Tuple(Rc::new(vec![a, Value::Str(e.into())]));
+                match (b, r) {
+                    (Builtin::ReadZipLines, Ok(ls)) => Ok(str_list(ls)),
+                    (Builtin::ReadZipLines, Err(e)) => err("R0011", sp, format!("cannot read {p}: {e}")),
+                    (_, Ok(ls)) => Ok(pair(str_list(ls), String::new())),
+                    (_, Err(e)) => Ok(pair(str_list(Vec::<String>::new()), e.to_string())),
+                }
+            }
+            Builtin::TryZipEntries => {
+                let pair = |a: Value, e: String| Value::Tuple(Rc::new(vec![a, Value::Str(e.into())]));
+                Ok(match zip_names(str_of(&v[0])) {
+                    Ok(ns) => pair(str_list(ns), String::new()),
+                    Err(e) => pair(str_list(Vec::<String>::new()), e.to_string()),
+                })
+            }
             Builtin::ReadLines => {
                 let p = str_of(&v[0]);
                 let Value::List(ks) = &v[1] else { unreachable!("read_lines without a list") };

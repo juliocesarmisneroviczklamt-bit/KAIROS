@@ -1570,9 +1570,12 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "list_dir" { return io_w(inout g, e, "rt_list_dir", "list", Ty.TList(Ty.TStr)) }
     if b == "read_lines" { return read_lines_w(inout g, e) }
     if b == "try_read_lines" { return try_read_lines_w(inout g, e) }
+    if b == "read_zip_lines" { return read_lines_w(inout g, e) }
+    if b == "try_read_zip_lines" { return try_read_lines_w(inout g, e) }
+    if b == "zip_entries" { return io_w(inout g, e, "rt_zip_entries", "read", Ty.TList(Ty.TStr)) }
     let tries = [("try_read_text", "rt_try_read_text"), ("try_read_bytes", "rt_try_read_bytes"), ("try_write_text", "rt_try_write_text"),
         ("try_write_bytes", "rt_try_write_bytes"), ("try_list_dir", "rt_try_list_dir"), ("try_make_dir", "rt_try_make_dir"),
-        ("try_http_get", "rt_try_http_get"), ("try_download", "rt_try_download")]
+        ("try_http_get", "rt_try_http_get"), ("try_download", "rt_try_download"), ("try_zip_entries", "rt_try_zip_entries")]
     for t in tries {
         if b == t.0 { return call_rt_borrowing(inout g, t.1, args) }
     }
@@ -4415,11 +4418,17 @@ fn io_w(inout g: WGen, e: H, rt: str, verb: str, vty: Ty) {
 // read_lines(path, keep): a negative column first (R0010), then the lines (rt_zip.krs), R0011 when
 // the file cannot be read
 fn read_lines_w(inout g: WGen, e: H) {
+    // read_zip_lines(path, entry, keep) (M19), or read_lines(path, keep)
+    let zipped = len(e.kids) == 3
     let pa = e.kids[0].kids[0]
-    let ka = e.kids[1].kids[0]
-    let tp = gen_borrow(inout g, pa, not changes(e.kids[1]))
+    let ka = e.kids[len(e.kids) - 1].kids[0]
+    let tp = gen_borrow(inout g, pa, not changes(e.kids[1]) and not changes(e.kids[len(e.kids) - 1]))
     let pl = new_local(inout g, wt_i32())
     lset(inout g, pl)
+    let ea = e.kids[1].kids[0]
+    let te = if zipped { gen_borrow(inout g, ea, not changes(e.kids[2])) } else { -1 }
+    let el = new_local(inout g, wt_i32())
+    if zipped { lset(inout g, el) }
     let tk = gen_borrow(inout g, ka, true)
     let kl = new_local(inout g, wt_i32())
     lset(inout g, kl)
@@ -4434,8 +4443,9 @@ fn read_lines_w(inout g: WGen, e: H) {
     fail_dyn(inout g, e, "R0010", "column ", " is negative", c, "rt_str_i64")
     close(inout g)
     lget(inout g, pl)
+    if zipped { lget(inout g, el) }
     lget(inout g, kl)
-    call_f(inout g, rt_fn(inout g, "rt_read_lines"))
+    call_f(inout g, rt_fn(inout g, if zipped { "rt_read_zip_lines" } else { "rt_read_lines" }))
     let t = new_local(inout g, wt_i32())
     lset(inout g, t)
     let code = new_local(inout g, wt_i64())
@@ -4454,16 +4464,23 @@ fn read_lines_w(inout g: WGen, e: H) {
     lget(inout g, t)
     drop_v(inout g, Ty.TTuple([Ty.TInt, Ty.TList(Ty.TStr)]))
     drop_tmp(inout g, tp, pa.t)
+    if zipped { drop_tmp(inout g, te, ea.t) }
     drop_tmp(inout g, tk, ka.t)
 }
 
 // try_read_lines(path, keep): a negative column first (R0010), then the lines and the error (rt_zip.krs)
 fn try_read_lines_w(inout g: WGen, e: H) {
+    // try_read_zip_lines(path, entry, keep) (M19), or try_read_lines(path, keep)
+    let zipped = len(e.kids) == 3
     let pa = e.kids[0].kids[0]
-    let ka = e.kids[1].kids[0]
-    let tp = gen_borrow(inout g, pa, not changes(e.kids[1]))
+    let ka = e.kids[len(e.kids) - 1].kids[0]
+    let tp = gen_borrow(inout g, pa, not changes(e.kids[1]) and not changes(e.kids[len(e.kids) - 1]))
     let pl = new_local(inout g, wt_i32())
     lset(inout g, pl)
+    let ea = e.kids[1].kids[0]
+    let te = if zipped { gen_borrow(inout g, ea, not changes(e.kids[2])) } else { -1 }
+    let el = new_local(inout g, wt_i32())
+    if zipped { lset(inout g, el) }
     let tk = gen_borrow(inout g, ka, true)
     let kl = new_local(inout g, wt_i32())
     lset(inout g, kl)
@@ -4478,9 +4495,11 @@ fn try_read_lines_w(inout g: WGen, e: H) {
     fail_dyn(inout g, e, "R0010", "column ", " is negative", c, "rt_str_i64")
     close(inout g)
     lget(inout g, pl)
+    if zipped { lget(inout g, el) }
     lget(inout g, kl)
-    call_f(inout g, rt_fn(inout g, "rt_try_read_lines"))
+    call_f(inout g, rt_fn(inout g, if zipped { "rt_try_read_zip_lines" } else { "rt_try_read_lines" }))
     drop_tmp(inout g, tp, pa.t)
+    if zipped { drop_tmp(inout g, te, ea.t) }
     drop_tmp(inout g, tk, ka.t)
 }
 

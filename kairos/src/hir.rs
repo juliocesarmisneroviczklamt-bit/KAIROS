@@ -151,6 +151,11 @@ pub enum Builtin {
     TryListDir,
     TryMakeDir,
     TryReadLines,
+    /// M19: the names of the files in a ZIP archive, and the lines of one of them (as read_lines)
+    ZipEntries,
+    ReadZipLines,
+    TryZipEntries,
+    TryReadZipLines,
     TryHttpGet,
     TryDownload,
     /// M16: `read_line()`, a line of the standard input with its line break ("" at its end), and
@@ -225,6 +230,10 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("try_list_dir", Builtin::TryListDir),
     ("try_make_dir", Builtin::TryMakeDir),
     ("try_read_lines", Builtin::TryReadLines),
+    ("zip_entries", Builtin::ZipEntries),
+    ("read_zip_lines", Builtin::ReadZipLines),
+    ("try_zip_entries", Builtin::TryZipEntries),
+    ("try_read_zip_lines", Builtin::TryReadZipLines),
     ("try_http_get", Builtin::TryHttpGet),
     ("try_download", Builtin::TryDownload),
     ("read_line", Builtin::ReadLine),

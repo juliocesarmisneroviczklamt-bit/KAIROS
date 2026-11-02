@@ -1985,14 +1985,22 @@ fn ki_io_builtin(inout st: KSt, b: str, vs: List[KV], e: H) -> (bool, KV) {
         if r != "" { return (true, ki_fail(inout st, e, "R0011", "cannot create " + vs[0].s + ": " + r, "")) }
         return (true, st.unit)
     }
-    if b == "read_lines" or b == "try_read_lines" {
+    if b == "zip_entries" or b == "try_zip_entries" {
+        let r = try_zip_entries(vs[0].s)
+        if b == "try_zip_entries" { return (true, kv_pair(st, kv_str_list(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot read " + vs[0].s + ": " + r.1, "")) }
+        return (true, kv_str_list(st, r.0))
+    }
+    if b == "read_lines" or b == "try_read_lines" or b == "read_zip_lines" or b == "try_read_zip_lines" {
         // a negative column first
+        let zipped = b == "read_zip_lines" or b == "try_read_zip_lines"
         var keep: List[(i64, str)] = []
-        for k in vs[1].xs {
+        for k in vs[if zipped { 2 } else { 1 }].xs {
             if k.xs[0].n < 0 { return (true, ki_fail(inout st, e, "R0010", "column " + str(k.xs[0].n) + " is negative", "")) }
             keep.push((k.xs[0].n, k.xs[1].s))
         }
-        let r = try_read_lines(vs[0].s, keep)
+        let r = if zipped { try_read_zip_lines(vs[0].s, vs[1].s, keep) } else { try_read_lines(vs[0].s, keep) }
+        if b == "try_read_zip_lines" { return (true, kv_pair(st, kv_str_list(st, r.0), kv_s(st, r.1))) }
         if b == "try_read_lines" { return (true, kv_pair(st, kv_str_list(st, r.0), kv_s(st, r.1))) }
         if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot read " + vs[0].s + ": " + r.1, "")) }
         return (true, kv_str_list(st, r.0))

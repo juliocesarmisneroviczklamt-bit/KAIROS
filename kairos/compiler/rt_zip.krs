@@ -331,6 +331,71 @@ fn rt_le32(p: i64) -> i64 {
     bit_or(rt_le16(p), shl(rt_le16(p + 2), 16))
 }
 
+// The end of the central directory of the ZIP archive of n bytes at p: (0, the number of
+// entries, where the directory starts), or an error (rt_errno_text).
+fn rt_zip_dir(p: i64, n: i64) -> (i64, i64, i64) {
+    var e = n - 22
+    let stop = max(0, n - 22 - 65535)
+    while e >= stop and rt_le32(p + e) != 101010256 { e -= 1 }
+    if e < stop { return (-11, 0, 0) }
+    let cd = rt_le32(p + e + 16)
+    if cd > n { return (-12, 0, 0) }
+    (0, rt_le16(p + e + 10), cd)
+}
+
+// The name of the directory entry at d (UTF-8 when it is, else Latin-1)
+fn rt_zip_name(p: i64, d: i64) -> str {
+    let at = p + d + 46
+    let ln = rt_le16(p + d + 28)
+    if rt_utf8_ok(at, ln) { rt_text_of(at, ln) } else { rt_latin1(at, ln) }
+}
+
+// The next directory entry after the one at d
+fn rt_zip_next(p: i64, d: i64) -> i64 {
+    d + 46 + rt_le16(p + d + 28) + rt_le16(p + d + 30) + rt_le16(p + d + 32)
+}
+
+// M19: the names of the files in the ZIP archive of n bytes at p, in the order of its directory:
+// (0 or an error of rt_errno_text, the names)
+fn rt_zip_names(p: i64, n: i64) -> (i64, List[str]) {
+    var out: List[str] = []
+    let dir = rt_zip_dir(p, n)
+    if dir.0 != 0 { return (dir.0, out) }
+    var d = dir.2
+    for k in 0..dir.1 {
+        if d + 46 > n or rt_le32(p + d) != 33639248 { return (-12, out) }
+        out.push(rt_zip_name(p, d))
+        d = rt_zip_next(p, d)
+    }
+    (0, out)
+}
+
+// The data of the directory entry at d: (0, its method, where its data starts, how many bytes),
+// or an error (rt_errno_text).
+fn rt_zip_data(p: i64, n: i64, d: i64) -> (i64, i64, i64, i64) {
+    let method = rt_le16(p + d + 10)
+    let size = rt_le32(p + d + 20)
+    let local = rt_le32(p + d + 42)
+    if local + 30 > n or rt_le32(p + local) != 67324752 { return (-14, 0, 0, 0) }
+    let data = local + 30 + rt_le16(p + local + 26) + rt_le16(p + local + 28)
+    if method != 0 and method != 8 { return (-1000 - method, 0, 0, 0) }
+    if data + size > n { return (-10, 0, 0, 0) }
+    (0, method, p + data, size)
+}
+
+// The entry named `name` of the ZIP archive (M19), as rt_zip_first gives the first one
+fn rt_zip_entry(p: i64, n: i64, name: str) -> (i64, i64, i64, i64) {
+    let dir = rt_zip_dir(p, n)
+    if dir.0 != 0 { return (dir.0, 0, 0, 0) }
+    var d = dir.2
+    for k in 0..dir.1 {
+        if d + 46 > n or rt_le32(p + d) != 33639248 { return (-12, 0, 0, 0) }
+        if rt_zip_name(p, d) == name { return rt_zip_data(p, n, d) }
+        d = rt_zip_next(p, d)
+    }
+    (-13, 0, 0, 0)
+}
+
 // The first entry of the ZIP archive of n bytes at p: (0, its method, where its data starts, how
 // many bytes), or an error (rt_errno_text).
 fn rt_zip_first(p: i64, n: i64) -> (i64, i64, i64, i64) {
@@ -363,6 +428,36 @@ fn rt_try_read_lines(path: str, keep: List[(i64, str)]) -> (List[str], str) {
 }
 
 fn rt_read_lines(path: str, keep: List[(i64, str)]) -> (i64, List[str]) {
+    rt_read_lines_in(path, false, "", keep)
+}
+
+// M19: read_zip_lines(path, entry, keep): the same from the entry named `entry` of the archive
+fn rt_read_zip_lines(path: str, entry: str, keep: List[(i64, str)]) -> (i64, List[str]) {
+    rt_read_lines_in(path, true, entry, keep)
+}
+
+fn rt_try_read_zip_lines(path: str, entry: str, keep: List[(i64, str)]) -> (List[str], str) {
+    let r = rt_read_zip_lines(path, entry, keep)
+    if r.0 != 0 { return ([], rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
+// M19: zip_entries(path): the names of the files in the archive
+fn rt_zip_entries(path: str) -> (i64, List[str]) {
+    let r = rt_read_file(path)
+    if r.0 != 0 { return (r.0, []) }
+    rt_zip_names(wasm_bytes_addr(r.1) + 16, wasm_load32(wasm_bytes_addr(r.1) + 4))
+}
+
+fn rt_try_zip_entries(path: str) -> (List[str], str) {
+    let r = rt_zip_entries(path)
+    if r.0 != 0 { return ([], rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
+// The lines of the file, of its first entry for a path ending in .zip, or (by_name) of the
+// entry named `entry` of the archive
+fn rt_read_lines_in(path: str, by_name: bool, entry: str, keep: List[(i64, str)]) -> (i64, List[str]) {
     let r = rt_read_file(path)
     var z = RtZ {
         at: 0, end: 0, bits: 0, nb: 0, buf: 0, cap: 0, len: 0, scan: 0, keep_at: [], keep_t: [], lines: [], err: 0,
@@ -378,11 +473,11 @@ fn rt_read_lines(path: str, keep: List[(i64, str)]) -> (i64, List[str]) {
     }
     let p = wasm_bytes_addr(r.1) + 16
     let n = wasm_load32(wasm_bytes_addr(r.1) + 4)
-    if not ends_with(rt_ascii_lower(path), ".zip") {
+    if not by_name and not ends_with(rt_ascii_lower(path), ".zip") {
         let _ = rt_z_lines(inout z, p, n, true)
         return (0, z.lines)
     }
-    let f = rt_zip_first(p, n)
+    let f = if by_name { rt_zip_entry(p, n, entry) } else { rt_zip_first(p, n) }
     if f.0 != 0 { return (f.0, z.lines) }
     if f.1 == 0 {
         let _ = rt_z_lines(inout z, f.2, f.3, true)

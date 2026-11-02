@@ -1,0 +1,17 @@
+// M19: the files of a ZIP archive, and the lines of one of them by its name (deflated entries and
+// a stored one), with the filter of read_lines; the errors of a missing entry and of a file that
+// is not an archive
+let p = "tests/wasm/files/entries.zip"
+print(zip_entries(p))                                    // out: ["small.csv", "big.csv", "notes.txt"]
+print(read_zip_lines(p, "small.csv", []))                // out: ["CD;VALOR", "1;10", "2;20"]
+let big = read_zip_lines(p, "big.csv", [])
+print(len(big), big[0], big[399])                        // out: 400 row;1;v row;400;vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+print(len(read_zip_lines(p, "big.csv", [(0, "row;1")])))   // out: 111
+print(read_zip_lines(p, "notes.txt", [(0, "o")]))        // out: ["ok"]
+print(len(read_zip_lines("tests/wasm/files/lines_stored.zip", "lines.txt", [])))   // out: 9
+print(try_read_zip_lines(p, "nope.csv", []))             // out: ([], "specified file not found in archive")
+print(try_zip_entries("tests/wasm/files/not_a.zip"))     // out: ([], "invalid Zip archive: Could not find EOCD")
+print(try_read_zip_lines("tests/wasm/files/not_a.zip", "x", []).1)   // out: invalid Zip archive: Could not find EOCD
+print(zip_entries("tests/wasm/files/empty.zip"))         // out: []
+print(zip_entries("tests/wasm/files/lines_stored.zip"))  // out: ["lines.txt"]
+print(read_zip_lines(p, "nope.csv", []))                 // error: R0011

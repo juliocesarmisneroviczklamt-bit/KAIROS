@@ -1075,7 +1075,8 @@ impl<'a> An<'a> {
             // what is in a file has no known time: it cannot reach a decision unless declared
             // with `observed` (configuration and market data look the same to the compiler)
             B::ReadText | B::FileExists | B::ListDir | B::HttpGet | B::Download | B::ReadLines | B::ReadBytes | B::FileSize | B::FileDate | B::HttpGetAll
-            | B::TryReadText | B::TryReadBytes | B::TryListDir | B::TryReadLines | B::TryHttpGet | B::TryDownload | B::ReadLine => {
+            | B::TryReadText | B::TryReadBytes | B::TryListDir | B::TryReadLines | B::TryHttpGet | B::TryDownload | B::ReadLine
+            | B::ZipEntries | B::ReadZipLines | B::TryZipEntries | B::TryReadZipLines => {
                 for a in args {
                     self.val(a, f)?;
                 }
