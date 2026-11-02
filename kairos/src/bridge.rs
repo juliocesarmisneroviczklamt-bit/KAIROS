@@ -52,6 +52,10 @@ pub struct EvalCfg {
     pub capital: f64,
     pub real_costs: bool,
     pub tax: bool,
+    /// the largest position, in days of median volume (0: no limit)
+    pub cap_adv: f64,
+    /// a trial in the registry (false: a benchmark, or a run the program registers itself)
+    pub trial: bool,
 }
 
 /// Result of `b3.evaluate` (becomes the prelude's `Evaluation` struct).
@@ -85,6 +89,8 @@ pub struct SimSeries {
     pub tax_paid: f64,
     pub final_value: f64,
     pub liq_value: f64,
+    /// fraction of the target value cut by `cap_adv`
+    pub capped: f64,
     pub exempt_months: i64,
     pub taxed_months: i64,
 }
@@ -636,7 +642,11 @@ impl Host {
 
     fn simulate(&self, d: &Data, plans: &[Plan], cfg: &EvalCfg) -> Result<(SimOut, EvalOut, Vec<f64>), HostErr> {
         let costs = if cfg.real_costs { search::REAL } else { Costs::Fixed { bps: cfg.cost_bps } };
-        let sim = SimCfg { capital0: cfg.capital, lag: cfg.lag as usize, costs, tax: cfg.tax, cap_adv: None };
+        if !(cfg.cap_adv >= 0.0 && cfg.cap_adv.is_finite()) {
+            return Err(herr("R0102", format!("`cap_adv` must be >= 0 (0: no limit), got {:?}", cfg.cap_adv)));
+        }
+        let cap_adv = (cfg.cap_adv > 0.0).then_some(cfg.cap_adv);
+        let sim = SimCfg { capital0: cfg.capital, lag: cfg.lag as usize, costs, tax: cfg.tax, cap_adv };
         let out = backtest::simulate(d, plans, &sim);
         if out.ret.is_empty() {
             return Err(herr("R0102", "the simulation produced no months").hint("are the weights only in the first month or after the end of the data?"));
@@ -690,7 +700,7 @@ impl Host {
         let wsha = weights_sha(w, n)[..12].to_string();
         let params = format!("pesos {wsha}; {costs}; lag {}; capital {}; {ir}", cfg.lag, cfg.capital);
         let t = Trial::new("kairos", &self.program(), &params, &periodo, &excess);
-        let (trials, dsr) = self.record(t, &wsha)?;
+        let (trials, dsr) = if cfg.trial { self.record(t, &wsha)? } else { self.deflated(&t) };
         e.trials = trials;
         e.dsr = dsr;
         let series = SimSeries {
@@ -702,6 +712,7 @@ impl Host {
             tax_paid: out.tax_paid,
             final_value: out.final_value,
             liq_value: out.liq_value,
+            capped: out.capped_frac,
             exempt_months: out.exempt_months as i64,
             taxed_months: out.taxed_months as i64,
         };
@@ -773,6 +784,20 @@ impl Host {
         };
         let df = registry::deflate(&t, &all);
         Ok((df.n_trials as i64, df.dsr))
+    }
+
+    /// The DSR of a run that is not recorded (`trial: false`), against the registry as it is.
+    fn deflated(&self, t: &Trial) -> (i64, f64) {
+        let all = match self.results_dir() {
+            Some(dir) => registry::load(&dir.join(REGISTRY)),
+            None => self.trials.borrow().clone(),
+        };
+        if all.is_empty() {
+            let df = registry::deflate(t, std::slice::from_ref(t));
+            return (df.n_trials as i64, df.dsr);
+        }
+        let df = registry::deflate(t, &all);
+        (df.n_trials as i64, df.dsr)
     }
 
     // ------------------------------------------------------------------ holdouts

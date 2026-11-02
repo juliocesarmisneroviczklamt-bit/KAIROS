@@ -290,3 +290,37 @@ fn the_risk_study_in_kairos_prints_the_rust_report() {
 fn the_realistic_study_in_kairos_prints_the_rust_report() {
     same_report("realistic.krs", "realista_relatorio.txt");
 }
+
+/// `quant-b3 small-caps` → results/smallcaps_relatorio.txt
+#[test]
+#[ignore]
+fn the_smallcaps_study_in_kairos_prints_the_rust_report() {
+    same_report("smallcaps.krs", "smallcaps_relatorio.txt");
+}
+
+/// The small segment (lab/universe.krs `small_universe`) is quant-b3's `small_segment`.
+#[test]
+fn the_small_segment_in_kairos_is_the_rust_one() {
+    on_big_stack(|| {
+        let d = market();
+        let out = run(&d, "import \"universe.krs\"
+let s = small_universe(500000.0, 50000.0)
+let t = b3.tickers()
+for m in [b3.month_index(200201), b3.month_index(200301), b3.month_index(200401)] {
+    var names = []
+    for a in 0..len(t) {
+        if s[month: m, asset: a] { names.push(t[a]) }
+    }
+    print(names)
+}
+");
+        let mut want = String::new();
+        for y in [2002u32, 2003, 2004] {
+            let mut names: Vec<String> = quant_b3::universe::small_segment(&d.panel, y, 500_000.0, 50_000.0).iter().map(|&t| format!("{:?}", d.panel.tks[t].ticker)).collect();
+            names.sort();
+            want.push_str(&format!("[{}]
+", names.join(", ")));
+        }
+        assert_eq!(out, want);
+    })
+}

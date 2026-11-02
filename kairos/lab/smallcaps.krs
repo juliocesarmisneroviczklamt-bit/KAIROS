@@ -1,0 +1,194 @@
+// Study C of the lab, in Kairós (quant-b3's src/smallcaps.rs, which this file replaces): small
+// caps "where big funds do not go".
+//
+// Hypotheses and decision rule registered BEFORE running (not to be changed after seeing the
+// holdout):
+//  H1: long-only momentum (the winners' third) in the segment below NEFIN's liquidity filter
+//      beats the same momentum in the liquid segment, with the real cost of the spread.
+//  H2: the whole illiquid segment (equal weights) beats the liquid one (an illiquidity premium).
+//  Passes if: the difference has t > 2 in 2001-2018 AND the same sign in the 2019+ holdout.
+//
+// Segment: the company's most traded class, outside NEFIN's filter, traded on more than 80% of
+// the previous year's sessions, median volume >= R$ 50 thousand, price >= R$ 1 at formation.
+// Execution: real cost, 1 session of delay, at most 1 day of median volume per position,
+// R$ 300 thousand of today (no IR, to compare only the effect of the segment).
+//
+//     kairos run kairos/lab/smallcaps.krs
+import "portfolios.krs"
+import "stats.krs"
+import "fmt.krs"
+
+let months = b3.months()
+let cdi_all = b3.cdi()
+let small_all = momentum_forms(small_universe(500000.0, 50000.0), 15, 1.0)
+let liq_all = momentum_forms(nefin_universe(500000.0), 15, 1.0)
+let start = b3.month_index(200101)
+let split = b3.month_index(201901)
+let n = size(cdi_all, month)
+
+// only the months in which both segments have a portfolio
+var ok = zeros(month: n) > 1.0
+var both = []
+for m in start..n {
+    ok[month: m] = small_all.has[month: m] and liq_all.has[month: m]
+    if small_all.has[month: m] and liq_all.has[month: m] { both.push(m) }
+}
+let ipca = b3.ipca()
+var defl = 1.0
+for m in both[0]..n { defl *= 1.0 + fill_nan(ipca[month: m], 0.0) }
+
+// equal weights on a set, in the months marked `ok`
+fn ew(set: Tensor[month, asset; bool], ok: Tensor[month; bool]) -> Tensor[month, asset; f64] {
+    var w = zeros_like(b3.monthly_returns())
+    for m in 0..size(ok, month) {
+        if ok[month: m] {
+            let k = sum(where(set[month: m], 1.0, 0.0))
+            w[month: m] = where(set[month: m], 1.0 / k, 0.0)
+        }
+    }
+    w
+}
+let plans = [ew(small_all.winners, ok), ew(small_all.alive, ok), ew(liq_all.winners, ok), ew(liq_all.alive, ok)]
+let names = ["H1 small: vencedores", "H2 small: todas (EW)", "líquido: vencedores", "líquido: todas (EW)"]
+// these runs are registered below, as the lab does: only H1 and H2, over the research period
+var runs = []
+for p in plans {
+    runs.push(b3.simulate(p, real_costs: true, lag: 1, capital: 300000.0 / defl, cap_adv: 1.0, trial: false))
+}
+
+print("")
+print("================ C. SMALL CAPS: ONDE FUNDO GRANDE NÃO ENTRA ================")
+print("Hipóteses registradas antes de rodar. H1: momentum no segmento ilíquido > momentum no líquido. H2: segmento ilíquido > líquido.")
+print("Passa se a diferença tiver t > 2 em 2001-2018 E o mesmo sinal no holdout 2019-hoje.")
+var years = []
+var ys = []
+var yl = []
+var yc = []
+for m in both {
+    let y = months[m] / 100
+    let k = len(years)
+    if k == 0 or years[k - 1] != y {
+        years.push(y)
+        ys.push(0)
+        yl.push(0)
+        yc.push(0)
+    }
+    let j = len(years) - 1
+    ys[j] += int(sum(where(small_all.alive[month: m], 1.0, 0.0)))
+    yl[j] += int(sum(where(liq_all.alive[month: m], 1.0, 0.0)))
+    yc[j] += 1
+}
+var parts = []
+for j in 0..len(years) {
+    if years[j] % 5 == 0 or years[j] == 2001 {
+        parts.push(str(years[j]) + ": " + str(ys[j] / yc[j]) + "|" + str(yl[j] / yc[j]))
+    }
+}
+print("Ações por mês (small | líquido): " + join(parts, "  "))
+print("Execução: custo real, 1 pregão de atraso, posição máx = 1 dia de volume mediano, R$ 300 mil de hoje, sem IR.")
+
+// the simulated months of a run, inside the period or not
+fn months_of(s: Simulation, split: i64, early: bool) -> List[i64] {
+    var out = []
+    for m in 0..size(s.ret, month) {
+        if not is_nan(s.ret[month: m]) and (m < split) == early { out.push(m) }
+    }
+    out
+}
+fn at(x: Tensor[month; f64], ms: List[i64]) -> List[f64] {
+    var out = []
+    for m in ms { out.push(x[month: m]) }
+    out
+}
+let rm = b3.nefin("rm_rf")
+let smb = b3.nefin("smb")
+let hml = b3.nefin("hml")
+let iml = b3.nefin("iml")
+let rf = b3.nefin("rf")
+fn alpha4(s: Simulation, ms: List[i64], rm: Tensor[month; f64], smb: Tensor[month; f64], hml: Tensor[month; f64], iml: Tensor[month; f64], rf: Tensor[month; f64]) -> str {
+    var y = []
+    var f1 = []
+    var f2 = []
+    var f3 = []
+    var f4 = []
+    for m in ms {
+        if not is_nan(rf[month: m]) {
+            y.push(s.ret[month: m] - rf[month: m])
+            f1.push(rm[month: m])
+            f2.push(smb[month: m])
+            f3.push(hml[month: m])
+            f4.push(iml[month: m])
+        }
+    }
+    let o = ols_nw(y, [f1, f2, f3, f4], nw_lags(len(y)))
+    if o.ok { pct(o.coef[0] * 12.0) + " (" + fixed(o.t[0], 2) + ")" } else { "" }
+}
+// the monthly difference a - b in the period: (mean a year, Newey-West t)
+fn diff_test(a: Simulation, b: Simulation, split: i64, early: bool) -> (f64, f64) {
+    var x = []
+    for m in 0..size(a.ret, month) {
+        if not is_nan(a.ret[month: m]) and not is_nan(b.ret[month: m]) and (m < split) == early {
+            x.push(a.ret[month: m] - b.ret[month: m])
+        }
+    }
+    let o = ols_nw(x, [], nw_lags(len(x)))
+    (avg(x) * 12.0, if o.ok { o.t[0] } else { nan })
+}
+
+for period in [("PESQUISA 2001-2018", true), ("HOLDOUT 2019-hoje (olhado uma vez)", false)] {
+    let early = period.1
+    print("")
+    print("--- " + period.0 + " ---")
+    print(left("carteira", 26) + " " + right("CAGR", 8) + " " + right("Sharpe*", 8) + " " + right("maxDD", 8) + " " + right("alpha 4F (t)", 18) + " " + right("custo/lado", 11) + " " + right("giro", 7))
+    for i in 0..4 {
+        let o = runs[i]
+        let ms = months_of(o, split, early)
+        let r = at(o.ret, ms)
+        let c = at(cdi_all, ms)
+        var ex = []
+        for k in 0..len(r) { ex.push(r[k] - c[k]) }
+        print(left(names[i], 26) + " " + right(pct(cagr(r, 12.0)), 8) + " " + right(fixed(avg(ex) / sd(ex) * sqrt(12.0), 2), 8) + " " + right(pct(max_dd(r)), 8) + " " + right(alpha4(o, ms, rm, smb, hml, iml, rf), 18) + " " + right(fixed(o.cost_bps, 0), 7) + " bps " + right(fixed(100.0 * avg(at(o.turnover, ms)), 0), 6) + "%")
+    }
+    print(left("CDI", 26) + " " + right(pct(cagr(at(cdi_all, months_of(runs[0], split, early)), 12.0)), 8))
+    let h1 = diff_test(runs[0], runs[2], split, early)
+    let h2 = diff_test(runs[1], runs[3], split, early)
+    print("H1 (small vencedores - líquido vencedores): " + pct(h1.0) + " a.a. (t=" + fixed(h1.1, 2) + ")")
+    print("H2 (small todas - líquido todas):           " + pct(h2.0) + " a.a. (t=" + fixed(h2.1, 2) + ")")
+}
+
+// the decision, by the registered rule
+print("")
+fn sign(x: f64) -> f64 {
+    if x > 0.0 or (x == 0.0 and 1.0 / x > 0.0) { 1.0 } else { -1.0 }
+}
+for h in [("H1", 0, 2), ("H2", 1, 3)] {
+    let a = diff_test(runs[h.1], runs[h.2], split, true)
+    let b = diff_test(runs[h.1], runs[h.2], split, false)
+    let ok = a.1 > 2.0 and sign(b.0) == sign(a.0)
+    print(h.0 + ": " + (if ok { "PASSOU" } else { "NÃO PASSOU" }) + " (pesquisa " + pct(a.0) + " t=" + fixed(a.1, 2) + "; holdout " + pct(b.0) + ")")
+}
+
+// capacity: how much money fits
+print("")
+print("Capacidade (período todo, custo real com impacto, posição máx = 1 dia de volume):")
+print(left("capital hoje", 14) + " " + right("small vencedores CAGR", 22) + " " + right("custo/lado", 12) + " " + right("cortado", 10) + " " + right("líquido vencedores CAGR", 22) + " " + right("custo/lado", 12))
+for cap in [50000.0, 300000.0, 3000000.0, 30000000.0] {
+    let a = b3.simulate(plans[0], real_costs: true, lag: 1, capital: cap / defl, cap_adv: 1.0, trial: false)
+    let b = b3.simulate(plans[2], real_costs: true, lag: 1, capital: cap / defl, cap_adv: 1.0, trial: false)
+    let label = if cap >= 1000000.0 { fixed(cap / 1000000.0, 0) + " mi" } else { fixed(cap / 1000.0, 0) + " mil" }
+    let ra = at(a.ret, months_of(a, 1000000, true))
+    let rb = at(b.ret, months_of(b, 1000000, true))
+    print("R$ " + left(label, 11) + " " + right(pct(cagr(ra, 12.0)), 22) + " " + right(fixed(a.cost_bps, 0), 8) + " bps " + right(fixed(100.0 * a.capped, 0), 9) + "% " + right(pct(cagr(rb, 12.0)), 22) + " " + right(fixed(b.cost_bps, 0), 8) + " bps")
+}
+
+// the registry of trials (only the research period counts)
+print("")
+print("Registro de testes:")
+for h in [(0, "H1 momentum small"), (1, "H2 small EW")] {
+    let ms = months_of(runs[h.0], split, true)
+    let r = at(runs[h.0].ret, ms)
+    let c = at(cdi_all, ms)
+    var ex = []
+    for k in 0..len(r) { ex.push(r[k] - c[k]) }
+    print("  " + b3.record_trial("small-caps", h.1, "vol mediano>=50k preco>=1 custo real lag1 cap 1 dia", "2001-2018", ex))
+}

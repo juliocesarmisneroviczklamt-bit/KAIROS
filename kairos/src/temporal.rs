@@ -983,6 +983,16 @@ impl<'a> An<'a> {
                 let x = self.val(&args[0], f)?;
                 Ok(self.over_time(x, args.get(1).and_then(axis_lit), sp))
             }
+            B::NanQuantile => {
+                let x = self.val(&args[0], f)?;
+                let q = self.val(&args[1], f)?;
+                Ok(self.over_time(x, args.get(2).and_then(axis_lit), sp).with_time(q.time))
+            }
+            // the days lose their months: reaching the result reaches every row
+            B::MergeDays => {
+                let x = self.val(&args[0], f)?;
+                Ok(self.over_time(x, Some(i64::from(AX_MONTH)), sp))
+            }
             B::TopK | B::BottomK => {
                 let x = self.val(&args[0], f)?;
                 let k = self.val(&args[1], f)?;

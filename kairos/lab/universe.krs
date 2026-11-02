@@ -59,13 +59,21 @@ fn companies() -> Companies {
     }
 }
 
-// The eligible assets for the year after `vol` (its 12 months: the year y - 1). `before`: the
-// assets that traded before y - 1.
-fn nefin_year(vol: Tensor[month, session, asset; f64], real: Tensor[month, session; bool], before: Tensor[asset; bool], co: Companies, min_vol: f64) -> Tensor[asset; bool] {
+// What quant-b3's `year_stats` and `leaders` know about each asset after the year `vol` (its 12
+// months: the year y - 1). `before`: the assets that traded before y - 1.
+struct YearStats {
+    leader: Tensor[asset; bool],    // the company's most traded class (stocks listed before December)
+    window: Tensor[asset; f64],     // sessions of the year since the listing
+    liquid: Tensor[asset; f64],     // sessions with volume above `min_vol`
+    traded: Tensor[asset; f64],     // sessions with trades
+    med_vol: Tensor[asset; f64],    // median volume of the traded sessions (the upper middle)
+}
+
+fn year_stats(vol: Tensor[month, session, asset; f64], real: Tensor[month, session; bool], before: Tensor[asset; bool], co: Companies, min_vol: f64) -> YearStats {
     let na = size(vol, asset)
     var started = before
-    var window = zeros(asset: na)    // sessions since the listing
-    var liquid = zeros(asset: na)    // sessions with volume above the minimum
+    var window = zeros(asset: na)
+    var liquid = zeros(asset: na)
     var traded = zeros(asset: na)
     var total = zeros(asset: na)     // volume, summed day by day (as quant-b3 does)
     var by_nov = before              // traded before December
@@ -93,11 +101,16 @@ fn nefin_year(vol: Tensor[month, session, asset; f64], real: Tensor[month, sessi
     let mine = grid + total
     let beaten = co.same and peer_cand and (peer_total > mine or (peer_total == mine and co.earlier))
     let leader = candidate and sum(where(beaten, 1.0, 0.0), over: peer) == 0.0
-    leader and window > 0.0 and liquid / window > 0.8
+    YearStats { leader: leader, window: window, liquid: liquid, traded: traded, med_vol: nan_quantile(merge_days(vol), 0.5, over: day) }
 }
 
-// The universe of every month: `Tensor[month, asset; bool]`.
-fn nefin_universe(min_vol: f64) -> Tensor[month, asset; bool] {
+// NEFIN: liquid on more than 80% of the sessions since the listing.
+fn passes_nefin(st: YearStats) -> Tensor[asset; bool] {
+    st.window > 0.0 and st.liquid / st.window > 0.8
+}
+
+// A universe for every month (`kind` 0: NEFIN's; 1: the small segment below it).
+fn universe_by(kind: i64, min_vol: f64, min_med_vol: f64) -> Tensor[month, asset; bool] {
     let vol = b3.daily_volume()
     let real = b3.sessions()
     let months = b3.months()
@@ -111,7 +124,12 @@ fn nefin_universe(min_vol: f64) -> Tensor[month, asset; bool] {
     for m in 0..size(vol, month) {
         if months[m] % 100 == 1 {
             if m >= 12 {
-                year = nefin_year(vol[month: m - 12 ..= m - 1], real[month: m - 12 ..= m - 1], at_last_jan, co, min_vol)
+                let st = year_stats(vol[month: m - 12 ..= m - 1], real[month: m - 12 ..= m - 1], at_last_jan, co, min_vol)
+                if kind == 0 {
+                    year = st.leader and passes_nefin(st)
+                } else {
+                    year = st.leader and st.window > 0.0 and not passes_nefin(st) and st.traded / st.window > 0.8 and st.med_vol >= min_med_vol
+                }
             } else {
                 year = none
             }
@@ -121,4 +139,16 @@ fn nefin_universe(min_vol: f64) -> Tensor[month, asset; bool] {
         seen = seen or nan_count(vol[month: m], over: session) > 0.0
     }
     out
+}
+
+// The NEFIN liquid universe of every month: `Tensor[month, asset; bool]`.
+fn nefin_universe(min_vol: f64) -> Tensor[month, asset; bool] {
+    universe_by(0, min_vol, 0.0)
+}
+
+// The segment "where big funds do not go" (quant-b3's `small_segment`): the company's most traded
+// class that does NOT pass NEFIN's filter, but traded on more than 80% of the sessions with a
+// median volume of at least `min_med_vol`.
+fn small_universe(nefin_min_vol: f64, min_med_vol: f64) -> Tensor[month, asset; bool] {
+    universe_by(1, nefin_min_vol, min_med_vol)
 }

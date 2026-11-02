@@ -32,6 +32,11 @@ pub enum Builtin {
     ToFloat,
     ToInt,
     ToStr,
+    /// `nan_quantile(x, q, over: axis)`: the value at position floor(q·n) of the valid values
+    /// sorted (q = 0.5: the middle one, the upper of the two for an even count)
+    NanQuantile,
+    /// `merge_days(x)`: `Tensor[month, session, ...]` as `Tensor[day, ...]`
+    MergeDays,
     /// `format_fixed(x, d)`: `x` with `d` decimals, rounded exactly (as Rust's `{:.d}`)
     FormatFixed,
     Assert,
@@ -106,6 +111,8 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("int", Builtin::ToInt),
     ("str", Builtin::ToStr),
     ("format_fixed", Builtin::FormatFixed),
+    ("nan_quantile", Builtin::NanQuantile),
+    ("merge_days", Builtin::MergeDays),
     ("assert", Builtin::Assert),
     ("mean", Builtin::Mean),
     ("prod", Builtin::Prod),

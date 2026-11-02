@@ -360,6 +360,8 @@ impl Checker {
                 | B::Rank
                 | B::TopK
                 | B::BottomK
+                | B::NanQuantile
+                | B::MergeDays
                 | B::Contract
                 | B::Observed
                 | B::Grad
@@ -650,7 +652,7 @@ impl Checker {
         };
         let takes_over = matches!(
             b,
-            B::Sum | B::Mean | B::Prod | B::Max | B::Min | B::NanSum | B::NanMean | B::NanProd | B::NanCount | B::Count | B::Rank | B::TopK | B::BottomK | B::Contract
+            B::Sum | B::Mean | B::Prod | B::Max | B::Min | B::NanSum | B::NanMean | B::NanProd | B::NanCount | B::Count | B::Rank | B::TopK | B::BottomK | B::NanQuantile | B::Contract
         );
         let takes_sizes = matches!(b, B::Zeros | B::Ones | B::Full);
         if !takes_sizes {
@@ -858,6 +860,29 @@ impl Checker {
                         .hint("select or reduce the other axes first"));
                 }
                 call(vec![HArg::Val(h)], Ty::List(Box::new(elem)))
+            }
+            B::NanQuantile => {
+                arity(2)?;
+                let (h, t) = self.expr(all[0].0, None)?;
+                let (axes, elem) = self.need_tensor(name, &t, all[0].0)?;
+                self.need_elem(name, &t, &elem, &float, all[0].0)?;
+                let ax = self.over_axis(over, &axes, &t, name, sp)?;
+                let (hq, tq) = self.expr(all[1].0, Some(&float))?;
+                self.expect_ty(&tq, &float, all[1].0.span)?;
+                let out: Vec<u32> = axes.iter().copied().filter(|x| *x != ax).collect();
+                call(vec![HArg::Val(h), HArg::Val(hq), ax_lit(Some(ax))], Self::mk_tensor(out, Ty::Float))
+            }
+            B::MergeDays => {
+                arity(1)?;
+                let (h, t) = self.expr(all[0].0, None)?;
+                let (axes, elem) = self.need_tensor(name, &t, all[0].0)?;
+                if !axes.contains(&AX_MONTH) || !axes.contains(&AX_SESSION) {
+                    return Err(Diag::new("E0201", all[0].0.span, format!("`merge_days` needs a tensor with the axes `month` and `session`, found `{}`", self.show(&t)))
+                        .hint("the daily data of `b3` comes as `Tensor[month, session, asset]`"));
+                }
+                let mut out = vec![AX_DAY];
+                out.extend(axes.iter().copied().filter(|a| *a != AX_MONTH && *a != AX_SESSION));
+                call(vec![HArg::Val(h)], Self::mk_tensor(out, elem))
             }
             B::Rank | B::TopK | B::BottomK => {
                 arity(if b == B::Rank { 1 } else { 2 })?;
@@ -1078,12 +1103,17 @@ impl Checker {
             ("capital", HExpr::Lit(Value::Float(1_000_000.0)), Ty::Float),
             ("real_costs", HExpr::Lit(Value::Bool(false)), Ty::Bool),
             ("tax", HExpr::Lit(Value::Bool(false)), Ty::Bool),
+            // the largest position, in days of the asset's median volume (0: no limit)
+            ("cap_adv", HExpr::Lit(Value::Float(0.0)), Ty::Float),
+            // a trial in the registry (false: a benchmark, or a run the program registers itself
+            // with `b3.record_trial`; visible in the code)
+            ("trial", HExpr::Lit(Value::Bool(true)), Ty::Bool),
         ];
         let mut seen: Vec<&str> = Vec::new();
         for (nm, nsp, e) in named {
             let Some(k) = opts.iter().position(|(o, _, _)| o == nm) else {
                 return Err(Diag::new("E0120", *nsp, format!("`{what}` has no option `{nm}`"))
-                    .hint("its options are cost_bps, lag, capital, real_costs and tax"));
+                    .hint("its options are cost_bps, lag, capital, real_costs, tax, cap_adv and trial"));
             };
             if seen.contains(nm) {
                 return Err(Diag::new("E0112", *nsp, format!("option `{nm}` is given twice")));

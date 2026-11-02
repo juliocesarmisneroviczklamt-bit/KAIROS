@@ -84,6 +84,7 @@ struct Simulation {
     tax_paid: f64,                  // R$
     final_value: f64,               // R$
     liq_value: f64,                 // R$, selling everything at the end (paying the deferred IR)
+    capped: f64,                    // fraction of the target value cut by `cap_adv`
     exempt_months: i64,             // months with sales, exempt (up to R$ 20 thousand) or taxed
     taxed_months: i64,
     trials: i64,

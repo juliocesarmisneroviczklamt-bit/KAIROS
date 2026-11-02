@@ -414,6 +414,68 @@ pub fn rank(t: &TensorVal, ax: u32) -> TResult<TensorVal> {
     Ok(TensorVal::new_f(t.axes.clone(), t.shape.clone(), out))
 }
 
+/// Along `ax`, the value at position floor(q·n) of the valid (non-NaN) values sorted ascending;
+/// NaN when there are none. q = 0.5 gives the middle value (the upper middle for an even count).
+pub fn nan_quantile(t: &TensorVal, q: f64, ax: u32) -> TResult<TensorVal> {
+    let p = t.pos(ax).ok_or_else(|| TErr::Shape("nan_quantile over an axis the tensor does not have".into()))?;
+    let v = t.f();
+    let outer: usize = t.shape[..p].iter().product();
+    let inner: usize = t.shape[p + 1..].iter().product();
+    let mut out = vec![f64::NAN; outer * inner];
+    let mut k = 0;
+    fibers(t, p, |offs| {
+        let s = sorted_valid(v, offs);
+        if !s.is_empty() {
+            let i = ((q.clamp(0.0, 1.0) * s.len() as f64).floor() as usize).min(s.len() - 1);
+            out[k] = s[i].1;
+        }
+        k += 1;
+    });
+    let mut axes = t.axes.clone();
+    let mut shape = t.shape.clone();
+    axes.remove(p);
+    shape.remove(p);
+    Ok(TensorVal::new_f(axes, shape, out))
+}
+
+/// `[.., month, .., session, ..]` as `[day, ..]` (day = month · sessions + session), the other
+/// axes in their order.
+pub fn merge_days(t: &TensorVal, month: u32, session: u32, day: u32) -> TensorVal {
+    let pm = t.pos(month).expect("month axis");
+    let ps = t.pos(session).expect("session axis");
+    let rest: Vec<usize> = (0..t.axes.len()).filter(|&k| k != pm && k != ps).collect();
+    let mut order = vec![pm, ps];
+    order.extend(&rest);
+    let mut axes = vec![day];
+    axes.extend(rest.iter().map(|&k| t.axes[k]));
+    let mut shape = vec![t.shape[pm] * t.shape[ps]];
+    shape.extend(rest.iter().map(|&k| t.shape[k]));
+    // already in that layout: the same data
+    if order.iter().enumerate().all(|(i, &k)| i == k) {
+        return TensorVal { axes, shape, data: t.data.clone() };
+    }
+    let st = t.strides();
+    let dims: Vec<usize> = order.iter().map(|&k| t.shape[k]).collect();
+    let total: usize = dims.iter().product();
+    let mut idx = vec![0usize; dims.len()];
+    let mut offs = Vec::with_capacity(total);
+    for _ in 0..total {
+        offs.push(idx.iter().zip(&order).map(|(i, &k)| i * st[k]).sum::<usize>());
+        for d in (0..dims.len()).rev() {
+            idx[d] += 1;
+            if idx[d] < dims[d] {
+                break;
+            }
+            idx[d] = 0;
+        }
+    }
+    let data = match &t.data {
+        TData::F(v) => TData::F(offs.iter().map(|&o| v[o]).collect()),
+        TData::B(v) => TData::B(offs.iter().map(|&o| v[o]).collect()),
+    };
+    TensorVal { axes, shape, data }
+}
+
 /// Mask of the `k` largest (or smallest) valid values along `ax`. Same tie rule as a stable
 /// ascending sort taking the last (first) k, i.e. exactly what the quant-b3 portfolios do.
 pub fn top_k(t: &TensorVal, ax: u32, k: i64, top: bool) -> TResult<TensorVal> {

@@ -383,6 +383,11 @@ impl Interp<'_> {
                 };
                 Value::List(Rc::new(xs))
             }
+            B::NanQuantile => {
+                let a = axis_arg(&v[2]).expect("axis id");
+                wrap(tensor::nan_quantile(tensor_of(&v[0]), float_of(&v[1]), a).map_err(|e| te(self, e))?)
+            }
+            B::MergeDays => wrap(tensor::merge_days(tensor_of(&v[0]), crate::types::AX_MONTH, crate::types::AX_SESSION, crate::types::AX_DAY)),
             B::Rank => {
                 let a = axis_arg(&v[1]).expect("axis id");
                 wrap(tensor::rank(tensor_of(&v[0]), a).map_err(|e| te(self, e))?)
@@ -432,6 +437,8 @@ impl Interp<'_> {
             capital: float_of(&o[2]),
             real_costs: as_bool(o[3].clone()),
             tax: as_bool(o[4].clone()),
+            cap_adv: float_of(&o[5]),
+            trial: as_bool(o[6].clone()),
         };
         Ok(match hf {
             HostFn::MonthlyReturns => Value::Tensor(host.monthly_returns(protos).map_err(herr)?),
@@ -476,6 +483,7 @@ impl Interp<'_> {
                         "tax_paid" => Value::Float(sim.tax_paid),
                         "final_value" => Value::Float(sim.final_value),
                         "liq_value" => Value::Float(sim.liq_value),
+                        "capped" => Value::Float(sim.capped),
                         "exempt_months" => Value::Int(sim.exempt_months),
                         "taxed_months" => Value::Int(sim.taxed_months),
                         "trials" => Value::Int(ev.trials),
