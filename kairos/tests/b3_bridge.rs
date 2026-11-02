@@ -114,10 +114,28 @@ fn run_data_check() {
     lab_check("check_data.krs", &["monthly returns: the same", "eligible: the same", "cdi: the same", "nefin: the same"]);
     // b3.evaluate written in Kairós (lab/bridge.krs): the momentum portfolio, number for number
     lab_check("check_evaluate.krs", &["evaluate: the same"]);
+    // the registry of trials written in Kairós: the same trial, DSR and file as the bridge's, each
+    // in a registry of its own (never the lab's: a trial that is not research would count in it)
+    let tmp = std::env::temp_dir().join(format!("kairos-registry-{}", std::process::id()));
+    let (rust, kairos) = (tmp.join("rust"), tmp.join("kairos"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&rust).unwrap();
+    std::fs::create_dir_all(&kairos).unwrap();
+    lab_check_with("check_record.krs", &["record: the same", "again: one trial"], Some(&rust), &kairos);
+    let a = std::fs::read(rust.join("registro_testes.csv")).expect("the bridge's registry");
+    let b = std::fs::read(kairos.join("registro_testes.csv")).expect("the registry written in Kairós");
+    assert!(a == b, "the registries differ");
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Runs a check of kairos/lab with the data folder as its argument: its output must have each line.
 fn lab_check(program: &str, want: &[&str]) {
+    let none: Option<&Path> = None;
+    lab_check_with(program, want, none, Path::new(""));
+}
+
+/// The same with the bridge's results in `results` and a second argument `extra` (when not empty).
+fn lab_check_with(program: &str, want: &[&str], results: Option<&Path>, extra: &Path) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let data_dir = root.join("data");
     if !data_dir.join("processed").join("panel.bin").is_file() {
@@ -128,8 +146,16 @@ fn lab_check(program: &str, want: &[&str]) {
     let path = root.join("kairos").join("lab").join(program);
     let src = std::fs::read_to_string(&path).expect("a check of kairos/lab");
     let buf = Rc::new(RefCell::new(Vec::new()));
-    let host = Host::with_data(d);
-    host.set_args(vec![data_dir.to_string_lossy().into_owned()]);
+    let mut host = Host::with_data(d);
+    if let Some(r) = results {
+        host = host.with_results(r);
+    }
+    let mut args = vec![data_dir.to_string_lossy().into_owned()];
+    if !extra.as_os_str().is_empty() {
+        args.push(extra.to_string_lossy().into_owned());
+    }
+    host.set_args(args);
+    host.set_program(program.trim_end_matches(".krs"));
     let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
     if let Err(e) = s.run(&path.to_string_lossy(), &src) {
         panic!("{}", s.render(&e));

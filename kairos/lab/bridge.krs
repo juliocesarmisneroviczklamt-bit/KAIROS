@@ -131,3 +131,70 @@ fn weights_sha(w: Tensor[month, asset; f64], n: i64) -> str {
     }
     substr(sha256_hex(b), 0, 12)
 }
+
+// ------------------------------------------------------------------ the registry
+import "trials.krs"
+
+// A float as Rust's `{}` writes it: the shortest digits, never an exponent, no ".0" on whole
+// numbers (25.0 is "25", 1e21 is 1 and 21 zeros).
+fn fmt_display(x: f64) -> str {
+    let s = str(x)
+    if is_nan(x) or abs(x) == inf { return s }
+    let e = find(s, "e")
+    if e < 0 { return if ends_with(s, ".0") { substr(s, 0, len(s) - 2) } else { s } }
+    let neg = starts_with(s, "-")
+    let from = if neg { 1 } else { 0 }
+    let mant = substr(s, from, e - from)
+    let k = parse_int(substr(s, e + 1, len(s) - e - 1))
+    let dot = find(mant, ".")
+    let digits = if dot < 0 { mant } else { substr(mant, 0, dot) + substr(mant, dot + 1, len(mant) - dot - 1) }
+    let int_len = (if dot < 0 { len(mant) } else { dot }) + k
+    var out = ""
+    if int_len <= 0 {
+        out = "0."
+        for i in 0..-int_len { out = out + "0" }
+        out = out + digits
+    } else if int_len >= len(digits) {
+        out = digits
+        for i in 0..int_len - len(digits) { out = out + "0" }
+    } else {
+        out = substr(digits, 0, int_len) + "." + substr(digits, int_len, len(digits) - int_len)
+    }
+    (if neg { "-" } else { "" }) + out
+}
+
+// Records the evaluation of the weights named `wsha` as a trial of the registry in `results`
+// (the same strategy is one trial, however it is run: the same weights, already recorded or
+// seen in this run, or the same statistics); without `trial`, it is only deflated against the
+// registry. (trials in the registry, the DSR)
+fn record_evaluation(results: str, t: Trial, wsha: str, inout seen: List[str], trial: bool) -> (i64, f64) {
+    let path = results + "/registro_testes.csv"
+    var all = load(path)
+    if not trial {
+        if len(all) == 0 { return (1, deflate(t, [t]).1) }
+        return (len(all), deflate(t, all).1)
+    }
+    let counted = contains(seen, wsha)
+    if not counted { seen.push(wsha) }
+    let tag = "pesos " + wsha + ";"
+    var same = counted
+    for x in all {
+        if (x.study == "kairos" and starts_with(x.params, tag)) or (x.n == t.n and abs(x.sr_m - t.sr_m) <= 0.000001 and abs(x.skew - t.skew) <= 0.0001 and abs(x.kurt - t.kurt) <= 0.0001) { same = true }
+    }
+    if not same {
+        make_dir(results)
+        all = upsert(path, t)
+    }
+    (max(len(all), 1), deflate(t, all).1)
+}
+
+// The trial of an evaluation (as the bridge's sim_record names it): the program, the weights, the
+// costs, the delay, the capital, the tax, and the period simulated.
+fn evaluation_trial(d: LabData, cdi_m: List[f64], run: SimRun, wsha: str, cfg: SimCfg, program: str) -> Trial {
+    var excess: List[f64] = []
+    for k in 0..len(run.ret) { excess.push(run.ret[k] - cdi_m[run.mi[k]]) }
+    let period = fmt_ym(d.cal.months[run.mi[0]]) + ".." + fmt_ym(d.cal.months[run.mi[len(run.mi) - 1]])
+    let costs = if cfg.real_costs { "custo real" } else { "custo " + fmt_display(cfg.cost_bps) + " bps" }
+    let params = "pesos " + wsha + "; " + costs + "; lag " + str(cfg.lag) + "; capital " + fmt_display(cfg.capital) + "; " + (if cfg.tax { "com IR" } else { "sem IR" })
+    new_trial("kairos", program, params, period, excess)
+}

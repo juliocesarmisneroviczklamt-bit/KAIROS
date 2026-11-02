@@ -1,0 +1,36 @@
+// The registry of trials written in Kairós (lab/trials.krs, lab/bridge.krs) against the bridge's:
+// a new strategy evaluated by b3.evaluate (which records it in KAIROS_RESULTS) and recorded in
+// Kairós in another copy of the registry gives the same trials and DSR, and the same file.
+//
+//   KAIROS_RESULTS=<copy 1> kairos run kairos/lab/check_record.krs data <copy 2>
+import "bridge.krs"
+
+let d = load_lab_data(args()[0])
+let cdi_d = cdi_days(d.dates, load_cdi(args()[0]))
+let cdi_m = cdi_months(d.cal, cdi_d)
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+let n = size(ret, month)
+// momentum with the top half (not a strategy of the registry)
+var weights = zeros_like(ret)
+for m in max(12, b3.month_index(200101))..n {
+    let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+    let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m - 2], 0.0), over: month) - 1.0
+    let s = where(alive, signal, nan)
+    let cnt = int(nan_count(s, over: asset))
+    if cnt < 15 { continue }
+    let k = int(round(float(cnt) / 2.0))
+    weights[month: m] = where(top_k(s, k, over: asset), 1.0 / float(k), 0.0)
+}
+let ev = b3.evaluate(weights, cost_bps: 30.0, lag: 1)
+let cfg = SimCfg { capital: 1000000.0, lag: 1, real_costs: false, cost_bps: 30.0, tax: false, cap_adv: 0.0 }
+let r = kairos_evaluate(d, cdi_d, weights, n, cfg)
+let sha = weights_sha(weights, n)
+let t = evaluation_trial(d, cdi_m, r.1, sha, cfg, "check_record")
+var seen: List[str] = []
+let rec = record_evaluation(args()[1], t, sha, inout seen, true)
+print("trials", rec.0, ev.trials, "dsr", rec.1, ev.dsr)
+print("record:", if rec.0 == ev.trials and to_bits(rec.1) == to_bits(ev.dsr) { "the same" } else { "DIFFERENT" })
+// again: the same strategy is one trial
+let again = record_evaluation(args()[1], t, sha, inout seen, true)
+print("again:", if again.0 == rec.0 { "one trial" } else { "COUNTED TWICE" })
