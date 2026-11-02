@@ -1,15 +1,23 @@
 // The WebAssembly back end of Kairós (M13), written in Kairós: the checked HIR of a program
 // becomes a WebAssembly module that runs under WASI (wasmtime, node, a browser...). It compiles
-// integers, booleans, texts, functions and control flow with the interpreter's semantics: the
-// same output, and the same runtime errors with the same messages (checked arithmetic: R0006
-// overflow, R0002 division by zero, R0007 negative exponent; R0003 assertions). What it does
-// not compile yet stops with the code W0001.
+// integers, floats, booleans, texts, tuples, structs, functions and control flow with the
+// interpreter's semantics: the same output, and the same runtime errors with the same messages
+// (checked arithmetic: R0006 overflow, R0002 division by zero, R0007 negative exponent; R0003
+// assertions...). What it does not compile yet stops with the code W0001.
 //
 // The module imports `fd_write` and `proc_exit` from WASI and exports `_start` and `memory`.
-// Memory: an iovec at 0, the byte count at 8, 32 bytes of scratch for numbers at 16, the
-// constant data from 1024 (the program's texts, and every runtime error message, rendered when
-// compiling), then the heap (global 0 is its next free byte). The functions of the runtime
-// (rt.krs, written in Kairós) are compiled with the program, as it uses them.
+// Memory: an iovec at 0, the byte count at 8, 32 bytes of scratch for numbers at 16, the lists
+// of free blocks at 64 (rt.krs), the constant data from 1024 (the program's texts, and every
+// runtime error message, rendered when compiling), then the heap (global 0 is its next free
+// byte). The functions of the runtime (rt.krs, written in Kairós) are compiled with the program,
+// as it uses them.
+//
+// Values in the heap (texts, tuples, structs) are addresses of objects that count their
+// references (rt.krs). A value an expression gives is owned: whoever takes it keeps the
+// reference or drops it. Variables own their values and drop them when they change and when
+// the function returns; a function borrows its arguments; a value is copied before it changes
+// when others share it. Each type gets its own functions to drop, copy and write its values
+// (the glue, made as the program uses them).
 import "wasm.krs"
 import "front.krs"
 
@@ -18,7 +26,9 @@ struct WGen {
     ck: Checker,
     srcs: List[str],                // the source of each file (for messages)
     fidx: Map[i64, i64],            // Kairós function -> WebAssembly function
-    order: List[i64],               // the Kairós functions to compile, in their order
+    order: List[i64],               // the functions to compile, in their order (glue: -1 - k)
+    glue: List[(str, Ty)],          // the glue functions: what each does, for which type
+    glue_idx: Map[str, i64],        // "what type" -> its function
     strs: Map[str, (i64, i64)],     // a constant text -> (address, byte length)
     objs: Map[str, i64],            // a constant text -> the address of its object
     // the function being generated
@@ -26,6 +36,7 @@ struct WGen {
     ltypes: List[i64],              // the type of each local (the parameters first)
     nparams: i64,
     slot_local: List[i64],          // Kairós slot -> local (-1: no value)
+    slot_ty: List[Ty],              // the type of each slot
     depth: i64,                     // blocks, loops and ifs open
     loops: List[(i64, i64)],        // the levels of a loop's exit and continue blocks
     unchecked: bool,                // the runtime's own arithmetic is not checked
@@ -65,12 +76,16 @@ fn f_print_str() -> i64 {
     6
 }
 
-fn f_start() -> i64 {
+fn f_incref() -> i64 {
     7
 }
 
-fn first_user_fn() -> i64 {
+fn f_start() -> i64 {
     8
+}
+
+fn first_user_fn() -> i64 {
+    9
 }
 
 // The function index of a Kairós function, which is compiled once its index is asked for.
@@ -85,6 +100,17 @@ fn fn_index(inout g: WGen, id: i64) -> i64 {
 // A function of the runtime (rt.krs), by name.
 fn rt_fn(inout g: WGen, name: str) -> i64 {
     fn_index(inout g, g.ck.fn_ids[name])
+}
+
+// The glue function that does `what` (drop, unique, show) for values of type `t`.
+fn glue_fn(inout g: WGen, what: str, t: Ty) -> i64 {
+    let key = what + " " + show(g.ck, t)
+    if contains(g.glue_idx, key) { return g.glue_idx[key] }
+    let i = first_user_fn() + len(g.order)
+    g.glue_idx[key] = i
+    g.order.push(-1 - len(g.glue))
+    g.glue.push((what, t))
+    i
 }
 
 fn wg_fail(inout g: WGen, e: H, what: str) {
@@ -182,14 +208,15 @@ fn emit_text(inout g: WGen, fd: i64, s: str) {
     call_f(inout g, f_write())
 }
 
-// A constant text as a value: the address of its object (the length, then the bytes), at a
-// multiple of 4.
+// A constant text as a value: the address of its object (a count of 0: never freed; the length,
+// then the bytes), at a multiple of 8.
 fn intern_obj(inout g: WGen, s: str) -> i64 {
     if contains(g.objs, s) { return g.objs[s] }
-    while len(g.m.data) % 4 != 0 { g.m.data.push(0) }
+    while len(g.m.data) % 8 != 0 { g.m.data.push(0) }
     let b = utf8_bytes(s)
     let at = g.m.data_at + len(g.m.data)
     let n = len(b)
+    for i in 0..4 { g.m.data.push(0) }
     g.m.data.push(bit_and(n, 255))
     g.m.data.push(bit_and(shr(n, 8), 255))
     g.m.data.push(bit_and(shr(n, 16), 255))
@@ -265,11 +292,10 @@ fn overflow_at(inout g: WGen, e: H) {
 fn write_obj(inout g: WGen, fd: i64, p: i64) {
     i32c(inout g, fd)
     lget(inout g, p)
-    i32c(inout g, 4)
+    i32c(inout g, 8)
     op(inout g, 106)
     lget(inout g, p)
-    op_u(inout g, 40, 2)
-    uleb(inout g.code, 0)
+    load_at(inout g, wt_i32(), 4)
     call_f(inout g, f_write())
 }
 
@@ -301,10 +327,63 @@ fn vt(t: Ty) -> i64 {
         TFloat => wt_f64(),
         TBool => wt_i32(),
         TStr => wt_i32(),
+        TTuple(_) => wt_i32(),
+        TStruct(_) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
     }
+}
+
+// Values whose WebAssembly value is the address of an object that counts its references.
+fn heap(t: Ty) -> bool {
+    match t {
+        TStr => true,
+        TTuple(_) => true,
+        TStruct(_) => true,
+        _ => false,
+    }
+}
+
+// The types of the fields of a tuple or a struct.
+fn field_tys(g: WGen, t: Ty) -> List[Ty] {
+    match t {
+        TTuple(ts) => {
+            var out: List[Ty] = []
+            for x in ts { out.push(fin_ty(g.ck, x)) }
+            out
+        },
+        TStruct(id) => {
+            var out: List[Ty] = []
+            for f in g.ck.structs[id].fields { out.push(fin_ty(g.ck, f.1)) }
+            out
+        },
+        _ => [],
+    }
+}
+
+// A value of WebAssembly type `w` from memory at the address on the stack plus `off`, and to
+// memory (the address, then the value, on the stack).
+fn load_at(inout g: WGen, w: i64, off: i64) {
+    if w == wt_i64() {
+        op_u(inout g, 41, 3)
+    } else if w == wt_f64() {
+        op_u(inout g, 43, 3)
+    } else {
+        op_u(inout g, 40, 2)
+    }
+    uleb(inout g.code, off)
+}
+
+fn store_at(inout g: WGen, w: i64, off: i64) {
+    if w == wt_i64() {
+        op_u(inout g, 55, 3)
+    } else if w == wt_f64() {
+        op_u(inout g, 57, 3)
+    } else {
+        op_u(inout g, 54, 2)
+    }
+    uleb(inout g.code, off)
 }
 
 fn vt_of(inout g: WGen, e: H) -> i64 {
@@ -313,11 +392,159 @@ fn vt_of(inout g: WGen, e: H) -> i64 {
     max(v, 0)
 }
 
+// ------------------------------------------------------------------ references
+
+// One more reference to the value on the stack, which stays there.
+fn incref(inout g: WGen, t: Ty) {
+    if heap(t) { call_f(inout g, f_incref()) }
+}
+
+// Drops the value on the stack (a reference less, for a value in the heap).
+fn drop_v(inout g: WGen, t: Ty) {
+    if heap(t) {
+        call_f(inout g, glue_fn(inout g, "drop", t))
+    } else if vt(t) > 0 {
+        op(inout g, 26)
+    }
+}
+
+// The value of `e` on the stack, borrowed from its variable when nothing can change that
+// variable before the value is used (`safe`). The result is the local of an owned value, to
+// drop once used, or -1.
+fn gen_borrow(inout g: WGen, e: H, safe: bool) -> i64 {
+    if heap(e.t) and safe and e.kind == "local" {
+        let l = g.slot_local[e.n]
+        if l >= 0 { lget(inout g, l) }
+        return -1
+    }
+    gen(inout g, e)
+    // constants are never freed
+    if g.failed or not heap(e.t) or e.kind == "lit" { return -1 }
+    let t = new_local(inout g, wt_i32())
+    op_u(inout g, 34, t)
+    t
+}
+
+fn drop_tmp(inout g: WGen, l: i64, t: Ty) {
+    if l >= 0 {
+        lget(inout g, l)
+        drop_v(inout g, t)
+    }
+}
+
+// Can `e` change a variable (an assignment, an `inout` argument)?
+fn changes(e: H) -> bool {
+    if e.kind == "assign" or e.kind == "opassign" or e.kind == "tassign" or e.kind == "inout" { return true }
+    for k in e.kids {
+        if changes(k) { return true }
+    }
+    false
+}
+
+// Stores the owned value on the stack in variable `n`, dropping the value it had.
+fn set_slot(inout g: WGen, n: i64) {
+    let l = g.slot_local[n]
+    if l < 0 { return }
+    if heap(g.slot_ty[n]) {
+        lget(inout g, l)
+        drop_v(inout g, g.slot_ty[n])
+    }
+    lset(inout g, l)
+}
+
+// Drops the values the function's variables own (not its arguments: borrowed).
+fn epilogue(inout g: WGen) {
+    for n in g.nparams..len(g.slot_local) {
+        let l = g.slot_local[n]
+        if l >= 0 and heap(g.slot_ty[n]) {
+            lget(inout g, l)
+            drop_v(inout g, g.slot_ty[n])
+        }
+    }
+}
+
+// The cell of a place: a variable's local, or a field in memory (a local with the object's
+// address, and the field's offset). Its type.
+struct Cell {
+    local: bool,
+    at: i64,
+    off: i64,
+    ty: Ty,
+}
+
+fn cell_load(inout g: WGen, c: Cell) {
+    let w = vt(c.ty)
+    if w <= 0 { return }
+    lget(inout g, c.at)
+    if not c.local { load_at(inout g, w, c.off) }
+}
+
+// Stores the value on the stack in the cell (what it had is not dropped).
+fn cell_store(inout g: WGen, c: Cell) {
+    let w = vt(c.ty)
+    if w <= 0 { return }
+    if c.local {
+        lset(inout g, c.at)
+        return
+    }
+    let v = new_local(inout g, w)
+    lset(inout g, v)
+    lget(inout g, c.at)
+    lget(inout g, v)
+    store_at(inout g, w, c.off)
+}
+
+// The cell of a place. Each object on the way is made unique first (copied when shared), so
+// changing the cell changes no other value.
+fn place_cell(inout g: WGen, p: H) -> Cell {
+    if p.kind == "plocal" { return Cell { local: true, at: g.slot_local[p.n], off: 0, ty: g.slot_ty[p.n] } }
+    if p.kind == "pfield" {
+        let b = place_cell(inout g, p.kids[0])
+        cell_load(inout g, b)
+        call_f(inout g, glue_fn(inout g, "unique", b.ty))
+        cell_store(inout g, b)
+        cell_load(inout g, b)
+        let a = new_local(inout g, wt_i32())
+        lset(inout g, a)
+        return Cell { local: false, at: a, off: 8 + 8 * p.n, ty: field_tys(g, b.ty)[p.n] }
+    }
+    wg_fail(inout g, p, "changing this part of a value")
+    Cell { local: true, at: 0, off: 0, ty: Ty.TUnit }
+}
+
+// Binds pattern `p` to the value of type `t` in local `s` (borrowed: a variable it binds takes a
+// reference of its own).
+fn bind_from(inout g: WGen, p: H, s: i64, t: Ty) {
+    if p.kind == "pbind" {
+        if g.slot_local[p.n] >= 0 {
+            lget(inout g, s)
+            incref(inout g, t)
+            set_slot(inout g, p.n)
+        }
+        return
+    }
+    if p.kind == "ptuple" {
+        let fts = field_tys(g, t)
+        for i in 0..len(p.kids) {
+            let sub = p.kids[i]
+            let w = vt(fts[i])
+            if sub.kind == "pwild" or sub.kind == "plit" or w <= 0 { continue }
+            let f = new_local(inout g, w)
+            lget(inout g, s)
+            load_at(inout g, w, 8 + 8 * i)
+            lset(inout g, f)
+            bind_from(inout g, sub, f, fts[i])
+        }
+        return
+    }
+    if p.kind != "pwild" and p.kind != "plit" { wg_fail(inout g, p, "this pattern") }
+}
+
 // ------------------------------------------------------------------ expressions
 
 fn gen_stmt(inout g: WGen, e: H) {
     gen(inout g, e)
-    if vt(e.t) > 0 { op(inout g, 26) }
+    drop_v(inout g, e.t)
 }
 
 fn gen(inout g: WGen, e: H) {
@@ -343,7 +570,10 @@ fn gen(inout g: WGen, e: H) {
     }
     if k == "local" {
         let l = g.slot_local[e.n]
-        if l >= 0 { lget(inout g, l) }
+        if l >= 0 {
+            lget(inout g, l)
+            incref(inout g, e.t)
+        }
         return
     }
     if k == "block" {
@@ -353,36 +583,86 @@ fn gen(inout g: WGen, e: H) {
         return
     }
     if k == "let" {
-        gen(inout g, e.kids[1])
         let p = e.kids[0]
-        if p.kind == "pbind" {
-            let l = g.slot_local[p.n]
-            if l >= 0 { lset(inout g, l) }
-        } else if p.kind == "pwild" {
-            if vt(e.kids[1].t) > 0 { op(inout g, 26) }
-        } else {
-            wg_fail(inout g, p, "this pattern")
+        let v = e.kids[1]
+        gen(inout g, v)
+        if p.kind == "pbind" { return set_slot(inout g, p.n) }
+        if p.kind == "pwild" { return drop_v(inout g, v.t) }
+        // a pattern takes the value apart: its variables take references of their own
+        let w = vt_of(inout g, v)
+        let s = new_local(inout g, if w > 0 { w } else { wt_i32() })
+        if w > 0 { lset(inout g, s) }
+        bind_from(inout g, p, s, v.t)
+        if heap(v.t) {
+            lget(inout g, s)
+            drop_v(inout g, v.t)
         }
         return
     }
     if k == "assign" or k == "opassign" {
         let p = e.kids[0]
-        if p.kind != "plocal" { return wg_fail(inout g, p, "assigning a part of a value") }
-        let l = g.slot_local[p.n]
-        if k == "assign" {
-            gen(inout g, e.kids[1])
-            if l >= 0 { lset(inout g, l) }
-            return
-        }
-        // `x op= v`: the value first, then the variable
         let v = e.kids[1]
+        let w = vt_of(inout g, v)
+        // the value first, then the place
         gen(inout g, v)
-        let tv = new_local(inout g, vt_of(inout g, v))
-        lset(inout g, tv)
-        lget(inout g, l)
-        lget(inout g, tv)
+        if k == "assign" and p.kind == "plocal" { return set_slot(inout g, p.n) }
+        let tv = new_local(inout g, if w > 0 { w } else { wt_i32() })
+        if w > 0 { lset(inout g, tv) }
+        let c = place_cell(inout g, p)
+        if g.failed { return }
+        if k == "assign" {
+            if heap(c.ty) {
+                cell_load(inout g, c)
+                drop_v(inout g, c.ty)
+            }
+            if w > 0 { lget(inout g, tv) }
+            return cell_store(inout g, c)
+        }
+        // `x op= v`: the current value (borrowed) op the value
+        cell_load(inout g, c)
+        if w > 0 { lget(inout g, tv) }
         op_on(inout g, e.text, v.t, e)
-        lset(inout g, l)
+        if heap(c.ty) {
+            drop_tmp(inout g, tv, v.t)
+            let nv = new_local(inout g, wt_i32())
+            lset(inout g, nv)
+            cell_load(inout g, c)
+            drop_v(inout g, c.ty)
+            lget(inout g, nv)
+        }
+        return cell_store(inout g, c)
+    }
+    if k == "field" {
+        let b = e.kids[0]
+        let tb = gen_borrow(inout g, b, true)
+        if t > 0 {
+            load_at(inout g, t, 8 + 8 * e.n)
+        } else {
+            op(inout g, 26)
+        }
+        incref(inout g, e.t)
+        drop_tmp(inout g, tb, b.t)
+        return
+    }
+    if k == "struct" or k == "tuple" {
+        let fts = field_tys(g, e.t)
+        let n = len(e.kids)
+        i64c(inout g, 8 + 8 * n)
+        call_f(inout g, rt_fn(inout g, "rt_alloc"))
+        op(inout g, 167)
+        let o = new_local(inout g, wt_i32())
+        lset(inout g, o)
+        lget(inout g, o)
+        i32c(inout g, 1)
+        store_at(inout g, wt_i32(), 0)
+        // each field takes the value its expression gives
+        for i in 0..n {
+            let w = vt(fts[i])
+            if w > 0 { lget(inout g, o) }
+            gen(inout g, e.kids[i])
+            if w > 0 { store_at(inout g, w, 8 + 8 * i) }
+        }
+        lget(inout g, o)
         return
     }
     if k == "binary" { return binary_w(inout g, e) }
@@ -428,10 +708,11 @@ fn gen(inout g: WGen, e: H) {
     if k == "if" {
         gen(inout g, e.kids[0])
         open(inout g, 4, t)
-        gen(inout g, e.kids[1])
+        // an `if` of no value drops what its branches give
+        if t == 0 { gen_stmt(inout g, e.kids[1]) } else { gen(inout g, e.kids[1]) }
         if e.kids[2].kind != "-" {
             else_(inout g)
-            gen(inout g, e.kids[2])
+            if t == 0 { gen_stmt(inout g, e.kids[2]) } else { gen(inout g, e.kids[2]) }
         }
         close(inout g)
         return
@@ -460,18 +741,30 @@ fn gen(inout g: WGen, e: H) {
     }
     if k == "return" {
         if e.kids[0].kind != "-" { gen(inout g, e.kids[0]) }
+        epilogue(inout g)
         op(inout g, 15)
         return
     }
     if k == "match" { return match_w(inout g, e) }
     if k == "call" {
-        for a in e.kids {
+        // the arguments are borrowed: what the call made for them is dropped after it
+        var tmps: List[(i64, Ty)] = []
+        for i in 0..len(e.kids) {
+            let a = e.kids[i]
             if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
-            gen(inout g, a.kids[0])
+            var safe = true
+            for j in i + 1..len(e.kids) {
+                if changes(e.kids[j]) { safe = false }
+            }
+            tmps.push((gen_borrow(inout g, a.kids[0], safe), a.kids[0].t))
         }
         let name = g.ck.sigs[e.n].name
-        if starts_with(name, "wasm_") { return intrinsic(inout g, name, e) }
-        call_f(inout g, fn_index(inout g, e.n))
+        if starts_with(name, "wasm_") {
+            intrinsic(inout g, name, e)
+        } else {
+            call_f(inout g, fn_index(inout g, e.n))
+        }
+        for x in tmps { drop_tmp(inout g, x.0, x.1) }
         return
     }
     if k == "builtin" { return builtin_w(inout g, e) }
@@ -662,8 +955,19 @@ fn float_op(inout g: WGen, o: str, e: H) {
 
 fn binary_w(inout g: WGen, e: H) {
     let a = e.kids[0]
+    let b = e.kids[1]
+    if heap(a.t) {
+        // values in the heap are borrowed by the operation
+        let ta = gen_borrow(inout g, a, not changes(b))
+        let tb = gen_borrow(inout g, b, true)
+        if g.failed { return }
+        op_on(inout g, e.text, a.t, e)
+        drop_tmp(inout g, ta, a.t)
+        drop_tmp(inout g, tb, b.t)
+        return
+    }
     gen(inout g, a)
-    gen(inout g, e.kids[1])
+    gen(inout g, b)
     if g.failed { return }
     op_on(inout g, e.text, a.t, e)
 }
@@ -680,6 +984,11 @@ fn op_on(inout g: WGen, o: str, t: Ty, e: H) {
         if o == "<=" { return op(inout g, 87) }
         if o == ">=" { return op(inout g, 89) }
         return arith(inout g, o, e)
+    }
+    if heap(t) and t != Ty.TStr and (o == "==" or o == "!=") {
+        call_f(inout g, glue_fn(inout g, "eq", t))
+        if o == "!=" { op(inout g, 69) }
+        return
     }
     if t == Ty.TStr {
         if o == "+" { return call_f(inout g, rt_fn(inout g, "rt_concat")) }
@@ -750,8 +1059,27 @@ fn for_range_w(inout g: WGen, e: H) {
 
 // A pattern's test on the scrutinee in local `s` (pushes an i32), or none when it always
 // matches.
-fn pat_test(inout g: WGen, p: H, s: i64, st: i64) -> bool {
+fn pat_test(inout g: WGen, p: H, s: i64, t: Ty) -> bool {
     if p.kind == "pwild" or p.kind == "pbind" { return false }
+    if p.kind == "ptuple" {
+        // each field that is tested, in a local of its own; the tests joined by `and`
+        let fts = field_tys(g, t)
+        var n = 0
+        for i in 0..len(p.kids) {
+            let sub = p.kids[i]
+            let w = vt(fts[i])
+            if sub.kind == "pwild" or sub.kind == "pbind" or w <= 0 { continue }
+            let f = new_local(inout g, w)
+            lget(inout g, s)
+            load_at(inout g, w, 8 + 8 * i)
+            lset(inout g, f)
+            if pat_test(inout g, sub, f, fts[i]) {
+                if n > 0 { op(inout g, 113) }
+                n += 1
+            }
+        }
+        return n > 0
+    }
     if p.kind == "plit" {
         lget(inout g, s)
         if starts_with(p.text, "i64 ") {
@@ -784,20 +1112,15 @@ fn match_w(inout g: WGen, e: H) {
     for i in 1..len(e.kids) {
         let arm = e.kids[i]
         let p = arm.kids[0]
-        let tested = pat_test(inout g, p, s, st)
+        let tested = pat_test(inout g, p, s, scrut.t)
         if g.failed { return }
         if tested {
             open(inout g, 4, bt)
             opened += 1
         }
-        if p.kind == "pbind" {
-            let l = g.slot_local[p.n]
-            if l >= 0 {
-                lget(inout g, s)
-                lset(inout g, l)
-            }
-        }
-        gen(inout g, arm.kids[1])
+        bind_from(inout g, p, s, scrut.t)
+        // a `match` of no value drops what its arms give
+        if bt == 0 { gen_stmt(inout g, arm.kids[1]) } else { gen(inout g, arm.kids[1]) }
         if not tested {
             closed_all = true
             break
@@ -806,6 +1129,11 @@ fn match_w(inout g: WGen, e: H) {
     }
     if not closed_all { fail_at_rt(inout g, e, "R0008", "no match arm matched", "") }
     for i in 0..opened { close(inout g) }
+    // the value matched is dropped (the variables the arms bound have their own references)
+    if heap(scrut.t) {
+        lget(inout g, s)
+        drop_v(inout g, scrut.t)
+    }
 }
 
 fn builtin_w(inout g: WGen, e: H) {
@@ -822,8 +1150,18 @@ fn builtin_w(inout g: WGen, e: H) {
             if x.kind == "lit" and starts_with(x.text, "str ") {
                 emit_text(inout g, 1, lit_text(x.text))
             } else if x.t == Ty.TStr {
-                gen(inout g, x)
+                let tx = gen_borrow(inout g, x, true)
                 call_f(inout g, f_print_str())
+                drop_tmp(inout g, tx, x.t)
+            } else if heap(x.t) {
+                // a tuple or a struct: its text, as the interpreter writes it
+                let tx = gen_borrow(inout g, x, true)
+                call_f(inout g, glue_fn(inout g, "show", x.t))
+                let st = new_local(inout g, wt_i32())
+                op_u(inout g, 34, st)
+                call_f(inout g, f_print_str())
+                drop_tmp(inout g, st, Ty.TStr)
+                drop_tmp(inout g, tx, x.t)
             } else if xt == wt_i64() {
                 gen(inout g, x)
                 call_f(inout g, f_print_i64())
@@ -939,9 +1277,14 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "int" and vt(args[0].kids[0].t) == wt_i64() { return gen(inout g, args[0].kids[0]) }
     if b == "str" {
         let x = args[0].kids[0]
+        if x.t == Ty.TStr { return gen(inout g, x) }
+        if heap(x.t) {
+            let tx = gen_borrow(inout g, x, true)
+            call_f(inout g, glue_fn(inout g, "show", x.t))
+            return drop_tmp(inout g, tx, x.t)
+        }
         gen(inout g, x)
         if x.t == Ty.TInt { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
-        if x.t == Ty.TStr { return }
         if x.t == Ty.TBool {
             let t = intern_obj(inout g, "true")
             let f = intern_obj(inout g, "false")
@@ -959,12 +1302,16 @@ fn builtin_w(inout g: WGen, e: H) {
         return wg_fail(inout g, x, "`str` of values of type `" + show(g.ck, x.t) + "`")
     }
     if b == "len" and args[0].kids[0].t == Ty.TStr {
-        gen(inout g, args[0].kids[0])
-        return call_f(inout g, rt_fn(inout g, "rt_str_len"))
+        let ts = gen_borrow(inout g, args[0].kids[0], true)
+        call_f(inout g, rt_fn(inout g, "rt_str_len"))
+        return drop_tmp(inout g, ts, Ty.TStr)
     }
     if b == "substr" {
-        for a in args { gen(inout g, a.kids[0]) }
-        return call_f(inout g, rt_fn(inout g, "rt_substr"))
+        let ts = gen_borrow(inout g, args[0].kids[0], not changes(args[1]) and not changes(args[2]))
+        gen(inout g, args[1].kids[0])
+        gen(inout g, args[2].kids[0])
+        call_f(inout g, rt_fn(inout g, "rt_substr"))
+        return drop_tmp(inout g, ts, Ty.TStr)
     }
     if b == "bit_and" or b == "bit_or" or b == "bit_xor" {
         gen(inout g, args[0].kids[0])
@@ -1127,6 +1474,237 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
     wg_fail(inout g, e, "the instruction `" + name + "`")
 }
 
+// ------------------------------------------------------------------ glue
+//
+// The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
+// the children are dropped and the block freed), `unique` (the object itself when no one else
+// has it, a copy otherwise), `show` (its text, as the interpreter writes it) and `eq`.
+
+fn gen_glue(inout g: WGen, j: i64) {
+    let what = g.glue[j].0
+    let t = g.glue[j].1
+    g.code = []
+    g.ltypes = []
+    g.slot_local = []
+    g.slot_ty = []
+    g.nparams = 0
+    g.depth = 0
+    g.loops = []
+    g.unchecked = true
+    let i32t = wt_i32()
+    let p = new_local(inout g, i32t)
+    if what == "drop" {
+        glue_drop(inout g, t)
+        g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [])))
+    } else if what == "unique" {
+        glue_unique(inout g, t)
+        g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
+    } else if what == "show" {
+        glue_show(inout g, t)
+        g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
+    } else {
+        let q = new_local(inout g, i32t)
+        glue_eq(inout g, t)
+        g.m.funcs.push(finish(inout g, 2, wtype(inout g.m, [i32t, i32t], [i32t])))
+    }
+}
+
+fn glue_drop(inout g: WGen, t: Ty) {
+    let rc = new_local(inout g, wt_i32())
+    // nothing for 0
+    lget(inout g, 0)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    op(inout g, 15)
+    close(inout g)
+    // shared: one reference less; a constant (0): nothing
+    lget(inout g, 0)
+    load_at(inout g, wt_i32(), 0)
+    lset(inout g, rc)
+    lget(inout g, rc)
+    i32c(inout g, 1)
+    op(inout g, 71)
+    open(inout g, 4, 0)
+    lget(inout g, rc)
+    i32c(inout g, 1)
+    op(inout g, 74)
+    open(inout g, 4, 0)
+    lget(inout g, 0)
+    lget(inout g, rc)
+    i32c(inout g, 1)
+    op(inout g, 107)
+    store_at(inout g, wt_i32(), 0)
+    close(inout g)
+    op(inout g, 15)
+    close(inout g)
+    // the last reference: the children, then the block
+    let fts = field_tys(g, t)
+    for i in 0..len(fts) {
+        if heap(fts[i]) {
+            lget(inout g, 0)
+            load_at(inout g, wt_i32(), 8 + 8 * i)
+            drop_v(inout g, fts[i])
+        }
+    }
+    lget(inout g, 0)
+    op(inout g, 173)
+    if t == Ty.TStr {
+        lget(inout g, 0)
+        load_at(inout g, wt_i32(), 4)
+        i32c(inout g, 8)
+        op(inout g, 106)
+        op(inout g, 173)
+    } else {
+        i64c(inout g, 8 + 8 * len(fts))
+    }
+    call_f(inout g, rt_fn(inout g, "rt_free"))
+}
+
+fn glue_unique(inout g: WGen, t: Ty) {
+    // no one else has it: itself
+    lget(inout g, 0)
+    load_at(inout g, wt_i32(), 0)
+    i32c(inout g, 1)
+    op(inout g, 70)
+    open(inout g, 4, 0)
+    lget(inout g, 0)
+    op(inout g, 15)
+    close(inout g)
+    // a copy: the same fields, each child with one more reference
+    let fts = field_tys(g, t)
+    let q = new_local(inout g, wt_i32())
+    i64c(inout g, 8 + 8 * len(fts))
+    call_f(inout g, rt_fn(inout g, "rt_alloc"))
+    op(inout g, 167)
+    lset(inout g, q)
+    lget(inout g, q)
+    i32c(inout g, 1)
+    store_at(inout g, wt_i32(), 0)
+    for i in 0..len(fts) {
+        let w = vt(fts[i])
+        if w > 0 {
+            lget(inout g, q)
+            lget(inout g, 0)
+            load_at(inout g, w, 8 + 8 * i)
+            incref(inout g, fts[i])
+            store_at(inout g, w, 8 + 8 * i)
+        }
+    }
+    // the original has one reference less (it is shared, or a constant)
+    lget(inout g, 0)
+    drop_v(inout g, t)
+    lget(inout g, q)
+}
+
+// acc = acc + the constant text s
+fn acc_text(inout g: WGen, acc: i64, s: str) {
+    lget(inout g, acc)
+    i32c(inout g, intern_obj(inout g, s))
+    call_f(inout g, rt_fn(inout g, "rt_concat"))
+    lget(inout g, acc)
+    drop_v(inout g, Ty.TStr)
+    lset(inout g, acc)
+}
+
+// acc = acc + the owned text on the stack (dropped after)
+fn acc_owned(inout g: WGen, acc: i64) {
+    let pc = new_local(inout g, wt_i32())
+    lset(inout g, pc)
+    lget(inout g, acc)
+    lget(inout g, pc)
+    call_f(inout g, rt_fn(inout g, "rt_concat"))
+    lget(inout g, acc)
+    drop_v(inout g, Ty.TStr)
+    lget(inout g, pc)
+    drop_v(inout g, Ty.TStr)
+    lset(inout g, acc)
+}
+
+// The text of the value of type t at offset `off` of the object in local `o`, inside another value
+// (texts between quotes): an owned text on the stack.
+fn show_inner(inout g: WGen, o: i64, off: i64, t: Ty) {
+    let w = vt(t)
+    if w <= 0 {
+        i32c(inout g, intern_obj(inout g, "()"))
+        return
+    }
+    lget(inout g, o)
+    load_at(inout g, w, off)
+    if t == Ty.TInt { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
+    if t == Ty.TFloat { return call_f(inout g, rt_fn(inout g, "rt_fmt_f64")) }
+    if t == Ty.TStr { return call_f(inout g, rt_fn(inout g, "rt_str_debug")) }
+    if t == Ty.TBool {
+        let c = new_local(inout g, wt_i32())
+        lset(inout g, c)
+        i32c(inout g, intern_obj(inout g, "true"))
+        i32c(inout g, intern_obj(inout g, "false"))
+        lget(inout g, c)
+        return op(inout g, 27)
+    }
+    if heap(t) { return call_f(inout g, glue_fn(inout g, "show", t)) }
+    wg_fail(inout g, h_none(), "writing values of type `" + show(g.ck, t) + "`")
+}
+
+fn glue_show(inout g: WGen, t: Ty) {
+    let acc = new_local(inout g, wt_i32())
+    let fts = field_tys(g, t)
+    let n = len(fts)
+    var names: List[str] = []
+    var head = "("
+    match t {
+        TStruct(id) => {
+            for f in g.ck.structs[id].fields { names.push(f.0) }
+            head = g.ck.structs[id].name + " { "
+        },
+        _ => {},
+    }
+    let is_struct = len(names) > 0 or head != "("
+    i32c(inout g, intern_obj(inout g, head))
+    lset(inout g, acc)
+    for i in 0..n {
+        var sep = if i > 0 { ", " } else { "" }
+        if is_struct { sep = sep + names[i] + ": " }
+        if sep != "" { acc_text(inout g, acc, sep) }
+        show_inner(inout g, 0, 8 + 8 * i, fts[i])
+        acc_owned(inout g, acc)
+    }
+    acc_text(inout g, acc, if is_struct { " }" } else if n == 1 { ",)" } else { ")" })
+    lget(inout g, acc)
+}
+
+fn glue_eq(inout g: WGen, t: Ty) {
+    let fts = field_tys(g, t)
+    for i in 0..len(fts) {
+        let ft = fts[i]
+        let w = vt(ft)
+        if w <= 0 { continue }
+        lget(inout g, 0)
+        load_at(inout g, w, 8 + 8 * i)
+        lget(inout g, 1)
+        load_at(inout g, w, 8 + 8 * i)
+        if ft == Ty.TInt {
+            op(inout g, 81)
+        } else if ft == Ty.TFloat {
+            op(inout g, 97)
+        } else if ft == Ty.TBool {
+            op(inout g, 70)
+        } else if ft == Ty.TStr {
+            call_f(inout g, rt_fn(inout g, "rt_str_eq"))
+        } else if heap(ft) {
+            call_f(inout g, glue_fn(inout g, "eq", ft))
+        } else {
+            return wg_fail(inout g, h_none(), "comparing values of type `" + show(g.ck, ft) + "`")
+        }
+        // a field that differs: not equal
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        i32c(inout g, 0)
+        op(inout g, 15)
+        close(inout g)
+    }
+    i32c(inout g, 1)
+}
+
 // ------------------------------------------------------------------ functions and the module
 
 // Sets up the locals of a frame: the slots' types, the first `np` of them parameters.
@@ -1134,11 +1712,14 @@ fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
     g.code = []
     g.ltypes = []
     g.slot_local = []
+    g.slot_ty = []
+    g.nparams = np
     g.depth = 0
     g.loops = []
     var params: List[i64] = []
     for i in 0..len(tys) {
         let ti = fin_ty(g.ck, tys[i])
+        g.slot_ty.push(ti)
         let v = vt(ti)
         if v < 0 {
             wg_fail(inout g, at, "variables of type `" + show(g.ck, ti) + "`")
@@ -1181,6 +1762,7 @@ fn gen_fn(inout g: WGen, id: i64) {
     if r < 0 { return wg_fail(inout g, body, "functions returning `" + show(g.ck, sig.ret) + "`") }
     let tidx = wtype(inout g.m, params, if r > 0 { [r] } else { [] })
     gen(inout g, body)
+    epilogue(inout g)
     let f = finish(inout g, wparams, tidx)
     g.m.funcs.push(f)
 }
@@ -1309,23 +1891,38 @@ fn runtime_fns(inout g: WGen) {
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
     // print_str(p): the bytes of the text at p
     g.code = []
-    i32c(inout g, 1)
-    lget(inout g, 0)
-    i32c(inout g, 4)
-    op(inout g, 106)
-    lget(inout g, 0)
-    op_u(inout g, 40, 2)
-    uleb(inout g.code, 0)
-    call_f(inout g, f_write())
+    write_obj(inout g, 1, 0)
     op(inout g, 11)
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], []), locals: [], code: g.code })
+    // incref(p) -> p: one more reference (none for 0 and for constants, whose count is 0)
+    g.code = []
+    lget(inout g, 0)
+    open(inout g, 4, 0)
+    lget(inout g, 0)
+    load_at(inout g, i32t, 0)
+    lset(inout g, 1)
+    lget(inout g, 1)
+    i32c(inout g, 0)
+    op(inout g, 74)
+    open(inout g, 4, 0)
+    lget(inout g, 0)
+    lget(inout g, 1)
+    i32c(inout g, 1)
+    op(inout g, 106)
+    store_at(inout g, i32t, 0)
+    close(inout g)
+    close(inout g)
+    lget(inout g, 0)
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
 }
 
 // The module of a checked program: (it compiled, the module, the error: file lo hi message).
 fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], strs: [:], objs: [:], code: [], ltypes: [], nparams: 0,
-        slot_local: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "", efile: 0, elo: 0, ehi: 0,
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], code: [],
+        ltypes: [], nparams: 0, slot_local: [], slot_ty: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
+        efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()
     g.m.imports.push(("wasi_snapshot_preview1", "fd_write", wtype(inout g.m, [i32t, i32t, i32t, i32t], [i32t])))
@@ -1341,7 +1938,8 @@ fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     g.m.funcs.push(start)
     var k = 0
     while k < len(g.order) and not g.failed {
-        gen_fn(inout g, g.order[k])
+        let id = g.order[k]
+        if id >= 0 { gen_fn(inout g, id) } else { gen_glue(inout g, -1 - id) }
         k += 1
     }
     if g.failed {
@@ -1350,8 +1948,8 @@ fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     g.m.exports.push(("_start", 0, f_start()))
     g.m.exports.push(("memory", 2, 0))
     // the heap starts after the data, at a multiple of 8
-    let heap = (g.m.data_at + len(g.m.data) + 7) / 8 * 8
-    g.m.globals.push((i32t, heap))
-    g.m.pages = 1 + heap / 65536
+    let heap_at = (g.m.data_at + len(g.m.data) + 7) / 8 * 8
+    g.m.globals.push((i32t, heap_at))
+    g.m.pages = 1 + heap_at / 65536
     (true, module_bytes(g.m), "")
 }

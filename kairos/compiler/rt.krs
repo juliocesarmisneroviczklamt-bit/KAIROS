@@ -5,8 +5,13 @@
 // WebAssembly that does it, and its body here only lets the checkers type it. Addresses are
 // byte offsets in the module's memory.
 //
-// A text is the address of an object: its length in bytes (32 bits, little-endian), then its
-// UTF-8 bytes. Texts never change once made.
+// Every object in memory starts with the count of its references (32 bits, little-endian): a value
+// that is copied counts one more, one that is dropped one less, and at 0 the object is freed. A
+// count of 0 from the start marks a constant (the program's texts, in its data): never freed.
+// Changing a value whose object has other references copies it first, so values never share
+// changes (the interpreter's semantics).
+//
+// A text: the count, its length in bytes, then its UTF-8 bytes. Texts never change once made.
 import "rt_ryu.krs"
 import "rt_math.krs"
 
@@ -38,22 +43,50 @@ fn wasm_str_at(addr: i64) -> str {
     ""
 }
 
+// ------------------------------------------------------------------ the heap
+//
+// Memory is given in blocks of 2^k bytes (16 at least). A freed block goes to the list of its
+// size: the address of its first block is at 64 + 4k, and each block holds the next one.
+
+fn rt_class(n: i64) -> i64 {
+    var k = 4
+    while shl(1, k) < n { k += 1 }
+    k
+}
+
+fn rt_alloc(n: i64) -> i64 {
+    let k = rt_class(n)
+    let head = 64 + 4 * k
+    let p = wasm_load32(head)
+    if p == 0 { return wasm_alloc(shl(1, k)) }
+    wasm_store32(head, wasm_load32(p))
+    p
+}
+
+// the block of an object of n bytes, now free
+fn rt_free(p: i64, n: i64) {
+    let head = 64 + 4 * rt_class(n)
+    wasm_store32(p, wasm_load32(head))
+    wasm_store32(head, p)
+}
+
 // ------------------------------------------------------------------ texts
 
 fn rt_new_str(n: i64) -> i64 {
-    let p = wasm_alloc(4 + n)
-    wasm_store32(p, n)
+    let p = rt_alloc(8 + n)
+    wasm_store32(p, 1)
+    wasm_store32(p + 4, n)
     p
 }
 
 fn rt_concat(a: str, b: str) -> str {
     let pa = wasm_str_addr(a)
     let pb = wasm_str_addr(b)
-    let na = wasm_load32(pa)
-    let nb = wasm_load32(pb)
+    let na = wasm_load32(pa + 4)
+    let nb = wasm_load32(pb + 4)
     let p = rt_new_str(na + nb)
-    for i in 0..na { wasm_store8(p + 4 + i, wasm_load8(pa + 4 + i)) }
-    for i in 0..nb { wasm_store8(p + 4 + na + i, wasm_load8(pb + 4 + i)) }
+    for i in 0..na { wasm_store8(p + 8 + i, wasm_load8(pa + 8 + i)) }
+    for i in 0..nb { wasm_store8(p + 8 + na + i, wasm_load8(pb + 8 + i)) }
     wasm_str_at(p)
 }
 
@@ -61,12 +94,12 @@ fn rt_concat(a: str, b: str) -> str {
 fn rt_str_cmp(a: str, b: str) -> i64 {
     let pa = wasm_str_addr(a)
     let pb = wasm_str_addr(b)
-    let na = wasm_load32(pa)
-    let nb = wasm_load32(pb)
+    let na = wasm_load32(pa + 4)
+    let nb = wasm_load32(pb + 4)
     let n = if na < nb { na } else { nb }
     for i in 0..n {
-        let x = wasm_load8(pa + 4 + i)
-        let y = wasm_load8(pb + 4 + i)
+        let x = wasm_load8(pa + 8 + i)
+        let y = wasm_load8(pb + 8 + i)
         if x < y { return -1 }
         if x > y { return 1 }
     }
@@ -80,10 +113,10 @@ fn rt_str_eq(a: str, b: str) -> bool {
 // the number of characters: the bytes that do not continue a character
 fn rt_str_len(s: str) -> i64 {
     let p = wasm_str_addr(s)
-    let n = wasm_load32(p)
+    let n = wasm_load32(p + 4)
     var c = 0
     for i in 0..n {
-        if bit_and(wasm_load8(p + 4 + i), 192) != 128 { c += 1 }
+        if bit_and(wasm_load8(p + 8 + i), 192) != 128 { c += 1 }
     }
     c
 }
@@ -92,7 +125,7 @@ fn rt_str_len(s: str) -> i64 {
 fn rt_char_at_byte(p: i64, n: i64, k: i64) -> i64 {
     var seen = 0
     for i in 0..n {
-        if bit_and(wasm_load8(p + 4 + i), 192) != 128 {
+        if bit_and(wasm_load8(p + 8 + i), 192) != 128 {
             if seen == k { return i }
             seen += 1
         }
@@ -103,14 +136,14 @@ fn rt_char_at_byte(p: i64, n: i64, k: i64) -> i64 {
 // `substr(s, start, count)`: characters, both clamped at 0
 fn rt_substr(s: str, start: i64, count: i64) -> str {
     let p = wasm_str_addr(s)
-    let n = wasm_load32(p)
+    let n = wasm_load32(p + 4)
     let a = if start > 0 { start } else { 0 }
     let c = if count > 0 { count } else { 0 }
     let from = rt_char_at_byte(p, n, a)
     let to = if c > n { n } else { rt_char_at_byte(p, n, a + c) }
     let len_ = if to > from { to - from } else { 0 }
     let q = rt_new_str(len_)
-    for i in 0..len_ { wasm_store8(q + 4 + i, wasm_load8(p + 4 + from + i)) }
+    for i in 0..len_ { wasm_store8(q + 8 + i, wasm_load8(p + 8 + from + i)) }
     wasm_str_at(q)
 }
 
@@ -128,13 +161,66 @@ fn rt_str_i64(v: i64) -> str {
     var i = n - 1
     while true {
         let d = x % 10
-        wasm_store8(p + 4 + i, if d < 0 { 48 - d } else { 48 + d })
+        wasm_store8(p + 8 + i, if d < 0 { 48 - d } else { 48 + d })
         x = x / 10
         i -= 1
         if x == 0 { break }
     }
-    if v < 0 { wasm_store8(p + 4, 45) }
+    if v < 0 { wasm_store8(p + 8, 45) }
     wasm_str_at(p)
+}
+
+// The bytes that write byte c inside quotes: escaped as Rust's `{:?}` escapes it, or itself.
+fn rt_esc_len(c: i64) -> i64 {
+    if c == 34 or c == 92 or c == 10 or c == 13 or c == 9 or c == 0 { return 2 }
+    if c < 32 or c == 127 { return if c < 16 { 5 } else { 6 } }
+    1
+}
+
+fn rt_hex_digit(d: i64) -> i64 {
+    if d < 10 { 48 + d } else { 87 + d }
+}
+
+// Writes byte c, escaped, at q: the address after it.
+fn rt_put_esc(q: i64, c: i64) -> i64 {
+    let n = rt_esc_len(c)
+    if n == 1 {
+        wasm_store8(q, c)
+        return q + 1
+    }
+    wasm_store8(q, 92)
+    if n == 2 {
+        let e = if c == 10 { 110 } else if c == 13 { 114 } else if c == 9 { 116 } else if c == 0 { 48 } else { c }
+        wasm_store8(q + 1, e)
+        return q + 2
+    }
+    // u{X} or u{XX}, after the backslash
+    wasm_store8(q + 1, 117)
+    wasm_store8(q + 2, 123)
+    var at = q + 3
+    if c >= 16 {
+        wasm_store8(at, rt_hex_digit(c / 16))
+        at += 1
+    }
+    wasm_store8(at, rt_hex_digit(c % 16))
+    wasm_store8(at + 1, 125)
+    at + 2
+}
+
+// A text inside a value (a list, a struct...), as Rust's `{:?}` writes it: between quotes, with
+// quotes, backslashes and control characters escaped. (Characters beyond ASCII are written as
+// they are: Rust also escapes the few it does not consider printable.)
+fn rt_str_debug(s: str) -> str {
+    let p = wasm_str_addr(s)
+    let n = wasm_load32(p + 4)
+    var m = 2
+    for i in 0..n { m += rt_esc_len(wasm_load8(p + 8 + i)) }
+    let q = rt_new_str(m)
+    wasm_store8(q + 8, 34)
+    var at = q + 9
+    for i in 0..n { at = rt_put_esc(at, wasm_load8(p + 8 + i)) }
+    wasm_store8(at, 34)
+    wasm_str_at(q)
 }
 
 // ------------------------------------------------------------------ floats as text
