@@ -1,0 +1,42 @@
+// The tangent space (M4) compiled: + - * / on structs and tuples of floats and float tensors,
+// field by field (also with an f64), unary minus, math and zeros_like on them, and the prelude's
+// optimizers (generic over the parameters' type) on a multilayer perceptron
+struct P {
+    w: f64,
+    b: Tensor[asset; f64],
+    pair: (f64, Tensor[month; f64]),
+}
+
+fn step[T](p: T, g: T, lr: f64) -> T {
+    p - lr * g
+}
+
+let p = P { w: 2.0, b: tensor([1.0, 2.0], asset), pair: (0.5, tensor([3.0, -1.0, 4.0], month)) }
+let q = p * 0.5 + p
+print(q)
+print(step(p, q, 0.1), step(3.0, 1.0, 0.5))
+print(-p, sqrt(q), zeros_like(p), abs(-p), exp(p / 10.0))
+print((1.0, 2.0) * (3.0, 4.0), 2.0 - (1.0, tensor([5.0], asset)))
+
+let x = randn(seed: 3, sample: 8, feature: 3)
+let y = randn(seed: 4, sample: 8, output: 1)
+var net = mlp_init(7, 3, 5, 1)
+print("loss", mse(mlp(net, x), y))
+var m = zeros_like(net)
+var v = zeros_like(net)
+for t in 1..6 {
+    let g = net * 0.01 + zeros_like(net)
+    adam_step(inout net, g, inout m, inout v, t, 0.05)
+}
+sgd_step(inout net, net * 0.1, 0.01)
+print("after", mse(mlp(net, x), y), sum(net.w1), sum(net.b2), sum(m.w2), sum(v.b1))
+var s = 1.5
+sgd_step(inout s, 2.0, 0.25)
+print(s)
+// out: P { w: 3.0, b: Tensor[asset: 2; f64] [1.5, 3.0], pair: (0.75, Tensor[month: 3; f64] [4.5, -1.5, 6.0]) }
+// out: P { w: 1.7, b: Tensor[asset: 2; f64] [0.85, 1.7], pair: (0.425, Tensor[month: 3; f64] [2.55, -0.85, 3.4]) } 2.5
+// out: P { w: -2.0, b: Tensor[asset: 2; f64] [-1.0, -2.0], pair: (-0.5, Tensor[month: 3; f64] [-3.0, 1.0, -4.0]) } P { w: 1.7320508075688772, b: Tensor[asset: 2; f64] [1.224744871391589, 1.7320508075688772], pair: (0.8660254037844386, Tensor[month: 3; f64] [2.1213203435596424, NaN, 2.449489742783178]) } P { w: 0.0, b: Tensor[asset: 2; f64] [0.0, 0.0], pair: (0.0, Tensor[month: 3; f64] [0.0, 0.0, 0.0]) } P { w: 2.0, b: Tensor[asset: 2; f64] [1.0, 2.0], pair: (0.5, Tensor[month: 3; f64] [3.0, 1.0, 4.0]) } P { w: 1.2214027581601699, b: Tensor[asset: 2; f64] [1.1051709180756477, 1.2214027581601699], pair: (1.0512710963760241, Tensor[month: 3; f64] [1.3498588075760032, 0.9048374180359595, 1.4918246976412703]) }
+// out: (3.0, 8.0) (1.0, Tensor[asset: 1; f64] [-3.0])
+// out: loss 1.3595662038809104
+// out: after 1.2160443061668325 1.6078170834096124 0.0 0.0003789778273562166 0.0
+// out: 1.0

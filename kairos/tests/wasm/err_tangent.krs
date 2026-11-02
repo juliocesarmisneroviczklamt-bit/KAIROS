@@ -1,0 +1,7 @@
+// error: R0201
+struct Q {
+    a: Tensor[asset; f64],
+}
+let x = Q { a: tensor([1.0, 2.0], asset) }
+let y = Q { a: tensor([1.0, 2.0, 3.0], asset) }
+print(x + y)

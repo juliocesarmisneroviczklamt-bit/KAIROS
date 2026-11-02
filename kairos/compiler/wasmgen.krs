@@ -34,6 +34,9 @@ struct WGen {
     vobjs: Map[str, i64],           // "enum variant" -> the constant of a variant without fields
     prog: str,                      // the program's name (its file without .krs: `b3` records it)
     hooks: List[i64],               // rt_b3_capture and rt_b3_failed, for holdouts (or none)
+    insts: List[(i64, List[(i64, Ty)])],    // the instances of generic functions: (function, its types)
+    inst_idx: Map[str, i64],        // "function types" -> the instance's function
+    subst: List[(i64, Ty)],         // the types of the type parameters, in an instance being made
     // the function being generated
     code: List[i64],
     ltypes: List[i64],              // the type of each local (the parameters first)
@@ -811,6 +814,7 @@ fn gen(inout g: WGen, e: H) {
     }
     if k == "binary" { return binary_w(inout g, e) }
     if k == "unary" {
+        if is_tan_t(e.kids[0].t) and e.text == "-" { return tan_map_h(inout g, 0, e.kids[0], e) }
         if is_tensor_t(e.kids[0].t) { return tensor_map1(inout g, if e.text == "not" { 1 } else { 0 }, e.kids[0]) }
         gen(inout g, e.kids[0])
         if e.text == "not" {
@@ -911,7 +915,9 @@ fn gen(inout g: WGen, e: H) {
         if is_intrinsic(g, e.n) {
             intrinsic(inout g, name, e)
         } else {
-            call_f(inout g, fn_index(inout g, e.n))
+            var ats: List[Ty] = []
+            for a in e.kids { ats.push(a.kids[0].t) }
+            call_f(inout g, callee_index(inout g, e.n, ats, e.t, e))
         }
         for x in tmps { drop_tmp(inout g, x.0, x.1) }
         return
@@ -1106,6 +1112,7 @@ fn float_op(inout g: WGen, o: str, e: H) {
 fn binary_w(inout g: WGen, e: H) {
     let a = e.kids[0]
     let b = e.kids[1]
+    if (is_tan_t(a.t) or is_tan_t(b.t)) and contains(["+", "-", "*", "/"], e.text) { return tan_binary(inout g, e) }
     if is_tensor_t(a.t) or is_tensor_t(b.t) { return tensor_map2(inout g, e, tensor_op_code(e.text), a, b) }
     if a.t == Ty.TStr and e.text == "+" {
         // texts the compiler knows are joined when compiling
@@ -1385,6 +1392,19 @@ fn builtin_w(inout g: WGen, e: H) {
         return
     }
     if b == "randn" { return randn_w(inout g, e) }
+    if len(args) == 1 and is_tan_t(args[0].kids[0].t) {
+        let fns = ["abs", "sqrt", "exp", "ln", "tanh", "sigmoid", "relu", "softplus"]
+        let codes_ = [2, 3, 4, 5, 9, 10, 11, 12]
+        for i in 0..len(fns) {
+            if b == fns[i] { return tan_map_h(inout g, codes_[i], args[0].kids[0], e) }
+        }
+        if b == "zeros_like" { return tan_map_h(inout g, -1, args[0].kids[0], e) }
+    }
+    if b == "zeros_like" and len(args) == 1 and args[0].kids[0].t == Ty.TFloat {
+        let tz = gen_v(inout g, args[0].kids[0])
+        op(inout g, 26)
+        return f64c(inout g, 0.0)
+    }
     if tensor_builtin_w(inout g, e) { return }
     if b == "format_fixed" { return call_rt_borrowing(inout g, "rt_format_fixed", args) }
     if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
@@ -1951,6 +1971,298 @@ fn host_w(inout g: WGen, e: H) {
     drop_v(inout g, rty)
 }
 
+// ------------------------------------------------------------------ the tangent space
+//
+// `+ - * /` on structs and tuples of floats and float tensors (two of the same type, or one with an
+// f64), unary minus, the math builtins and zeros_like, field by field, as the interpreter does
+// them (src/interp/diff.rs): the value is built where it is used, so an error of sizes points at
+// that expression.
+
+fn is_tan_t(t: Ty) -> bool {
+    match t {
+        TStruct(_) => true,
+        TTuple(_) => true,
+        _ => false,
+    }
+}
+
+fn tan_binary(inout g: WGen, e: H) {
+    let a = e.kids[0]
+    let b = e.kids[1]
+    let ta = gen_borrow(inout g, a, not changes(b))
+    let la = new_local(inout g, vt(a.t))
+    lset(inout g, la)
+    let tb = gen_borrow(inout g, b, true)
+    let lb = new_local(inout g, vt(b.t))
+    lset(inout g, lb)
+    tan_op(inout g, e.text, la, a.t, lb, b.t, e)
+    drop_tmp(inout g, ta, a.t)
+    drop_tmp(inout g, tb, b.t)
+}
+
+// x op y, x in local la (borrowed, of type ta), y in lb: the new value on the stack
+fn tan_op(inout g: WGen, o: str, la: i64, ta: Ty, lb: i64, tb: Ty, e: H) {
+    if is_tan_t(ta) or is_tan_t(tb) {
+        let ts = if is_tan_t(ta) { ta } else { tb }
+        let fts = field_tys(g, ts)
+        let obj = tan_new(inout g, len(fts))
+        for i in 0..len(fts) {
+            let ft = fts[i]
+            let w = vt(ft)
+            var fa = la
+            var fat = ta
+            if is_tan_t(ta) {
+                fa = new_local(inout g, w)
+                lget(inout g, la)
+                load_at(inout g, w, 8 + 8 * i)
+                lset(inout g, fa)
+                fat = ft
+            }
+            var fb = lb
+            var fbt = tb
+            if is_tan_t(tb) {
+                fb = new_local(inout g, w)
+                lget(inout g, lb)
+                load_at(inout g, w, 8 + 8 * i)
+                lset(inout g, fb)
+                fbt = ft
+            }
+            lget(inout g, obj)
+            tan_op(inout g, o, fa, fat, fb, fbt, e)
+            store_at(inout g, w, 8 + 8 * i)
+        }
+        lget(inout g, obj)
+        return
+    }
+    if is_tensor_t(ta) or is_tensor_t(tb) {
+        let xa = tan_rtt(inout g, la, ta)
+        let xb = tan_rtt(inout g, lb, tb)
+        check_sizes(inout g, e, xa.0, ta, xb.0, tb)
+        i64c(inout g, tensor_op_code(o))
+        lget(inout g, xa.0)
+        lget(inout g, xb.0)
+        call_f(inout g, rt_fn(inout g, "rt_t_map2"))
+        drop_tmp(inout g, xa.1, rtt(g))
+        drop_tmp(inout g, xb.1, rtt(g))
+        return
+    }
+    if ta != Ty.TFloat or tb != Ty.TFloat { return wg_fail(inout g, e, "`" + o + "` on a field of type `" + show(g.ck, if ta != Ty.TFloat { ta } else { tb }) + "`") }
+    lget(inout g, la)
+    lget(inout g, lb)
+    float_op(inout g, o, e)
+}
+
+// a new object of n fields (its count 1): the local with its address
+fn tan_new(inout g: WGen, n: i64) -> i64 {
+    i64c(inout g, 8 + 8 * n)
+    call_f(inout g, rt_fn(inout g, "rt_alloc"))
+    op(inout g, 167)
+    let obj = new_local(inout g, wt_i32())
+    lset(inout g, obj)
+    lget(inout g, obj)
+    i32c(inout g, 1)
+    store_at(inout g, wt_i32(), 0)
+    obj
+}
+
+// a tensor operand from a local: the tensor itself, or an f64 as a tensor of no axes (its local,
+// the local to drop after or -1)
+fn tan_rtt(inout g: WGen, l: i64, t: Ty) -> (i64, i64) {
+    if is_tensor_t(t) { return (l, -1) }
+    lget(inout g, l)
+    i32c(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_t_scalar"))
+    let x = new_local(inout g, wt_i32())
+    lset(inout g, x)
+    (x, x)
+}
+
+fn tan_map_h(inout g: WGen, code: i64, x: H, e: H) {
+    let tx = gen_borrow(inout g, x, true)
+    let lx = new_local(inout g, vt(x.t))
+    lset(inout g, lx)
+    tan_map(inout g, code, lx, x.t, e)
+    drop_tmp(inout g, tx, x.t)
+}
+
+// f(x) field by field: code as rt_t_fn's (0 minus, 2 abs, 3 sqrt...), or -1 for zeros_like
+fn tan_map(inout g: WGen, code: i64, lx: i64, tx: Ty, e: H) {
+    if is_tan_t(tx) {
+        let fts = field_tys(g, tx)
+        let obj = tan_new(inout g, len(fts))
+        for i in 0..len(fts) {
+            let w = vt(fts[i])
+            let f = new_local(inout g, w)
+            lget(inout g, lx)
+            load_at(inout g, w, 8 + 8 * i)
+            lset(inout g, f)
+            lget(inout g, obj)
+            tan_map(inout g, code, f, fts[i], e)
+            store_at(inout g, w, 8 + 8 * i)
+        }
+        lget(inout g, obj)
+        return
+    }
+    if is_tensor_t(tx) {
+        if code < 0 {
+            lget(inout g, lx)
+            f64c(inout g, 0.0)
+            i32c(inout g, 0)
+            return call_f(inout g, rt_fn(inout g, "rt_t_like"))
+        }
+        i64c(inout g, code)
+        lget(inout g, lx)
+        return call_f(inout g, rt_fn(inout g, "rt_t_map1"))
+    }
+    if tx != Ty.TFloat { return wg_fail(inout g, e, "the tangent space with a field of type `" + show(g.ck, tx) + "`") }
+    if code < 0 { return f64c(inout g, 0.0) }
+    i64c(inout g, code)
+    lget(inout g, lx)
+    call_f(inout g, rt_fn(inout g, "rt_t_fn"))
+}
+
+// ------------------------------------------------------------------ generic functions
+//
+// A generic function (`fn f[P]`) is made once for each list of types it is called with: its HIR
+// and the types of its variables with the type parameters replaced (an instance).
+
+// The function a call goes to: an instance for a generic function.
+fn callee_index(inout g: WGen, id: i64, args: List[Ty], ret: Ty, e: H) -> i64 {
+    let sig = g.ck.sigs[id]
+    if len(sig.type_params) == 0 { return fn_index(inout g, id) }
+    var sub: List[(i64, Ty)] = []
+    for i in 0..min(len(sig.params), len(args)) { bind_params(g, sig.params[i].1, sub_ty(g, args[i]), inout sub) }
+    bind_params(g, sig.ret, sub_ty(g, ret), inout sub)
+    var key = str(id)
+    for tp in sig.type_params {
+        var found = false
+        for x in sub {
+            if x.0 == tp {
+                key = key + " " + show(g.ck, x.1)
+                found = true
+            }
+        }
+        if not found {
+            wg_fail(inout g, e, "a generic function whose types are not known here")
+            return 0
+        }
+    }
+    if contains(g.inst_idx, key) { return g.inst_idx[key] }
+    let i = first_user_fn() + len(g.order)
+    g.inst_idx[key] = i
+    g.order.push(1000000000 + len(g.insts))
+    g.insts.push((id, sub))
+    i
+}
+
+// the type parameters of pattern `p` bound by the type `t` (the first binding stays)
+fn bind_params(g: WGen, p0: Ty, t: Ty, inout sub: List[(i64, Ty)]) {
+    let p = fin_ty(g.ck, p0)
+    match p {
+        TParam(k) => {
+            for x in sub {
+                if x.0 == k { return }
+            }
+            sub.push((k, t))
+        },
+        TList(x) => {
+            match t {
+                TList(y) => bind_params(g, x, y, inout sub),
+                _ => {},
+            }
+        },
+        TTuple(xs) => {
+            match t {
+                TTuple(ys) => {
+                    for i in 0..min(len(xs), len(ys)) { bind_params(g, xs[i], ys[i], inout sub) }
+                },
+                _ => {},
+            }
+        },
+        TFn(xs, r) => {
+            match t {
+                TFn(ys, s) => {
+                    for i in 0..min(len(xs), len(ys)) { bind_params(g, xs[i], ys[i], inout sub) }
+                    bind_params(g, r, s, inout sub)
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+}
+
+// t with the type parameters of the instance being made replaced
+fn sub_ty(g: WGen, t0: Ty) -> Ty {
+    let t = fin_ty(g.ck, t0)
+    if len(g.subst) == 0 { return t }
+    match t {
+        TParam(k) => {
+            for x in g.subst {
+                if x.0 == k { return x.1 }
+            }
+            t
+        },
+        TList(x) => Ty.TList(sub_ty(g, x)),
+        TMap(k, v) => Ty.TMap(sub_ty(g, k), sub_ty(g, v)),
+        TTuple(xs) => {
+            var ys: List[Ty] = []
+            for x in xs { ys.push(sub_ty(g, x)) }
+            Ty.TTuple(ys)
+        },
+        TFn(xs, r) => {
+            var ys: List[Ty] = []
+            for x in xs { ys.push(sub_ty(g, x)) }
+            Ty.TFn(ys, sub_ty(g, r))
+        },
+        _ => t,
+    }
+}
+
+fn sub_h(g: WGen, h: H) -> H {
+    var kids: List[H] = []
+    for k in h.kids { kids.push(sub_h(g, k)) }
+    H { kind: h.kind, text: h.text, n: h.n, m: h.m, kids: kids, lo: h.lo, hi: h.hi, f: h.f, t: sub_ty(g, h.t) }
+}
+
+// an instance: the function with its types
+fn gen_inst(inout g: WGen, k: i64) {
+    let id = g.insts[k].0
+    g.subst = g.insts[k].1
+    let sig = g.ck.sigs[id]
+    let body = sub_h(g, g.ck.fn_hir[id])
+    var tys: List[Ty] = []
+    for t in g.ck.bodies[id] { tys.push(sub_ty(g, t)) }
+    g.unchecked = false
+    let np = len(sig.params)
+    let params = frame(inout g, tys, np, body, false)
+    if g.failed { return }
+    var outs: List[i64] = []
+    for i in 0..np {
+        if sig.params[i].2 {
+            g.inout_slots.push(i)
+            let w = vt(g.slot_ty[i])
+            if w > 0 { outs.push(w) }
+        }
+    }
+    var wparams = 0
+    for i in 0..np {
+        if g.slot_local[i] >= 0 { wparams += 1 }
+    }
+    let rt0 = sub_ty(g, sig.ret)
+    let r = vt(rt0)
+    if r < 0 { return wg_fail(inout g, body, "functions returning `" + show(g.ck, rt0) + "`") }
+    var results: List[i64] = if r > 0 { [r] } else { [] }
+    for w in outs { results.push(w) }
+    let tidx = wtype(inout g.m, params, results)
+    gen(inout g, body)
+    epilogue(inout g)
+    exit_values(inout g)
+    let f = finish(inout g, wparams, tidx)
+    g.m.funcs.push(f)
+    g.subst = []
+}
+
 // ------------------------------------------------------------------ lists
 
 // The type of a list's elements.
@@ -2379,6 +2691,7 @@ fn call_inout(inout g: WGen, e: H) {
             tys.push(Ty.TUnit)
         }
     }
+    var ats = tys
     var cells: List[Cell] = []
     for i in 0..len(e.kids) {
         let a = e.kids[i]
@@ -2386,6 +2699,7 @@ fn call_inout(inout g: WGen, e: H) {
             let c = place_cell(inout g, a.kids[0], false)
             if g.failed { return }
             cells.push(c)
+            ats[i] = c.ty
             let w = vt(c.ty)
             if w > 0 {
                 let l = new_local(inout g, w)
@@ -2398,7 +2712,7 @@ fn call_inout(inout g: WGen, e: H) {
     for l in locs {
         if l >= 0 { lget(inout g, l) }
     }
-    call_f(inout g, fn_index(inout g, e.n))
+    call_f(inout g, callee_index(inout g, e.n, ats, e.t, e))
     // the places get their values back: the last one is on top
     var k = len(cells) - 1
     while k >= 0 {
@@ -4911,7 +5225,7 @@ fn runtime_fns(inout g: WGen) {
 // message).
 fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog, hooks: [],
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog, hooks: [], insts: [], inst_idx: [:], subst: [],
         code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], live: [], pool: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
         efile: 0, elo: 0, ehi: 0,
     }
@@ -4934,7 +5248,7 @@ fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     var k = 0
     while k < len(g.order) and not g.failed {
         let id = g.order[k]
-        if id >= 0 { gen_fn(inout g, id) } else { gen_glue(inout g, -1 - id) }
+        if id >= 1000000000 { gen_inst(inout g, id - 1000000000) } else if id >= 0 { gen_fn(inout g, id) } else { gen_glue(inout g, -1 - id) }
         k += 1
     }
     if g.failed {
