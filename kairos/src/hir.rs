@@ -133,6 +133,7 @@ pub enum Builtin {
     IsAlphabetic,
     IsAlphanumeric,
     IsWhitespace,
+    IsUppercase,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -273,6 +274,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("is_alphabetic", Builtin::IsAlphabetic),
     ("is_alphanumeric", Builtin::IsAlphanumeric),
     ("is_whitespace", Builtin::IsWhitespace),
+    ("is_uppercase", Builtin::IsUppercase),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

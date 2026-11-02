@@ -84,7 +84,12 @@ fn the_lexer_in_kairos_is_the_rust_one() {
                         want.push('\n');
                     }
                 }
-                Err(d) => want.push_str(&format!("error {} {} {} {}\n", d.code, d.span.lo, d.span.hi, d.msg)),
+                Err(d) => {
+                    want.push_str(&format!("error {} {} {} {}\n", d.code, d.span.lo, d.span.hi, d.msg));
+                    if let Some(h) = &d.hint {
+                        want.push_str(&format!("hint {h}\n"));
+                    }
+                }
             }
         }
         let got = run_compiler("tokens.krs", files.iter().map(|f| f.to_string_lossy().into_owned()).collect());
@@ -93,6 +98,37 @@ fn the_lexer_in_kairos_is_the_rust_one() {
             let k = g.iter().zip(&w).position(|(a, b)| a != b).unwrap_or(g.len().min(w.len()));
             let file = w[..k].iter().rev().find(|l| l.starts_with("== ")).copied().unwrap_or("");
             panic!("the lexers differ in {file}, line {k}:\n  Kairós: {:?}\n  Rust:   {:?}", g.get(k), w.get(k));
+        }
+    })
+}
+
+/// The parser written in Kairós (kairos/compiler/parser.krs) builds the Rust parser's tree, node
+/// for node with the same spans, and fails with the same errors and hints.
+#[test]
+fn the_parser_in_kairos_is_the_rust_one() {
+    on_big_stack(|| {
+        let mut files = Vec::new();
+        krs_files(Path::new(env!("CARGO_MANIFEST_DIR")), &mut files);
+        let mut want = String::new();
+        for f in &files {
+            want.push_str(&format!("== {}\n", f.to_string_lossy()));
+            let src = std::fs::read_to_string(f).unwrap();
+            match kairos::lexer::lex(&src, 0).and_then(kairos::parser::parse) {
+                Ok(items) => want.push_str(&kairos::ast::canonical(&items)),
+                Err(d) => {
+                    want.push_str(&format!("error {} {} {} {}\n", d.code, d.span.lo, d.span.hi, d.msg));
+                    if let Some(h) = &d.hint {
+                        want.push_str(&format!("hint {h}\n"));
+                    }
+                }
+            }
+        }
+        let got = run_compiler("ast.krs", files.iter().map(|f| f.to_string_lossy().into_owned()).collect());
+        if got != want {
+            let (g, w): (Vec<&str>, Vec<&str>) = (got.lines().collect(), want.lines().collect());
+            let k = g.iter().zip(&w).position(|(a, b)| a != b).unwrap_or(g.len().min(w.len()));
+            let file = w[..k].iter().rev().find(|l| l.starts_with("== ")).copied().unwrap_or("");
+            panic!("the parsers differ in {file}, line {k}:\n  Kairós: {:?}\n  Rust:   {:?}", g.get(k), w.get(k));
         }
     })
 }

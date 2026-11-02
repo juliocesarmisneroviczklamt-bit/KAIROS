@@ -1,0 +1,3 @@
+let e = b3.evaluate(w, lag: 1, cost_bps: 25.0)
+let s = sum(x, over: asset)
+push(inout xs, 1)

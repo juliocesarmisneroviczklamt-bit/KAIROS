@@ -1,0 +1,1 @@
+fn adam[P, Q](p: P, inout q: Q) -> P { p }

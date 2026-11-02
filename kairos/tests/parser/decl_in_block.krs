@@ -1,0 +1,1 @@
+fn f() { struct S { x: i64 } }

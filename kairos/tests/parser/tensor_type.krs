@@ -1,0 +1,1 @@
+fn f(x: Tensor[month, asset; f64], g: fn(f64, i64) -> bool, h: fn()) -> (i64, List[str]) { x }

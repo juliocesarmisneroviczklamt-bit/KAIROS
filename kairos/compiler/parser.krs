@@ -1,0 +1,1052 @@
+// The parser of Kairós, written in Kairós (M12). It is src/parser.rs: recursive descent with
+// Pratt precedence for expressions, the same tree and the same errors.
+//
+// Binding powers (left, right), low to high: assignment (1,1) < range (2,3) < `or` (3,4) <
+// `and` (5,6) < comparison (7,8) < `+ -` (9,10) < `* / %` (11,12) < unary `-` (operand at 13) <
+// `^` (14,14, right-assoc) < postfix: call, index, field, method call.
+//
+// The tree is made of uniform nodes `(kind text children... lo:hi)`: the same text
+// `kairos ast file.krs` prints for the Rust parser's tree.
+import "lexer.krs"
+
+struct Node {
+    kind: str,
+    text: str,
+    kids: List[Node],
+    lo: i64,            // -1: no span
+    hi: i64,
+}
+
+fn nd(kind: str, text: str, kids: List[Node], lo: i64, hi: i64) -> Node {
+    Node { kind: kind, text: text, kids: kids, lo: lo, hi: hi }
+}
+
+// an absent part
+fn none_node() -> Node {
+    Node { kind: "-", text: "", kids: [], lo: -1, hi: -1 }
+}
+
+fn hex_text(cs: List[i64]) -> str {
+    var hs = []
+    for c in cs { hs.push(to_hex(c, 0)) }
+    "s(" + join(hs, " ") + ")"
+}
+
+fn render(n: Node, inout out: List[str]) {
+    if n.kind == "-" {
+        out.push("-")
+        return
+    }
+    out.push("(")
+    out.push(n.kind)
+    if n.text != "" {
+        out.push(" ")
+        out.push(n.text)
+    }
+    for k in n.kids {
+        out.push(" ")
+        render(k, inout out)
+    }
+    if n.lo >= 0 {
+        out.push(" " + str(n.lo) + ":" + str(n.hi))
+    }
+    out.push(")")
+}
+
+fn node_line(n: Node) -> str {
+    var out = []
+    render(n, inout out)
+    join(out, "")
+}
+
+// ------------------------------------------------------------------ the parser's state
+
+struct Parser {
+    toks: List[Token],
+    pos: i64,
+    no_struct: bool,    // inside `if`/`while`/`for`/`match` heads `Name {` is a block, not a struct literal
+    failed: bool,
+    code: str,
+    elo: i64,
+    ehi: i64,
+    msg: str,
+    hint: str,
+}
+
+fn pk(p: Parser) -> Token {
+    p.toks[p.pos]
+}
+
+fn pk_kind(p: Parser) -> str {
+    p.toks[p.pos].kind
+}
+
+fn pk_at(p: Parser, k: i64) -> str {
+    p.toks[min(p.pos + k, len(p.toks) - 1)].kind
+}
+
+fn prev(p: Parser) -> Token {
+    p.toks[max(p.pos - 1, 0)]
+}
+
+fn bump(inout p: Parser) -> Token {
+    let t = p.toks[p.pos]
+    if p.pos < len(p.toks) - 1 { p.pos += 1 }
+    t
+}
+
+fn eat(inout p: Parser, kind: str) -> bool {
+    if pk_kind(p) == kind {
+        let _ = bump(inout p)
+        return true
+    }
+    false
+}
+
+fn fail(inout p: Parser, code: str, lo: i64, hi: i64, msg: str, hint: str) {
+    if p.failed { return }
+    p.failed = true
+    p.code = code
+    p.elo = lo
+    p.ehi = hi
+    p.msg = msg
+    p.hint = hint
+}
+
+fn tok_symbol(k: str) -> str {
+    let m: Map[str, str] = ["Let": "let", "Var": "var", "Fn": "fn", "If": "if", "Else": "else", "Match": "match", "For": "for",
+        "In": "in", "While": "while", "Break": "break", "Continue": "continue", "Return": "return", "Struct": "struct",
+        "Enum": "enum", "Inout": "inout", "Axis": "axis", "Protocol": "protocol", "Import": "import", "True": "true",
+        "False": "false", "And": "and", "Or": "or", "Not": "not", "LParen": "(", "RParen": ")", "LBrace": "{",
+        "RBrace": "}", "LBracket": "[", "RBracket": "]", "Comma": ",", "Colon": ":", "Dot": ".", "DotDot": "..",
+        "DotDotEq": "..=", "Arrow": "->", "FatArrow": "=>", "Pipe": "|", "At": "@", "Question": "?", "Plus": "+",
+        "Minus": "-", "Star": "*", "Slash": "/", "Percent": "%", "Caret": "^", "Assign": "=", "PlusAssign": "+=",
+        "MinusAssign": "-=", "StarAssign": "*=", "SlashAssign": "/=", "EqEq": "==", "NotEq": "!=", "Lt": "<",
+        "Le": "<=", "Gt": ">", "Ge": ">="]
+    get(m, k, "?")
+}
+
+// a token in words, for the messages
+fn describe(t: Token) -> str {
+    if t.kind == "Int" { return "`" + str(t.int) + "`" }
+    if t.kind == "Float" { return "`" + str(t.float) + "`" }
+    if t.kind == "Str" { return "a string" }
+    if t.kind == "Ident" or t.kind == "Reserved" { return "`" + t.text + "`" }
+    if t.kind == "Semi" { return "a new line or `;`" }
+    if t.kind == "Eof" { return "end of file" }
+    "`" + tok_symbol(t.kind) + "`"
+}
+
+fn reserved_err(inout p: Parser, r: str, lo: i64, hi: i64) {
+    var hint = "reserved for a future version of Kairós"
+    if r == "smooth" {
+        hint = "`smooth` is reserved for declared relaxations; today use `smooth_max`, `smooth_min` and `smooth_step`"
+    } else if r == "sink" {
+        hint = "sinks arrive in a later milestone"
+    } else if contains(["kernel", "compute", "schedule", "unsafe", "parallel"], r) {
+        hint = "the kernel and low-level layers arrive with the native backend (M7)"
+    }
+    fail(inout p, "E0002", lo, hi, "`" + r + "` is a reserved keyword", hint)
+}
+
+fn err_expected(inout p: Parser, what: str) {
+    let t = pk(p)
+    if t.kind == "Reserved" {
+        reserved_err(inout p, t.text, t.lo, t.hi)
+    } else if t.kind == "At" {
+        fail(inout p, "E0001", t.lo, t.hi, "unexpected `@`", "temporal annotations go after a function's return type: `-> f64 @ end(m - 1)`")
+    } else {
+        fail(inout p, "E0001", t.lo, t.hi, "expected " + what + ", found " + describe(t), "")
+    }
+}
+
+// the token's span, or a failure
+fn expect(inout p: Parser, kind: str, what: str) -> (i64, i64) {
+    if pk_kind(p) == kind {
+        let t = bump(inout p)
+        return (t.lo, t.hi)
+    }
+    err_expected(inout p, what)
+    (0, 0)
+}
+
+fn skip_semis(inout p: Parser) {
+    while pk_kind(p) == "Semi" { let _ = bump(inout p) }
+}
+
+fn skip_separators(inout p: Parser) {
+    while pk_kind(p) == "Semi" or pk_kind(p) == "Comma" { let _ = bump(inout p) }
+}
+
+fn ident(inout p: Parser, what: str) -> Token {
+    if pk_kind(p) == "Ident" { return bump(inout p) }
+    err_expected(inout p, what)
+    pk(p)
+}
+
+fn to_lo(a: i64, b: i64) -> i64 {
+    min(a, b)
+}
+
+fn to_hi(a: i64, b: i64) -> i64 {
+    max(a, b)
+}
+
+// ------------------------------------------------------------------ items
+
+fn parse_program(src: str) -> (bool, List[Node], Parser) {
+    let lx = lex(src)
+    var p = Parser { toks: lx.1, pos: 0, no_struct: false, failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "" }
+    var items: List[Node] = []
+    if not lx.0 {
+        p.failed = true
+        p.code = lx.2.code
+        p.elo = lx.2.lo
+        p.ehi = lx.2.hi
+        p.msg = lx.2.msg
+        p.hint = lx.2.hint
+        return (false, items, p)
+    }
+    while true {
+        skip_semis(inout p)
+        if pk_kind(p) == "Eof" { break }
+        let it = item(inout p)
+        if p.failed { return (false, items, p) }
+        items.push(it)
+    }
+    (true, items, p)
+}
+
+fn item(inout p: Parser) -> Node {
+    let k = pk_kind(p)
+    if k == "Fn" { return fn_decl(inout p) }
+    if k == "Struct" { return struct_decl(inout p) }
+    if k == "Enum" { return enum_decl(inout p) }
+    if k == "Axis" { return axis_decl(inout p) }
+    if k == "Protocol" { return protocol_decl(inout p) }
+    if k == "Import" {
+        let start = bump(inout p)
+        if pk_kind(p) == "Str" {
+            let t = bump(inout p)
+            return nd("import", hex_text(t.chars), [], to_lo(start.lo, t.lo), to_hi(start.hi, t.hi))
+        }
+        err_expected(inout p, "the file to import in quotes, e.g. `import \"lab/universe.krs\"`")
+        return none_node()
+    }
+    let r = stmt(inout p)
+    if p.failed { return none_node() }
+    if not (eat(inout p, "Semi") or pk_kind(p) == "Eof" or r.1) {
+        err_expected(inout p, "a new line or `;`")
+        return none_node()
+    }
+    r.0
+}
+
+fn fn_decl(inout p: Parser) -> Node {
+    let start = expect(inout p, "Fn", "`fn`")
+    let name = ident(inout p, "a function name")
+    if p.failed { return none_node() }
+    // `fn adam[P](...)`: type parameters (differentiable types: the tangent space)
+    var tps = []
+    if eat(inout p, "LBracket") {
+        while pk_kind(p) != "RBracket" {
+            let tp = ident(inout p, "a type parameter name")
+            if p.failed { return none_node() }
+            tps.push(nd("tp", tp.text, [], tp.lo, tp.hi))
+            if not eat(inout p, "Comma") { break }
+        }
+        let _ = expect(inout p, "RBracket", "`]`")
+        if p.failed { return none_node() }
+    }
+    let _ = expect(inout p, "LParen", "`(`")
+    if p.failed { return none_node() }
+    var params = []
+    while pk_kind(p) != "RParen" {
+        let ps = pk(p)
+        let inout_ = eat(inout p, "Inout")
+        let pname = ident(inout p, "a parameter name")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "Colon", "`:` and the parameter type")
+        if p.failed { return none_node() }
+        let ty = type_expr(inout p)
+        if p.failed { return none_node() }
+        let pv = prev(p)
+        params.push(nd("param", if inout_ { "inout " + pname.text } else { pname.text }, [ty], to_lo(ps.lo, pv.lo), to_hi(ps.hi, pv.hi)))
+        if not eat(inout p, "Comma") { break }
+    }
+    let _ = expect(inout p, "RParen", "`)`")
+    if p.failed { return none_node() }
+    var ret = none_node()
+    if eat(inout p, "Arrow") {
+        ret = type_expr(inout p)
+        if p.failed { return none_node() }
+    }
+    // `-> T @ end(m - 1)`: when the result is known (temporal types, M3)
+    var at = none_node()
+    if eat(inout p, "At") {
+        let a = prev(p)
+        if ret.kind == "-" {
+            fail(inout p, "E0001", a.lo, a.hi, "a temporal annotation needs a return type", "e.g. `fn signal(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) { ... }`")
+            return none_node()
+        }
+        let kw = ident(inout p, "`end(...)`")
+        if p.failed { return none_node() }
+        if kw.text != "end" {
+            fail(inout p, "E0001", kw.lo, kw.hi, "expected `end(...)` after `@`", "write `@ end(m - 1)`")
+            return none_node()
+        }
+        let _ = expect(inout p, "LParen", "`(`")
+        if p.failed { return none_node() }
+        let save = p.no_struct
+        p.no_struct = false
+        let e = expr(inout p)
+        p.no_struct = save
+        if p.failed { return none_node() }
+        let close = expect(inout p, "RParen", "`)`")
+        if p.failed { return none_node() }
+        at = nd("at", "", [e], to_lo(a.lo, close.0), to_hi(a.hi, close.1))
+    }
+    let body = block(inout p)
+    if p.failed { return none_node() }
+    nd("fn", name.text, [nd("tparams", "", tps, -1, -1), nd("params", "", params, -1, -1), ret, at, body], to_lo(start.0, body.lo), to_hi(start.1, body.hi))
+}
+
+// a month as YYYYMM after `kw` (`until`, `from`), or -1
+fn proto_month(inout p: Parser, kw: str, hint: str) -> i64 {
+    let w = ident(inout p, "`" + kw + "`")
+    if p.failed { return -1 }
+    if w.text != kw {
+        fail(inout p, "E0001", w.lo, w.hi, "expected `" + kw + "`", hint)
+        return -1
+    }
+    let t = pk(p)
+    if t.kind == "Int" and t.int >= 100001 and t.int <= 999912 and t.int % 100 >= 1 and t.int % 100 <= 12 {
+        let _ = bump(inout p)
+        return t.int
+    }
+    err_expected(inout p, "a month as YYYYMM, e.g. `201812`")
+    -1
+}
+
+// `protocol "name" { research: until 201812  holdout: from 201901  rule: "..." }`
+fn protocol_decl(inout p: Parser) -> Node {
+    let start = expect(inout p, "Protocol", "`protocol`")
+    var name: List[i64] = []
+    if pk_kind(p) == "Str" {
+        name = bump(inout p).chars
+    } else {
+        err_expected(inout p, "the protocol's name in quotes, e.g. `protocol \"momentum-v1\" { ... }`")
+        return none_node()
+    }
+    let _ = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    let hint = "the fields are `research: until YYYYMM`, `holdout: from YYYYMM`, `rule: \"...\"` and, optionally, `min_months: N` (default 12)"
+    var until = -1
+    var from = -1
+    var rule: List[i64] = []
+    var has_rule = false
+    var min_months = 12
+    while true {
+        while eat(inout p, "Semi") or eat(inout p, "Comma") {}
+        if eat(inout p, "RBrace") { break }
+        let field = ident(inout p, "a protocol field")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "Colon", "`:`")
+        if p.failed { return none_node() }
+        if field.text == "research" {
+            until = proto_month(inout p, "until", hint)
+        } else if field.text == "holdout" {
+            from = proto_month(inout p, "from", hint)
+        } else if field.text == "rule" {
+            if pk_kind(p) == "Str" {
+                rule = bump(inout p).chars
+                has_rule = true
+            } else {
+                err_expected(inout p, "the rule in quotes")
+            }
+        } else if field.text == "min_months" {
+            let t = pk(p)
+            if t.kind == "Int" and t.int >= 1 and t.int <= 1200 {
+                let _ = bump(inout p)
+                min_months = t.int
+            } else {
+                err_expected(inout p, "a number of months between 1 and 1200")
+            }
+        } else {
+            fail(inout p, "E0001", field.lo, field.hi, "unknown protocol field `" + field.text + "`", hint)
+        }
+        if p.failed { return none_node() }
+    }
+    let pv = prev(p)
+    let lo = to_lo(start.0, pv.lo)
+    let hi = to_hi(start.1, pv.hi)
+    if until < 0 or from < 0 or not has_rule {
+        fail(inout p, "E0001", lo, hi, "the protocol needs `research`, `holdout` and `rule`", hint)
+        return none_node()
+    }
+    if from <= until {
+        fail(inout p, "E0001", lo, hi, "the holdout must start after the research period ends", "")
+        return none_node()
+    }
+    nd("protocol", hex_text(name) + " " + str(until) + " " + str(from) + " " + str(min_months) + " " + hex_text(rule), [], lo, hi)
+}
+
+fn axis_decl(inout p: Parser) -> Node {
+    let start = expect(inout p, "Axis", "`axis`")
+    let name = ident(inout p, "an axis name")
+    if p.failed { return none_node() }
+    var temporal = none_node()
+    if eat(inout p, "Colon") {
+        let kw = ident(inout p, "`temporal(daily)` or `temporal(monthly)`")
+        if p.failed { return none_node() }
+        if kw.text != "temporal" {
+            fail(inout p, "E0001", kw.lo, kw.hi, "expected `temporal(daily)` or `temporal(monthly)`", "")
+            return none_node()
+        }
+        let _ = expect(inout p, "LParen", "`(`")
+        if p.failed { return none_node() }
+        let freq = ident(inout p, "`daily` or `monthly`")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "RParen", "`)`")
+        if p.failed { return none_node() }
+        temporal = nd("temporal", freq.text, [], freq.lo, freq.hi)
+    }
+    let pv = prev(p)
+    nd("axis", name.text, [temporal], to_lo(start.0, pv.lo), to_hi(start.1, pv.hi))
+}
+
+fn struct_decl(inout p: Parser) -> Node {
+    let start = expect(inout p, "Struct", "`struct`")
+    let name = ident(inout p, "a struct name")
+    if p.failed { return none_node() }
+    let _ = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    var fields = []
+    while true {
+        skip_separators(inout p)
+        if eat(inout p, "RBrace") { break }
+        let f = ident(inout p, "a field name")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "Colon", "`:` and the field type")
+        if p.failed { return none_node() }
+        let ty = type_expr(inout p)
+        if p.failed { return none_node() }
+        fields.push(nd("fieldty", f.text, [ty], -1, -1))
+    }
+    let pv = prev(p)
+    nd("struct", name.text, fields, to_lo(start.0, pv.lo), to_hi(start.1, pv.hi))
+}
+
+fn enum_decl(inout p: Parser) -> Node {
+    let start = expect(inout p, "Enum", "`enum`")
+    let name = ident(inout p, "an enum name")
+    if p.failed { return none_node() }
+    let _ = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    var variants = []
+    while true {
+        skip_separators(inout p)
+        if eat(inout p, "RBrace") { break }
+        let v = ident(inout p, "a variant name")
+        if p.failed { return none_node() }
+        var tys = []
+        if eat(inout p, "LParen") {
+            while pk_kind(p) != "RParen" {
+                tys.push(type_expr(inout p))
+                if p.failed { return none_node() }
+                if not eat(inout p, "Comma") { break }
+            }
+            let _ = expect(inout p, "RParen", "`)`")
+            if p.failed { return none_node() }
+        }
+        variants.push(nd("variant", v.text, tys, -1, -1))
+    }
+    let pv = prev(p)
+    nd("enum", name.text, variants, to_lo(start.0, pv.lo), to_hi(start.1, pv.hi))
+}
+
+fn type_list(inout p: Parser, close: str) -> List[Node] {
+    var ts = []
+    while pk_kind(p) != close {
+        ts.push(type_expr(inout p))
+        if p.failed { return ts }
+        if not eat(inout p, "Comma") { break }
+    }
+    ts
+}
+
+fn type_expr(inout p: Parser) -> Node {
+    let sp = pk(p)
+    let k = sp.kind
+    if k == "LParen" {
+        let _ = bump(inout p)
+        let ts = type_list(inout p, "RParen")
+        if p.failed { return none_node() }
+        let end = expect(inout p, "RParen", "`)`")
+        if p.failed { return none_node() }
+        return nd("tytuple", "", ts, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+    }
+    if k == "Fn" {
+        let _ = bump(inout p)
+        let _ = expect(inout p, "LParen", "`(`")
+        if p.failed { return none_node() }
+        let ps = type_list(inout p, "RParen")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "RParen", "`)`")
+        if p.failed { return none_node() }
+        var ret = none_node()
+        if eat(inout p, "Arrow") {
+            ret = type_expr(inout p)
+            if p.failed { return none_node() }
+        } else {
+            let pv = prev(p)
+            ret = nd("tytuple", "", [], pv.lo, pv.hi)
+        }
+        let pv = prev(p)
+        return nd("tyfn", "", [nd("tyargs", "", ps, -1, -1), ret], to_lo(sp.lo, pv.lo), to_hi(sp.hi, pv.hi))
+    }
+    if k == "Ident" {
+        let _ = bump(inout p)
+        if sp.text == "Tensor" and pk_kind(p) == "LBracket" {
+            let _ = bump(inout p)
+            var axes = []
+            while pk_kind(p) != "Semi" and pk_kind(p) != "RBracket" {
+                let a = ident(inout p, "an axis name")
+                if p.failed { return none_node() }
+                axes.push(nd("ax", a.text, [], a.lo, a.hi))
+                if not eat(inout p, "Comma") { break }
+            }
+            let _ = expect(inout p, "Semi", "`;` and the element type, e.g. `Tensor[asset; f64]`")
+            if p.failed { return none_node() }
+            let elem = type_expr(inout p)
+            if p.failed { return none_node() }
+            let _ = expect(inout p, "RBracket", "`]`")
+            if p.failed { return none_node() }
+            let pv = prev(p)
+            return nd("tytensor", "", [nd("axes", "", axes, -1, -1), elem], to_lo(sp.lo, pv.lo), to_hi(sp.hi, pv.hi))
+        }
+        var args: List[Node] = []
+        if eat(inout p, "LBracket") {
+            args = type_list(inout p, "RBracket")
+            if p.failed { return none_node() }
+            let _ = expect(inout p, "RBracket", "`]`")
+            if p.failed { return none_node() }
+        }
+        let pv = prev(p)
+        return nd("ty", sp.text, args, to_lo(sp.lo, pv.lo), to_hi(sp.hi, pv.hi))
+    }
+    err_expected(inout p, "a type")
+    none_node()
+}
+
+// ------------------------------------------------------------------ statements
+
+fn block(inout p: Parser) -> Node {
+    let start = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    let save = p.no_struct
+    p.no_struct = false
+    var stmts = []
+    var tail = none_node()
+    while true {
+        skip_semis(inout p)
+        if pk_kind(p) == "RBrace" { break }
+        let r = stmt(inout p)
+        if p.failed { return none_node() }
+        if eat(inout p, "Semi") {
+            stmts.push(r.0)
+            continue
+        }
+        if pk_kind(p) == "RBrace" {
+            if r.0.kind == "let" or r.0.kind == "var" { stmts.push(r.0) } else { tail = r.0 }
+            break
+        }
+        if r.1 {
+            stmts.push(r.0)
+            continue
+        }
+        err_expected(inout p, "a new line or `;`")
+        return none_node()
+    }
+    let end = expect(inout p, "RBrace", "`}`")
+    p.no_struct = save
+    if p.failed { return none_node() }
+    nd("block", "", [nd("stmts", "", stmts, -1, -1), tail], to_lo(start.0, end.0), to_hi(start.1, end.1))
+}
+
+// (the statement, whether it is block-like: `if`, `while`, `for`, `match`, a block)
+fn stmt(inout p: Parser) -> (Node, bool) {
+    let k = pk_kind(p)
+    if k == "Let" or k == "Var" {
+        let start = bump(inout p)
+        let pat = pattern(inout p)
+        if p.failed { return (none_node(), false) }
+        var ty = none_node()
+        if eat(inout p, "Colon") {
+            ty = type_expr(inout p)
+            if p.failed { return (none_node(), false) }
+        }
+        let _ = expect(inout p, "Assign", "`=`")
+        if p.failed { return (none_node(), false) }
+        let init = expr(inout p)
+        if p.failed { return (none_node(), false) }
+        return (nd(if k == "Var" { "var" } else { "let" }, "", [pat, ty, init], to_lo(start.lo, init.lo), to_hi(start.hi, init.hi)), false)
+    }
+    if contains(["Fn", "Struct", "Enum", "Axis", "Protocol", "Import"], k) {
+        let t = pk(p)
+        fail(inout p, "E0003", t.lo, t.hi, "declarations are only allowed at the top level (for now)", "")
+        return (none_node(), false)
+    }
+    let e = expr(inout p)
+    if p.failed { return (none_node(), false) }
+    (e, contains(["if", "while", "for", "match", "block"], e.kind))
+}
+
+fn pattern(inout p: Parser) -> Node {
+    let sp = pk(p)
+    let k = sp.kind
+    if k == "Ident" {
+        let _ = bump(inout p)
+        if sp.text == "_" { return nd("pwild", "", [], sp.lo, sp.hi) }
+        var enum_name = ""
+        var has_enum = false
+        var variant = sp.text
+        if pk_kind(p) == "Dot" {
+            let _ = bump(inout p)
+            let v = ident(inout p, "a variant name")
+            if p.failed { return none_node() }
+            enum_name = sp.text
+            has_enum = true
+            variant = v.text
+        }
+        let cs = codes(variant)
+        let is_variant = has_enum or (len(cs) > 0 and is_uppercase(cs[0]))
+        if not is_variant { return nd("pbind", variant, [], sp.lo, sp.hi) }
+        var args = []
+        if eat(inout p, "LParen") {
+            while pk_kind(p) != "RParen" {
+                args.push(pattern(inout p))
+                if p.failed { return none_node() }
+                if not eat(inout p, "Comma") { break }
+            }
+            let _ = expect(inout p, "RParen", "`)`")
+            if p.failed { return none_node() }
+        }
+        let pv = prev(p)
+        return nd("pvariant", enum_name + "." + variant, args, to_lo(sp.lo, pv.lo), to_hi(sp.hi, pv.hi))
+    }
+    if k == "Int" {
+        let _ = bump(inout p)
+        return nd("pint", str(sp.int), [], sp.lo, sp.hi)
+    }
+    if k == "Minus" {
+        let _ = bump(inout p)
+        if pk_kind(p) == "Int" {
+            let t = bump(inout p)
+            return nd("pint", str(-t.int), [], to_lo(sp.lo, t.lo), to_hi(sp.hi, t.hi))
+        }
+        err_expected(inout p, "an integer")
+        return none_node()
+    }
+    if k == "Str" {
+        let _ = bump(inout p)
+        return nd("pstr", hex_text(sp.chars), [], sp.lo, sp.hi)
+    }
+    if k == "True" or k == "False" {
+        let _ = bump(inout p)
+        return nd("pbool", if k == "True" { "true" } else { "false" }, [], sp.lo, sp.hi)
+    }
+    if k == "LParen" {
+        let _ = bump(inout p)
+        var ps = []
+        while pk_kind(p) != "RParen" {
+            ps.push(pattern(inout p))
+            if p.failed { return none_node() }
+            if not eat(inout p, "Comma") { break }
+        }
+        let end = expect(inout p, "RParen", "`)`")
+        if p.failed { return none_node() }
+        return nd("ptuple", "", ps, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+    }
+    err_expected(inout p, "a pattern")
+    none_node()
+}
+
+// ------------------------------------------------------------------ expressions
+
+fn expr(inout p: Parser) -> Node {
+    expr_bp(inout p, 0)
+}
+
+fn cond_expr(inout p: Parser) -> Node {
+    let save = p.no_struct
+    p.no_struct = true
+    let e = expr(inout p)
+    p.no_struct = save
+    e
+}
+
+// an expression where `Name {` is a struct literal
+fn struct_ok_expr(inout p: Parser) -> Node {
+    let save = p.no_struct
+    p.no_struct = false
+    let e = expr(inout p)
+    p.no_struct = save
+    e
+}
+
+// (the operator's kind, left and right binding powers), or ("", 0, 0)
+fn infix(k: str) -> (str, i64, i64) {
+    if contains(["Assign", "PlusAssign", "MinusAssign", "StarAssign", "SlashAssign"], k) { return ("assign", 1, 1) }
+    if k == "DotDot" or k == "DotDotEq" { return ("range", 2, 3) }
+    if k == "Or" { return ("or", 3, 4) }
+    if k == "And" { return ("and", 5, 6) }
+    if contains(["EqEq", "NotEq", "Lt", "Le", "Gt", "Ge"], k) { return ("bin", 7, 8) }
+    if k == "Plus" or k == "Minus" { return ("bin", 9, 10) }
+    if k == "Star" or k == "Slash" or k == "Percent" { return ("bin", 11, 12) }
+    if k == "Caret" { return ("bin", 14, 14) }
+    ("", 0, 0)
+}
+
+fn expr_bp(inout p: Parser, min_bp: i64) -> Node {
+    var lhs = prefix(inout p)
+    if p.failed { return none_node() }
+    while true {
+        let k = pk_kind(p)
+        if k == "LParen" {
+            let a = call_args(inout p)
+            if p.failed { return none_node() }
+            lhs = nd("call", "", [lhs, a.0], to_lo(lhs.lo, a.1), to_hi(lhs.hi, a.2))
+            continue
+        }
+        if k == "LBracket" {
+            let _ = bump(inout p)
+            let save = p.no_struct
+            p.no_struct = false
+            var items = []
+            while pk_kind(p) != "RBracket" {
+                let axn = named_prefix(inout p, "an axis name")
+                if p.failed { return none_node() }
+                let e = expr(inout p)
+                if p.failed { return none_node() }
+                items.push(nd("iarg", "", [if axn.kind == "-" { axn } else { nd("axis", axn.text, [], axn.lo, axn.hi) }, e], -1, -1))
+                if not eat(inout p, "Comma") { break }
+            }
+            p.no_struct = save
+            let end = expect(inout p, "RBracket", "`]`")
+            if p.failed { return none_node() }
+            if len(items) == 0 {
+                fail(inout p, "E0001", end.0, end.1, "empty index", "")
+                return none_node()
+            }
+            lhs = nd("index", "", [lhs, nd("iargs", "", items, -1, -1)], to_lo(lhs.lo, end.0), to_hi(lhs.hi, end.1))
+            continue
+        }
+        if k == "Dot" {
+            let _ = bump(inout p)
+            let t = pk(p)
+            if t.kind == "Int" {
+                let _ = bump(inout p)
+                lhs = nd("tindex", str(t.int), [lhs], to_lo(lhs.lo, t.lo), to_hi(lhs.hi, t.hi))
+            } else if t.kind == "Ident" {
+                let _ = bump(inout p)
+                if pk_kind(p) == "LParen" {
+                    let a = call_args(inout p)
+                    if p.failed { return none_node() }
+                    lhs = nd("method", t.text, [lhs, a.0], to_lo(lhs.lo, a.1), to_hi(lhs.hi, a.2))
+                } else {
+                    lhs = nd("field", t.text, [lhs], to_lo(lhs.lo, t.lo), to_hi(lhs.hi, t.hi))
+                }
+            } else {
+                err_expected(inout p, "a field or method name after `.`")
+                return none_node()
+            }
+            continue
+        }
+        let op = infix(k)
+        if op.0 == "" or op.1 < min_bp { break }
+        let ot = bump(inout p)
+        let rhs = expr_bp(inout p, op.2)
+        if p.failed { return none_node() }
+        let lo = to_lo(lhs.lo, rhs.lo)
+        let hi = to_hi(lhs.hi, rhs.hi)
+        if op.0 == "assign" {
+            let sym = if ot.kind == "Assign" { "=" } else { substr(tok_symbol(ot.kind), 0, 1) }
+            lhs = nd("assign", sym, [lhs, rhs], lo, hi)
+        } else if op.0 == "range" {
+            lhs = nd("range", if ot.kind == "DotDotEq" { "..=" } else { ".." }, [lhs, rhs], lo, hi)
+        } else if op.0 == "bin" {
+            lhs = nd("bin", tok_symbol(ot.kind), [lhs, rhs], lo, hi)
+        } else {
+            lhs = nd(op.0, "", [lhs, rhs], lo, hi)
+        }
+    }
+    lhs
+}
+
+// `name:` before a named argument or a named index (`over: asset`, `month: m`)
+fn named_prefix(inout p: Parser, what: str) -> Node {
+    if pk_kind(p) == "Ident" and pk_at(p, 1) == "Colon" {
+        let n = ident(inout p, what)
+        let _ = bump(inout p)
+        return nd("name", n.text, [], n.lo, n.hi)
+    }
+    none_node()
+}
+
+// (the arguments, the span of the closing `)`)
+fn call_args(inout p: Parser) -> (Node, i64, i64) {
+    let _ = expect(inout p, "LParen", "`(`")
+    if p.failed { return (none_node(), 0, 0) }
+    let save = p.no_struct
+    p.no_struct = false
+    var out = []
+    while pk_kind(p) != "RParen" {
+        let name = named_prefix(inout p, "an argument name")
+        if p.failed { return (none_node(), 0, 0) }
+        let io = eat(inout p, "Inout")
+        let e = expr(inout p)
+        if p.failed { return (none_node(), 0, 0) }
+        let nm = if name.kind == "-" { name } else { nd("argname", name.text, [], name.lo, name.hi) }
+        out.push(nd("arg", if io { "inout" } else { "" }, [nm, e], -1, -1))
+        if not eat(inout p, "Comma") { break }
+    }
+    let end = expect(inout p, "RParen", "`)` to close the argument list")
+    p.no_struct = save
+    if p.failed { return (none_node(), 0, 0) }
+    (nd("args", "", out, -1, -1), end.0, end.1)
+}
+
+fn prefix(inout p: Parser) -> Node {
+    let sp = pk(p)
+    let k = sp.kind
+    if k == "Int" {
+        let _ = bump(inout p)
+        return nd("int", str(sp.int), [], sp.lo, sp.hi)
+    }
+    if k == "Float" {
+        let _ = bump(inout p)
+        return nd("float", str(sp.float), [], sp.lo, sp.hi)
+    }
+    if k == "Str" {
+        let _ = bump(inout p)
+        return nd("str", hex_text(sp.chars), [], sp.lo, sp.hi)
+    }
+    if k == "True" or k == "False" {
+        let _ = bump(inout p)
+        return nd("bool", if k == "True" { "true" } else { "false" }, [], sp.lo, sp.hi)
+    }
+    if k == "Ident" {
+        let _ = bump(inout p)
+        if pk_kind(p) == "LBrace" and not p.no_struct { return struct_lit(inout p, sp) }
+        return nd("name", sp.text, [], sp.lo, sp.hi)
+    }
+    if k == "LParen" {
+        let _ = bump(inout p)
+        let save = p.no_struct
+        p.no_struct = false
+        if eat(inout p, "RParen") {
+            p.no_struct = save
+            let pv = prev(p)
+            return nd("unit", "", [], to_lo(sp.lo, pv.lo), to_hi(sp.hi, pv.hi))
+        }
+        let first = expr(inout p)
+        if p.failed { return none_node() }
+        if eat(inout p, "Comma") {
+            var items = [first]
+            while pk_kind(p) != "RParen" {
+                items.push(expr(inout p))
+                if p.failed { return none_node() }
+                if not eat(inout p, "Comma") { break }
+            }
+            let end = expect(inout p, "RParen", "`)`")
+            p.no_struct = save
+            if p.failed { return none_node() }
+            return nd("tuple", "", items, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+        }
+        let end = expect(inout p, "RParen", "`)`")
+        p.no_struct = save
+        if p.failed { return none_node() }
+        // the expression itself, its span widened to the parentheses
+        return nd(first.kind, first.text, first.kids, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+    }
+    if k == "LBracket" {
+        let _ = bump(inout p)
+        let save = p.no_struct
+        p.no_struct = false
+        // `[:]`: the empty map
+        if eat(inout p, "Colon") {
+            let end = expect(inout p, "RBracket", "`]`")
+            p.no_struct = save
+            if p.failed { return none_node() }
+            return nd("map", "", [], to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+        }
+        var items = []
+        var pairs = []
+        while pk_kind(p) != "RBracket" {
+            let e = expr(inout p)
+            if p.failed { return none_node() }
+            if eat(inout p, "Colon") {
+                if len(items) > 0 {
+                    fail(inout p, "E0003", e.lo, e.hi, "a list element followed by a map entry", "a list is `[a, b]`, a map is `[key: value, ...]`")
+                    return none_node()
+                }
+                let v = expr(inout p)
+                if p.failed { return none_node() }
+                pairs.push(nd("pair", "", [e, v], -1, -1))
+            } else {
+                if len(pairs) > 0 {
+                    fail(inout p, "E0003", e.lo, e.hi, "a map entry needs `key: value`", "")
+                    return none_node()
+                }
+                items.push(e)
+            }
+            if not eat(inout p, "Comma") { break }
+        }
+        let end = expect(inout p, "RBracket", "`]`")
+        p.no_struct = save
+        if p.failed { return none_node() }
+        if len(pairs) == 0 { return nd("list", "", items, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1)) }
+        return nd("map", "", pairs, to_lo(sp.lo, end.0), to_hi(sp.hi, end.1))
+    }
+    if k == "Pipe" { return lambda(inout p) }
+    if k == "Minus" {
+        let _ = bump(inout p)
+        let e = expr_bp(inout p, 13)
+        if p.failed { return none_node() }
+        return nd("neg", "", [e], to_lo(sp.lo, e.lo), to_hi(sp.hi, e.hi))
+    }
+    if k == "Not" {
+        let _ = bump(inout p)
+        let e = expr_bp(inout p, 7)
+        if p.failed { return none_node() }
+        return nd("not", "", [e], to_lo(sp.lo, e.lo), to_hi(sp.hi, e.hi))
+    }
+    if k == "If" { return if_expr(inout p) }
+    if k == "While" {
+        let _ = bump(inout p)
+        let cond = cond_expr(inout p)
+        if p.failed { return none_node() }
+        let body = block(inout p)
+        if p.failed { return none_node() }
+        return nd("while", "", [cond, body], to_lo(sp.lo, body.lo), to_hi(sp.hi, body.hi))
+    }
+    if k == "For" {
+        let _ = bump(inout p)
+        let pat = pattern(inout p)
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "In", "`in`")
+        if p.failed { return none_node() }
+        let iter = cond_expr(inout p)
+        if p.failed { return none_node() }
+        let body = block(inout p)
+        if p.failed { return none_node() }
+        return nd("for", "", [pat, iter, body], to_lo(sp.lo, body.lo), to_hi(sp.hi, body.hi))
+    }
+    if k == "Match" { return match_expr(inout p) }
+    if k == "LBrace" { return block(inout p) }
+    if k == "Return" {
+        let _ = bump(inout p)
+        let nk = pk_kind(p)
+        if nk == "Semi" or nk == "RBrace" or nk == "Eof" { return nd("return", "", [none_node()], sp.lo, sp.hi) }
+        let e = expr(inout p)
+        if p.failed { return none_node() }
+        return nd("return", "", [e], to_lo(sp.lo, e.lo), to_hi(sp.hi, e.hi))
+    }
+    if k == "Break" or k == "Continue" {
+        let _ = bump(inout p)
+        return nd(if k == "Break" { "break" } else { "continue" }, "", [], sp.lo, sp.hi)
+    }
+    err_expected(inout p, "an expression")
+    none_node()
+}
+
+fn struct_lit(inout p: Parser, start: Token) -> Node {
+    let _ = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    var fields = []
+    while true {
+        skip_separators(inout p)
+        if pk_kind(p) == "RBrace" { break }
+        let f = ident(inout p, "a field name")
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "Colon", "`:`")
+        if p.failed { return none_node() }
+        let e = struct_ok_expr(inout p)
+        if p.failed { return none_node() }
+        fields.push(nd("init", f.text, [e], -1, -1))
+    }
+    let end = expect(inout p, "RBrace", "`}`")
+    if p.failed { return none_node() }
+    nd("structlit", start.text, fields, to_lo(start.lo, end.0), to_hi(start.hi, end.1))
+}
+
+fn if_expr(inout p: Parser) -> Node {
+    let start = expect(inout p, "If", "`if`")
+    let cond = cond_expr(inout p)
+    if p.failed { return none_node() }
+    let then = block(inout p)
+    if p.failed { return none_node() }
+    // `else` may start the next line
+    if pk_kind(p) == "Semi" and pk_at(p, 1) == "Else" { let _ = bump(inout p) }
+    var els = none_node()
+    if eat(inout p, "Else") {
+        els = if pk_kind(p) == "If" { if_expr(inout p) } else { block(inout p) }
+        if p.failed { return none_node() }
+    }
+    let end_lo = if els.kind == "-" { then.lo } else { els.lo }
+    let end_hi = if els.kind == "-" { then.hi } else { els.hi }
+    nd("if", "", [cond, then, els], to_lo(start.0, end_lo), to_hi(start.1, end_hi))
+}
+
+fn match_expr(inout p: Parser) -> Node {
+    let start = expect(inout p, "Match", "`match`")
+    let scrut = cond_expr(inout p)
+    if p.failed { return none_node() }
+    let _ = expect(inout p, "LBrace", "`{`")
+    if p.failed { return none_node() }
+    let save = p.no_struct
+    p.no_struct = false
+    var arms = []
+    while true {
+        skip_separators(inout p)
+        if pk_kind(p) == "RBrace" { break }
+        let pat = pattern(inout p)
+        if p.failed { return none_node() }
+        let _ = expect(inout p, "FatArrow", "`=>`")
+        if p.failed { return none_node() }
+        let body = expr(inout p)
+        if p.failed { return none_node() }
+        arms.push(nd("arm", "", [pat, body], to_lo(pat.lo, body.lo), to_hi(pat.hi, body.hi)))
+        let nk = pk_kind(p)
+        if nk != "Comma" and nk != "Semi" and nk != "RBrace" {
+            err_expected(inout p, "`,` or a new line between match arms")
+            return none_node()
+        }
+    }
+    let end = expect(inout p, "RBrace", "`}`")
+    p.no_struct = save
+    if p.failed { return none_node() }
+    nd("match", "", [scrut, nd("arms", "", arms, -1, -1)], to_lo(start.0, end.0), to_hi(start.1, end.1))
+}
+
+fn lambda(inout p: Parser) -> Node {
+    let start = expect(inout p, "Pipe", "`|`")
+    var params = []
+    while pk_kind(p) != "Pipe" {
+        let n = ident(inout p, "a parameter name")
+        if p.failed { return none_node() }
+        var ty = none_node()
+        if eat(inout p, "Colon") {
+            ty = type_expr(inout p)
+            if p.failed { return none_node() }
+        }
+        params.push(nd("lp", n.text, [ty], n.lo, n.hi))
+        if not eat(inout p, "Comma") { break }
+    }
+    let _ = expect(inout p, "Pipe", "`|`")
+    if p.failed { return none_node() }
+    let body = struct_ok_expr(inout p)
+    if p.failed { return none_node() }
+    nd("lambda", "", [nd("lparams", "", params, -1, -1), body], to_lo(start.0, body.lo), to_hi(start.1, body.hi))
+}

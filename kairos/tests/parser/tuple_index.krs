@@ -1,0 +1,4 @@
+let t = (1, (2, 3))
+print(t.1.0, t.0)
+let u = (1,)
+let v = ()

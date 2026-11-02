@@ -1,0 +1,15 @@
+// The syntax tree of files, by the parser written in Kairós (as `kairos ast file.krs` prints it).
+//
+//   kairos run kairos/compiler/ast.krs file.krs [more.krs ...]
+import "parser.krs"
+
+for path in args() {
+    if len(args()) > 1 { print("== " + path) }
+    let r = parse_program(read_text(path))
+    if r.0 {
+        for it in r.1 { print(node_line(it)) }
+    } else {
+        print("error " + r.2.code + " " + str(r.2.elo) + " " + str(r.2.ehi) + " " + r.2.msg)
+        if r.2.hint != "" { print("hint " + r.2.hint) }
+    }
+}

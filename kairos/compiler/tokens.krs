@@ -10,5 +10,6 @@ for p in args() {
         for t in r.1 { print(token_line(t)) }
     } else {
         print("error " + r.2.code + " " + str(r.2.lo) + " " + str(r.2.hi) + " " + r.2.msg)
+        if r.2.hint != "" { print("hint " + r.2.hint) }
     }
 }

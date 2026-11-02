@@ -1,0 +1,2 @@
+let f = |a, b: f64| a + b
+let g = || 1

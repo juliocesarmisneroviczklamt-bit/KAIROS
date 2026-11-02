@@ -230,3 +230,236 @@ impl Pattern {
         }
     }
 }
+
+// ------------------------------------------------------------------ canonical text (M12)
+
+/// The syntax tree as uniform nodes, one line: `(kind text children... lo:hi)`; the
+/// parser written in Kairós (kairos/compiler/parser.krs) prints the same (`kairos ast file.krs`).
+/// `-` is an absent part; nodes without a span in the tree print none.
+pub struct Node {
+    kind: &'static str,
+    text: String,
+    kids: Vec<Node>,
+    span: Option<Span>,
+}
+
+fn node(kind: &'static str, text: impl Into<String>, kids: Vec<Node>, span: Option<Span>) -> Node {
+    Node { kind, text: text.into(), kids, span }
+}
+
+fn none() -> Node {
+    node("-", "", Vec::new(), None)
+}
+
+/// A string as its code points in hex, as the lexer dump writes strings.
+pub fn hex_text(s: &str) -> String {
+    format!("s({})", s.chars().map(|c| format!("{:x}", c as u32)).collect::<Vec<_>>().join(" "))
+}
+
+impl Node {
+    pub fn render(&self, out: &mut String) {
+        if self.kind == "-" {
+            out.push('-');
+            return;
+        }
+        out.push('(');
+        out.push_str(self.kind);
+        if !self.text.is_empty() {
+            out.push(' ');
+            out.push_str(&self.text);
+        }
+        for k in &self.kids {
+            out.push(' ');
+            k.render(out);
+        }
+        if let Some(sp) = self.span {
+            out.push_str(&format!(" {}:{}", sp.lo, sp.hi));
+        }
+        out.push(')');
+    }
+}
+
+/// The program's items, one per line.
+pub fn canonical(items: &[Item]) -> String {
+    let mut out = String::new();
+    for it in items {
+        item_node(it).render(&mut out);
+        out.push('\n');
+    }
+    out
+}
+
+fn item_node(it: &Item) -> Node {
+    match it {
+        Item::Fn(f) => {
+            let tps = node("tparams", "", f.type_params.iter().map(|(n, sp)| node("tp", n.clone(), vec![], Some(*sp))).collect(), None);
+            let ps = node(
+                "params",
+                "",
+                f.params
+                    .iter()
+                    .map(|p| node("param", if p.inout { format!("inout {}", p.name) } else { p.name.clone() }, vec![type_node(&p.ty)], Some(p.span)))
+                    .collect(),
+                None,
+            );
+            let ret = f.ret.as_ref().map(type_node).unwrap_or_else(none);
+            let at = f.known_at.as_ref().map(|(e, sp)| node("at", "", vec![expr_node(e)], Some(*sp))).unwrap_or_else(none);
+            node("fn", f.name.clone(), vec![tps, ps, ret, at, block_node(&f.body)], Some(f.span))
+        }
+        Item::Struct(s) => node(
+            "struct",
+            s.name.clone(),
+            s.fields.iter().map(|(n, t)| node("fieldty", n.clone(), vec![type_node(t)], None)).collect(),
+            Some(s.span),
+        ),
+        Item::Enum(e) => node(
+            "enum",
+            e.name.clone(),
+            e.variants.iter().map(|(n, ts)| node("variant", n.clone(), ts.iter().map(type_node).collect(), None)).collect(),
+            Some(e.span),
+        ),
+        Item::Axis(a) => {
+            let t = a.temporal.as_ref().map(|(f, sp)| node("temporal", f.clone(), vec![], Some(*sp))).unwrap_or_else(none);
+            node("axis", a.name.clone(), vec![t], Some(a.span))
+        }
+        Item::Protocol(p) => node(
+            "protocol",
+            format!("{} {} {} {} {}", hex_text(&p.name), p.research_until, p.holdout_from, p.min_months, hex_text(&p.rule)),
+            vec![],
+            Some(p.span),
+        ),
+        Item::Import(path, sp) => node("import", hex_text(path), vec![], Some(*sp)),
+        Item::Stmt(s) => stmt_node(s),
+    }
+}
+
+fn type_node(t: &TypeExpr) -> Node {
+    match t {
+        TypeExpr::Named { name, args, span } => node("ty", name.clone(), args.iter().map(type_node).collect(), Some(*span)),
+        TypeExpr::Tuple(ts, span) => node("tytuple", "", ts.iter().map(type_node).collect(), Some(*span)),
+        TypeExpr::Fn(ps, r, span) => node("tyfn", "", vec![node("tyargs", "", ps.iter().map(type_node).collect(), None), type_node(r)], Some(*span)),
+        TypeExpr::Tensor { axes, elem, span } => node(
+            "tytensor",
+            "",
+            vec![node("axes", "", axes.iter().map(|(n, sp)| node("ax", n.clone(), vec![], Some(*sp))).collect(), None), type_node(elem)],
+            Some(*span),
+        ),
+    }
+}
+
+fn block_node(b: &Block) -> Node {
+    let tail = b.tail.as_ref().map(|e| expr_node(e)).unwrap_or_else(none);
+    node("block", "", vec![node("stmts", "", b.stmts.iter().map(stmt_node).collect(), None), tail], Some(b.span))
+}
+
+fn stmt_node(s: &Stmt) -> Node {
+    match s {
+        Stmt::Let { mutable, pat, ty, init, span } => node(
+            if *mutable { "var" } else { "let" },
+            "",
+            vec![pat_node(pat), ty.as_ref().map(type_node).unwrap_or_else(none), expr_node(init)],
+            Some(*span),
+        ),
+        Stmt::Expr(e) => expr_node(e),
+    }
+}
+
+fn pat_node(p: &Pattern) -> Node {
+    match p {
+        Pattern::Wild(sp) => node("pwild", "", vec![], Some(*sp)),
+        Pattern::Bind(n, sp) => node("pbind", n.clone(), vec![], Some(*sp)),
+        Pattern::Int(v, sp) => node("pint", v.to_string(), vec![], Some(*sp)),
+        Pattern::Str(s, sp) => node("pstr", hex_text(s), vec![], Some(*sp)),
+        Pattern::Bool(b, sp) => node("pbool", b.to_string(), vec![], Some(*sp)),
+        Pattern::Tuple(ps, sp) => node("ptuple", "", ps.iter().map(pat_node).collect(), Some(*sp)),
+        Pattern::Variant { enum_name, variant, args, span } => {
+            node("pvariant", format!("{}.{variant}", enum_name.clone().unwrap_or_default()), args.iter().map(pat_node).collect(), Some(*span))
+        }
+    }
+}
+
+fn args_node(args: &[Arg]) -> Node {
+    node(
+        "args",
+        "",
+        args.iter()
+            .map(|a| {
+                let name = a.name.as_ref().map(|(n, sp)| node("argname", n.clone(), vec![], Some(*sp))).unwrap_or_else(none);
+                node("arg", if a.inout { "inout" } else { "" }, vec![name, expr_node(&a.expr)], None)
+            })
+            .collect(),
+        None,
+    )
+}
+
+fn expr_node(e: &Expr) -> Node {
+    let sp = Some(e.span);
+    let n = |kind: &'static str, text: String, kids: Vec<Node>| node(kind, text, kids, sp);
+    match &e.kind {
+        ExprKind::Int(v) => n("int", v.to_string(), vec![]),
+        ExprKind::Float(v) => n("float", format!("{v:?}"), vec![]),
+        ExprKind::Str(s) => n("str", hex_text(s), vec![]),
+        ExprKind::Bool(b) => n("bool", b.to_string(), vec![]),
+        ExprKind::Unit => n("unit", String::new(), vec![]),
+        ExprKind::Name(x) => n("name", x.clone(), vec![]),
+        ExprKind::List(xs) => n("list", String::new(), xs.iter().map(expr_node).collect()),
+        ExprKind::Map(ps) => n("map", String::new(), ps.iter().map(|(k, v)| node("pair", "", vec![expr_node(k), expr_node(v)], None)).collect()),
+        ExprKind::Tuple(xs) => n("tuple", String::new(), xs.iter().map(expr_node).collect()),
+        ExprKind::StructLit { name, fields } => {
+            n("structlit", name.clone(), fields.iter().map(|(f, x)| node("init", f.clone(), vec![expr_node(x)], None)).collect())
+        }
+        ExprKind::Field(x, f) => n("field", f.clone(), vec![expr_node(x)]),
+        ExprKind::TupleIndex(x, k) => n("tindex", k.to_string(), vec![expr_node(x)]),
+        ExprKind::Index(x, items) => {
+            let args = items
+                .iter()
+                .map(|a| {
+                    let axis = a.axis.as_ref().map(|(n, sp)| node("axis", n.clone(), vec![], Some(*sp))).unwrap_or_else(none);
+                    node("iarg", "", vec![axis, expr_node(&a.expr)], None)
+                })
+                .collect();
+            n("index", String::new(), vec![expr_node(x), node("iargs", "", args, None)])
+        }
+        ExprKind::Call(f, args) => n("call", String::new(), vec![expr_node(f), args_node(args)]),
+        ExprKind::MethodCall { recv, name, args } => n("method", name.clone(), vec![expr_node(recv), args_node(args)]),
+        ExprKind::Unary(UnOp::Neg, x) => n("neg", String::new(), vec![expr_node(x)]),
+        ExprKind::Unary(UnOp::Not, x) => n("not", String::new(), vec![expr_node(x)]),
+        ExprKind::Binary(op, a, b) => n("bin", op_str(*op).to_string(), vec![expr_node(a), expr_node(b)]),
+        ExprKind::And(a, b) => n("and", String::new(), vec![expr_node(a), expr_node(b)]),
+        ExprKind::Or(a, b) => n("or", String::new(), vec![expr_node(a), expr_node(b)]),
+        ExprKind::Assign { target, op, value } => {
+            n("assign", op.map_or("=".to_string(), |o| op_str(o).to_string()), vec![expr_node(target), expr_node(value)])
+        }
+        ExprKind::If { cond, then, els } => {
+            n("if", String::new(), vec![expr_node(cond), block_node(then), els.as_ref().map(|x| expr_node(x)).unwrap_or_else(none)])
+        }
+        ExprKind::While { cond, body } => n("while", String::new(), vec![expr_node(cond), block_node(body)]),
+        ExprKind::For { pat, iter, body } => n("for", String::new(), vec![pat_node(pat), expr_node(iter), block_node(body)]),
+        ExprKind::Range { lo, hi, inclusive } => n("range", if *inclusive { "..=" } else { ".." }.to_string(), vec![expr_node(lo), expr_node(hi)]),
+        ExprKind::Match { scrut, arms } => n(
+            "match",
+            String::new(),
+            vec![
+                expr_node(scrut),
+                node("arms", "", arms.iter().map(|a| node("arm", "", vec![pat_node(&a.pat), expr_node(&a.body)], Some(a.span))).collect(), None),
+            ],
+        ),
+        ExprKind::Lambda { params, body } => n(
+            "lambda",
+            String::new(),
+            vec![
+                node(
+                    "lparams",
+                    "",
+                    params.iter().map(|(p, t, sp)| node("lp", p.clone(), vec![t.as_ref().map(type_node).unwrap_or_else(none)], Some(*sp))).collect(),
+                    None,
+                ),
+                expr_node(body),
+            ],
+        ),
+        ExprKind::Block(b) => block_node(b),
+        ExprKind::Return(x) => n("return", String::new(), vec![x.as_ref().map(|x| expr_node(x)).unwrap_or_else(none)]),
+        ExprKind::Break => n("break", String::new(), vec![]),
+        ExprKind::Continue => n("continue", String::new(), vec![]),
+    }
+}

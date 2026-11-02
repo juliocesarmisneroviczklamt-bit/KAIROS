@@ -1,0 +1,1 @@
+for i in 0..10 { for j in i ..= 2 * i { print(i, j) } }

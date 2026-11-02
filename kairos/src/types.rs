@@ -1911,7 +1911,7 @@ impl Checker {
             }
             Builtin::ToHex => (self.fixed_args(&all, &[Ty::Int, Ty::Int], sp, name)?, Ty::Str),
             Builtin::FileSize | Builtin::FileDate => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
-            Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Bool),
+            Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace | Builtin::IsUppercase => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Bool),
             Builtin::HttpGetAll => (
                 self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Int], sp, name)?,
                 Ty::List(Box::new(Ty::Tuple(vec![Ty::Bool, Ty::Str]))),

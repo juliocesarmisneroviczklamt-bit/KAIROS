@@ -912,11 +912,12 @@ impl<'a> Interp<'a> {
                 let (x, w) = (as_int(v[0].clone()), as_int(v[1].clone()).clamp(0, 64) as usize);
                 Ok(Value::Str(format!("{:0w$x}", x as u64).into()))
             }
-            Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace => {
+            Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace | Builtin::IsUppercase => {
                 let c = u32::try_from(as_int(v[0].clone())).ok().and_then(char::from_u32);
                 Ok(Value::Bool(c.is_some_and(|c| match b {
                     Builtin::IsAlphabetic => c.is_alphabetic(),
                     Builtin::IsAlphanumeric => c.is_alphanumeric(),
+                    Builtin::IsUppercase => c.is_uppercase(),
                     _ => c.is_whitespace(),
                 })))
             }

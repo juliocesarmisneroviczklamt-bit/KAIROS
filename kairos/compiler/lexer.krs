@@ -22,6 +22,7 @@ struct LexErr {
     lo: i64,
     hi: i64,
     msg: str,
+    hint: str,
 }
 
 fn lx_keywords() -> Map[str, str] {
@@ -40,9 +41,9 @@ fn lx_token(kind: str, lo: i64, hi: i64, nl: bool) -> Token {
     Token { kind: kind, text: "", int: 0, float: 0.0, chars: [], lo: lo, hi: hi, nl: nl }
 }
 
-fn lx_err(code: str, lo: i64, hi: i64, msg: str) -> (bool, List[Token], LexErr) {
+fn lx_err(code: str, lo: i64, hi: i64, msg: str, hint: str) -> (bool, List[Token], LexErr) {
     let none: List[Token] = []
-    (false, none, LexErr { code: code, lo: lo, hi: hi, msg: msg })
+    (false, none, LexErr { code: code, lo: lo, hi: hi, msg: msg, hint: hint })
 }
 
 fn lx_utf8_len(c: i64) -> i64 {
@@ -84,6 +85,7 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
     let kw = lx_keywords()
     let reserved = lx_reserved()
     let bs = from_codes([92])
+    let u_hint = "write a Unicode code point as `" + bs + "u{...}` with 1 to 6 hex digits, e.g. `" + bs + "u{e9}`"
     var toks: List[Token] = []
     var i = 0
     var nl = false
@@ -114,7 +116,7 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
                 if cs[i] == 10 { nl = true }
                 i += 1
             }
-            if i + 1 >= n { return lx_err("E0001", start, start + 2, "unterminated block comment") }
+            if i + 1 >= n { return lx_err("E0001", start, start + 2, "unterminated block comment", "") }
             i += 2
             continue
         }
@@ -155,13 +157,13 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
             let hi = boff[i]
             if is_float {
                 let x = parse_float(from_codes(digits))
-                if is_nan(x) { return lx_err("E0001", start, hi, "invalid number") }
+                if is_nan(x) { return lx_err("E0001", start, hi, "invalid number", "") }
                 t.kind = "Float"
                 t.float = x
             } else {
                 var v = 0
                 for d in digits {
-                    if v > (9223372036854775807 - (d - 48)) / 10 { return lx_err("E0001", start, hi, "integer literal too large for `i64`") }
+                    if v > (9223372036854775807 - (d - 48)) / 10 { return lx_err("E0001", start, hi, "integer literal too large for `i64`", "") }
                     v = v * 10 + (d - 48)
                 }
                 t.kind = "Int"
@@ -171,7 +173,7 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
             i += 1
             var s = []
             while true {
-                if i >= n { return lx_err("E0001", start, boff[n], "unterminated string") }
+                if i >= n { return lx_err("E0001", start, boff[n], "unterminated string", "") }
                 let ch = cs[i]
                 if ch == 34 {
                     i += 1
@@ -181,7 +183,7 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
                     let e = cs[i + 1]
                     // a Unicode code point in braces, 1 to 6 hex digits
                     if e == 117 {
-                        if i + 2 >= n or cs[i + 2] != 123 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "invalid escape") }
+                        if i + 2 >= n or cs[i + 2] != 123 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "invalid escape", u_hint) }
                         var j = i + 3
                         var hex = []
                         while j < n and cs[j] != 125 and len(hex) < 7 {
@@ -190,13 +192,13 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
                         }
                         var v = -1
                         if j < n and cs[j] == 125 and len(hex) >= 1 and len(hex) <= 6 { v = lx_hex(hex) }
-                        if v < 0 or v > 1114111 or (v >= 55296 and v <= 57343) { return lx_err("E0001", boff[i], boff[min(j + 1, n)], "invalid escape") }
+                        if v < 0 or v > 1114111 or (v >= 55296 and v <= 57343) { return lx_err("E0001", boff[i], boff[min(j + 1, n)], "invalid escape", u_hint) }
                         s.push(v)
                         i = j + 1
                         continue
                     }
                     let esc = if e == 110 { 10 } else if e == 116 { 9 } else if e == 114 { 13 } else if e == 48 { 0 } else if e == 34 { 34 } else if e == 92 { 92 } else { -1 }
-                    if esc < 0 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "unknown escape `" + bs + from_codes([e]) + "`") }
+                    if esc < 0 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "unknown escape `" + bs + from_codes([e]) + "`", "") }
                     s.push(esc)
                     i += 2
                     continue
@@ -234,9 +236,9 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
                 let one: Map[i64, str] = [40: "LParen", 41: "RParen", 123: "LBrace", 125: "RBrace", 91: "LBracket", 93: "RBracket",
                     44: "Comma", 58: "Colon", 59: "Semi", 46: "Dot", 124: "Pipe", 64: "At", 63: "Question", 43: "Plus",
                     45: "Minus", 42: "Star", 47: "Slash", 37: "Percent", 94: "Caret", 61: "Assign", 60: "Lt", 62: "Gt"]
-                if c == 33 { return lx_err("E0001", start, start + 1, "unexpected `!`") }
-                if c == 38 { return lx_err("E0001", start, start + 1, "unexpected `&`") }
-                if not contains(one, c) { return lx_err("E0001", start, boff[min(i + 1, n)], "unexpected character `" + from_codes([c]) + "`") }
+                if c == 33 { return lx_err("E0001", start, start + 1, "unexpected `!`", "Kairós uses `not` for negation and `!=` for inequality") }
+                if c == 38 { return lx_err("E0001", start, start + 1, "unexpected `&`", "Kairós uses `and` / `or` for boolean logic") }
+                if not contains(one, c) { return lx_err("E0001", start, boff[min(i + 1, n)], "unexpected character `" + from_codes([c]) + "`", "") }
                 kind = one[c]
             }
             t.kind = kind
@@ -247,7 +249,7 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
         nl = false
     }
     toks.push(lx_token("Eof", boff[n], boff[n], nl))
-    (true, lx_semicolons(toks), LexErr { code: "", lo: 0, hi: 0, msg: "" })
+    (true, lx_semicolons(toks), LexErr { code: "", lo: 0, hi: 0, msg: "", hint: "" })
 }
 
 fn lx_ends_statement(k: str) -> bool {

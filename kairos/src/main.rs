@@ -48,6 +48,8 @@ fn real_main(args: Vec<String>) -> i32 {
         Some("ledger") => ledger_cmd(&args[2..]),
         // the lexer's tokens, one per line (to compare with the lexer written in Kairós)
         Some("tokens") => tokens_cmd(args.get(2)),
+        // the syntax tree, one item per line (to compare with the parser written in Kairós)
+        Some("ast") => ast_cmd(args.get(2)),
         Some("--version") | Some("-V") => {
             println!("kairos {}", env!("CARGO_PKG_VERSION"));
             0
@@ -81,7 +83,36 @@ fn tokens_cmd(path: Option<&String>) -> i32 {
                 println!("{}", kairos::lexer::canonical(t));
             }
         }
-        Err(d) => println!("error {} {} {} {}", d.code, d.span.lo, d.span.hi, d.msg),
+        Err(d) => {
+            println!("error {} {} {} {}", d.code, d.span.lo, d.span.hi, d.msg);
+            if let Some(h) = &d.hint {
+                println!("hint {h}");
+            }
+        }
+    }
+    0
+}
+
+fn ast_cmd(path: Option<&String>) -> i32 {
+    let Some(path) = path else {
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
+    match kairos::lexer::lex(&src, 0).and_then(kairos::parser::parse) {
+        Ok(items) => print!("{}", kairos::ast::canonical(&items)),
+        Err(d) => {
+            println!("error {} {} {} {}", d.code, d.span.lo, d.span.hi, d.msg);
+            if let Some(h) = &d.hint {
+                println!("hint {h}");
+            }
+        }
     }
     0
 }

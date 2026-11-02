@@ -1,0 +1,3 @@
+let p = Point { x: 1.0, y: 2.0 }
+if p.x > 0.0 { print(p) }
+while ok { break }
