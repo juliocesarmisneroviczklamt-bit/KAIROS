@@ -16,6 +16,7 @@ pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod session;
+pub mod temporal;
 pub mod tensor;
 pub mod types;
 pub mod value;

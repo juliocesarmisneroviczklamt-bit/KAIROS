@@ -1,0 +1,10 @@
+// Temporal types (M3): a decision may only use what is known when it is made.
+// `b3.evaluate` trades the weights of month m at the close of m - 1; this momentum
+// includes month m itself. It does not compile (the data is never even loaded).
+let ret = b3.monthly_returns()
+var weights = zeros_like(ret)
+for m in 12..size(ret, month) {
+    let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m], 0.0), over: month) - 1.0   // error: E0301
+    weights[month: m] = where(top_k(signal, 10, over: asset), 0.1, 0.0)
+}
+print(b3.evaluate(weights, lag: 0).cagr)

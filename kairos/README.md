@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.2.1**, com o M1 (núcleo) e o M2 (tensores com eixos nomeados + dados da B3) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.3.0**, com o M1 (núcleo), o M2 (tensores com eixos nomeados + dados da B3) e o M3 (tipos temporais) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
 ```text
 cargo build --release -p kairos              # gera target/release/kairos (kairos.exe no Windows)
@@ -47,13 +47,27 @@ cargo test -p kairos                         # testes dourados + teste de aceita
 | maxDD | −48,6% |
 | alpha CAPM | +2,3% a.a. (t = 1,14) |
 
+**M3 (tipos temporais)**
+- **Usar informação do futuro numa decisão é erro de compilação.** O compilador sabe quando cada valor fica conhecido:
+  - o retorno do mês t, em `end(t)`;
+  - o universo NEFIN do mês t, em `end(t − 1)`;
+  - a média de todo o histórico, só no fim dos dados.
+- **Onde ele confere:**
+  - `b3.evaluate`, que negocia os pesos do mês t no fechamento de t − 1;
+  - funções anotadas: `fn sinal(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) { ... }`.
+- **O que a análise acompanha:**
+  - fluxo de controle (`if`, `continue`);
+  - valores que passam de uma iteração do laço para a próxima;
+  - dados próprios marcados com `observed(x, lag: k)`.
+- **Até isto não compila:** escolher a estratégia pelo resultado do backtest e avaliar a escolha no mesmo histórico.
+- **Testes:** 14 casos de vazamento em [`tests/temporal.rs`](tests/temporal.rs). A versão do momentum com `m - 12 ..= m` dá E0301.
+
 A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs), com `variance`, `std_dev`, `compound`, `wealth`, `max_drawdown`, `sharpe` e a struct `Evaluation`.
 
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M3 | tipos temporais (usar dado do futuro = erro de compilação) |
 | M4 | `grad` nativo + `smooth` + motor de IA em Kairós |
 | M5 | holdout de uso único + registro de testes |
 | M6 | primeiro modelo inédito |

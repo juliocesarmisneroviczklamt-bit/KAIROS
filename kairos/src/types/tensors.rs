@@ -358,7 +358,39 @@ impl Checker {
                 | B::TopK
                 | B::BottomK
                 | B::Contract
+                | B::Observed
         )
+    }
+
+    /// `observed(x)` / `observed(x, lag: k)`: declares that row `t` of `x` (over its temporal
+    /// axis) becomes known at the end of `t + k`. Identity at run time; the temporal pass uses it.
+    fn observed(&mut self, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        if all.len() != 1 {
+            return Err(Diag::new("E0103", sp, format!("`observed` takes 1 positional argument, but {} were given", all.len())));
+        }
+        let mut lag = 0i64;
+        for (nm, nsp, e) in named {
+            if *nm != "lag" {
+                return Err(Diag::new("E0120", *nsp, format!("`observed` has no argument `{nm}`")).hint("the delay is given as `lag: k`"));
+            }
+            lag = match &e.kind {
+                ExprKind::Int(v) => *v,
+                ExprKind::Unary(UnOp::Neg, x) if matches!(x.kind, ExprKind::Int(_)) => {
+                    let ExprKind::Int(v) = x.kind else { unreachable!() };
+                    -v
+                }
+                _ => return Err(Diag::new("E0101", e.span, "`lag:` must be an integer constant").hint("e.g. `observed(x, lag: 1)`")),
+            };
+        }
+        let (h, t) = self.expr(all[0].0, None)?;
+        let (axes, _) = self.need_tensor("observed", &t, all[0].0)?;
+        let temporal: Vec<u32> = axes.iter().copied().filter(|a| self.axes[*a as usize].temporal.is_some()).collect();
+        let [axis] = temporal[..] else {
+            return Err(Diag::new("E0201", all[0].0.span, format!("`observed` needs a tensor with exactly one temporal axis, found `{}`", self.show(&t)))
+                .hint("temporal axes are `month`, `day` and those declared with `axis name: temporal(...)`"));
+        };
+        let lit = |v: i64| HArg::Val(HExpr::Lit(Value::Int(v)));
+        Ok((HExpr::CallBuiltin(Builtin::Observed, vec![HArg::Val(h), lit(i64::from(axis)), lit(lag)], sp), t))
     }
 
     fn need_tensor(&self, name: &str, t: &Ty, e: &Expr) -> KResult<(Vec<u32>, Ty)> {
@@ -417,6 +449,9 @@ impl Checker {
     /// "all axes".
     pub(super) fn tensor_builtin(&mut self, b: Builtin, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
         use Builtin as B;
+        if b == B::Observed {
+            return self.observed(all, named, sp);
+        }
         let name = builtin_name(b);
         let n = all.len();
         let arity = |want: usize| -> KResult<()> {

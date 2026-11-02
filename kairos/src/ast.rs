@@ -24,6 +24,8 @@ pub struct FnDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    /// `-> T @ end(e)`: the result may only use what is known at the end of month `e`
+    pub known_at: Option<(Expr, Span)>,
     pub body: Block,
     pub span: Span,
 }

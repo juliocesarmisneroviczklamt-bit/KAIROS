@@ -128,6 +128,8 @@ pub struct Checker {
     /// declared axes (ids 0..3 are the built-in `month`, `day`, `asset`)
     pub axes: Vec<AxisDef>,
     axis_ids: HashMap<String, u32>,
+    /// knowledge times of the top-level variables (kept across REPL inputs)
+    temporal: crate::temporal::State,
 }
 
 fn pattern_names(p: &Pattern, out: &mut std::collections::HashSet<String>) {
@@ -186,6 +188,7 @@ impl Checker {
             top_names: std::collections::HashSet::new(),
             axes,
             axis_ids,
+            temporal: crate::temporal::State::default(),
         }
     }
 
@@ -298,6 +301,9 @@ impl Checker {
         for (id, _) in &new_fns {
             let mut b = self.bodies[*id as usize].take().expect("checked body");
             self.fin_expr(&mut b.body);
+            if let Some((k, _)) = &mut b.known_at {
+                self.fin_expr(k);
+            }
             self.bodies[*id as usize] = Some(b);
         }
         for i in lambda_base..self.lambdas.len() {
@@ -308,6 +314,13 @@ impl Checker {
         for t in out.iter_mut() {
             self.fin_expr(&mut t.hir);
         }
+        // temporal types (M3): no decision may use information from its future
+        let ids: Vec<u32> = new_fns.iter().map(|(id, _)| *id).collect();
+        let tops: Vec<&HExpr> = out.iter().map(|t| &t.hir).collect();
+        let mut st = std::mem::take(&mut self.temporal);
+        let r = crate::temporal::check(self, &ids, &tops, &mut st);
+        self.temporal = st;
+        r?;
         Ok(out)
     }
 
@@ -330,9 +343,20 @@ impl Checker {
             ctx.scopes[0].insert(name.clone(), Local { slot, ty: ty.clone(), mutable: *inout });
         }
         self.ctxs.push(ctx);
-        let r = self.block(&f.body, Some(&sig.ret));
+        // `@ end(e)`: an integer expression over the parameters (checked by the temporal pass)
+        let known_at = match &f.known_at {
+            Some((e, sp)) => match self.expr(e, Some(&Ty::Int)) {
+                Ok((h, t)) => match self.expect_ty(&t, &Ty::Int, e.span) {
+                    Ok(()) => Ok(Some((h, *sp))),
+                    Err(d) => Err(d),
+                },
+                Err(d) => Err(d),
+            },
+            None => Ok(None),
+        };
+        let r = known_at.and_then(|k| self.block(&f.body, Some(&sig.ret)).map(|b| (b, k)));
         let ctx = self.ctxs.pop().expect("fn context");
-        let (body, t) = r?;
+        let ((body, t), known_at) = r?;
         if self.unify(&t, &sig.ret).is_err() {
             let span = f.body.tail.as_ref().map(|e| e.span).unwrap_or(f.body.span);
             let (g, w) = (self.show(&t), self.show(&sig.ret));
@@ -344,7 +368,7 @@ impl Checker {
             }
             return Err(d);
         }
-        self.bodies[id as usize] = Some(FnBody { n_slots: ctx.n_slots, body });
+        self.bodies[id as usize] = Some(FnBody { n_slots: ctx.n_slots, body, known_at });
         Ok(())
     }
 
@@ -1121,7 +1145,11 @@ impl Checker {
                 };
                 let (hb, tb) = me.loop_body(body)?;
                 me.expect_ty(&tb, &Ty::Unit, body.span)?;
-                Ok((HExpr::ForRange { slot, lo: Box::new(hlo), hi: Box::new(hhi), inclusive, body: Box::new(hb) }, Ty::Unit))
+                let name = match pat {
+                    Pattern::Bind(n, _) => n.clone(),
+                    _ => "_".to_string(),
+                };
+                Ok((HExpr::ForRange { slot, name, lo: Box::new(hlo), hi: Box::new(hhi), inclusive, body: Box::new(hb) }, Ty::Unit))
             });
         }
         let (hl, tl) = self.expr(iter, None)?;

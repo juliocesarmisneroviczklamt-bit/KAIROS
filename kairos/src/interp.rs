@@ -256,7 +256,7 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Value::Unit)
             }
-            HExpr::ForRange { slot, lo, hi, inclusive, body } => {
+            HExpr::ForRange { slot, lo, hi, inclusive, body, .. } => {
                 let lo = as_int(self.eval(lo, f)?);
                 let hi = as_int(self.eval(hi, f)?);
                 let mut i = lo;

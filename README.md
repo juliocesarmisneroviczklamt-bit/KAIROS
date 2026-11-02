@@ -14,21 +14,21 @@ O repositório tem duas partes que trabalham juntas:
 
 ## O que torna a Kairós diferente
 
-1. **Tipos temporais** (M3). Usar dado do futuro numa decisão é erro de compilação.
+1. **Tipos temporais** (M3, pronto). Usar dado do futuro numa decisão é erro de compilação: o compilador sabe quando cada valor fica conhecido.
 2. **Holdout de uso único** (M5). Os dados de validação só podem ser abertos uma vez, e cada avaliação entra sozinha no registro de tentativas.
 3. **Diferenciação nativa** (M4), inclusive através de regras discretas como IR, isenção e custos, via relaxações declaradas.
 4. **Tensores com eixos nomeados** (M2, pronto). Misturar eixos é erro de compilação.
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.2.1 (M2, em qualquer sistema)
+## Estado: v0.3.0 (M3)
 
 | marco | entrega | estado |
 |---|---|---|
 | M1 | núcleo: tipos, inferência, `match`, closures, `inout`, interpretador, REPL | ✅ |
 | M2 | tensores com eixos nomeados + módulo `b3` sobre os dados reais | ✅ |
-| M3 | tipos temporais | próximo |
-| M4 | `grad` nativo + motor de IA escrito em Kairós | planejado |
+| M3 | tipos temporais: usar dado do futuro numa decisão não compila | ✅ |
+| M4 | `grad` nativo + motor de IA escrito em Kairós | próximo |
 | M5 | holdout de uso único + registro de testes e DSR automáticos | planejado |
 | M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR) | planejado |
 | M7 | back-end nativo (Cranelift) | planejado |
@@ -58,6 +58,15 @@ O programa roda em ~0,3 s sobre 31 anos de B3 e reproduz **bit a bit** os númer
 | Sharpe sobre o CDI | 0,22 |
 | maxDD | −48,6% |
 | alpha CAPM | +2,3% a.a. (t = 1,14, não significativo) |
+
+Trocando `m - 2` por `m`, o programa passa a usar o mês que ainda não terminou, e **não compila**:
+
+```text
+error[E0301]: use of future information
+16 |     let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m], 0.0), over: month) - 1.0
+   |                                      ^^^^^^^^^^^^^^^^^^^^^^^^ known at end(m), but the portfolio of month m is decided at end(m - 1)
+   = hint: `b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)
+```
 
 ## Como usar
 

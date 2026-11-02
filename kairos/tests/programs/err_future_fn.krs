@@ -1,0 +1,5 @@
+// A function can promise when its result is known: `@ end(m - 1)`. Reading month m breaks it.
+fn trailing(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) {
+    sum(r[month: m - 3 ..= m])   // error: E0301
+}
+print(trailing(observed(zeros(month: 12)), 6))

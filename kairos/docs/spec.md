@@ -13,7 +13,8 @@
 - **M2 (tensores com eixos nomeados + ponte `b3`) pronto:**
   - erros de eixo saem na compilação;
   - o momentum escrito em Kairós sobre os dados reais da B3 reproduz **bit a bit** o resultado do laboratório em Rust (`tests/b3_bridge.rs`).
-- As garantias de tempo, holdout e `grad` chegam nos marcos M3–M5 (§13).
+- **M3 (tipos temporais) pronto:** usar informação do futuro numa decisão é erro de compilação (§6.1). A versão do momentum que olha o mês corrente não compila.
+- As garantias de holdout e `grad` chegam nos marcos M4–M5 (§13).
 
 ## 1. Por que mais uma linguagem
 
@@ -281,6 +282,45 @@ error[E0301]: use of future information
 
 Quem define isso é a ponte de dados (§10), não cada script.
 
+### 6.1 O que o M3 implementa (v0.3.0)
+
+A análise roda sobre o HIR tipado, depois da checagem de tipos, como interpretação abstrata (`src/temporal.rs`). O código continua idêntico: no exemplo do momentum, `m` é a variável do laço (`for m in ...`) e `ret` vem de `b3.monthly_returns()`.
+
+**Tempo de cada valor**
+- **O índice de mês** (ou de dia) é acompanhado como constante ou como **símbolo mais constante**. Os símbolos são a variável de um laço `for` ou um parâmetro inteiro: `m`, `m - 1`, `m - 12`.
+- **Tensores sobre um eixo temporal** guardam que a linha `t` é conhecida em `end(t + defasagem)`:
+  - `b3.monthly_returns()` e `b3.cdi()`: `end(t)`;
+  - `b3.eligible()`: `end(t − 1)`, porque o universo NEFIN do ano é fixado com a liquidez do ano anterior;
+  - `observed(x, lag: k)`: declara `end(t + k)` para qualquer tensor, como dados próprios.
+- **Seleção de linhas:** `x[month: e]` é conhecido em `end(e + defasagem)`; um intervalo `x[month: a ..= b]`, em `end(b + defasagem)`.
+- **Operações** levam o mais tardio dos operandos.
+- **O histórico inteiro:** reduzir sobre o eixo temporal (`mean(ret, over: month)`), ranquear ao longo dele ou listar todas as linhas só fica conhecido **no fim dos dados**.
+- **Fluxo de controle conta:**
+  - uma atribuição dentro de um `if`/`match` depende da condição;
+  - depois de `if x { continue }` (ou `break`, `return`), todo o resto depende de `x`.
+- **Laços** são analisados até um ponto fixo: o que uma iteração deixa para a seguinte fica **um mês mais velho** (`end(m)` vira `end(m − 1)`).
+
+**Onde as decisões são checadas**
+- **`b3.evaluate(w)`:** os pesos do mês `t` são negociados no fechamento de `t − 1`, então a linha `t` de `w` só pode usar o que se sabe em `end(t − 1)`. Quando o código grava `w[month: m] = v`, o compilador compara o tempo de `v` com `end(m − 1)`.
+- **`fn f(...) -> T @ end(e)`:** o resultado só pode usar o que se sabe em `end(e)`, com `e` sendo um parâmetro mais uma constante.
+  - Dentro de `f`, a linha `t` de um tensor temporal recebido é tratada como conhecida em `end(t)`.
+  - Na chamada, o resultado vale `end(e)` com os argumentos substituídos.
+
+**Erros**
+
+| código | situação |
+|---|---|
+| E0301 | uso de informação do futuro |
+| E0302 | não dá pra provar: o mês não é a variável do laço ou um parâmetro mais uma constante. Ainda é erro; a checagem em tempo de execução com aviso W0300 fica para depois |
+| E0303 | um tensor cujas linhas são conhecidas depois do que a função anotada assume |
+
+**Consequência:** escolher uma estratégia pelo resultado de `b3.evaluate` sobre o histórico e avaliar a escolhida nesse mesmo histórico também é E0301, porque a escolha só é conhecida no fim dos dados. Esse é exatamente o autoengano do §7.
+
+**Ainda não:**
+- defasagem declarada por parâmetro de função;
+- dados diários na ponte;
+- datas de publicação de proventos e balanços (chegam com novas fontes de dados).
+
 ## 7. Holdout de uso único, protocolos e contagem de testes (M5, garantia nº 2)
 
 ```krs
@@ -427,7 +467,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M0 | spec | ✅ revisada (decisões no topo) |
 | M1 | léxico, sintaxe, tipos, interpretador, REPL, `kairos run/check/repl`, biblioteca padrão em Kairós | ✅ 18 testes dourados (funcionalidade, erros de compilação e de execução) |
 | M2 | tensores com eixos nomeados + ponte com os dados da B3 | ✅ erros de eixo na compilação (E0200–E0202); o momentum em Kairós (`examples/momentum.krs`) reproduz **bit a bit** os 9 números do `quant-b3` (CAGR, vol, Sharpe, maxDD, beta, alpha, t, giro, custo) |
-| M3 | tipos temporais | o momentum continua idêntico ao `quant-b3`, e a versão que olha `ret[month: m]` (o futuro) **não compila** |
+| M3 | tipos temporais | ✅ o momentum continua idêntico ao `quant-b3` e a versão que olha `ret[month: m]` (o futuro) **não compila** (E0301); 14 testes de vazamento: `if`, `continue`, laços, estatística do histórico inteiro, funções anotadas, escolha por backtest |
 | M4 | `grad` nativo + `smooth` + motor de IA em Kairós (Dense, Attention, Adam) | gradiente confere com diferença finita; MLP converge |
 | M5 | holdout de uso único + protocolo + registro e DSR automáticos | 2º acesso = erro; tentativas no registro |
 | M6 | primeiro modelo inédito (carteira com IR suave) | protocolo antes; simulador real; DSR; paper trading |

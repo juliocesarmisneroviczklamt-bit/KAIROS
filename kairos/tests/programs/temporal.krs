@@ -1,0 +1,12 @@
+// Temporal types (M3): functions declare when their result is known, data declares when it is
+// published (`observed`), and the compiler checks every use. This program uses only the past.
+fn trailing(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) {
+    sum(r[month: m - 3 ..= m - 1])
+}
+let r = observed(tensor([0.5, 0.25, -0.125, 1.0, 0.5, 0.25], month))
+print(trailing(r, 4))                       // out: 1.125
+var acc = 0.0
+for m in 3..6 {
+    acc += trailing(r, m)
+}
+print(acc)                                  // out: 3.125

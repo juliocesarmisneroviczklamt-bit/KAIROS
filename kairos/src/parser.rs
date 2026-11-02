@@ -77,7 +77,8 @@ impl Parser {
     fn err_expected(&self, what: &str) -> Diag {
         match self.peek() {
             Tok::Reserved(r) => reserved_err(r, self.span()),
-            Tok::At => Diag::new("E0002", self.span(), "temporal annotations (`@`) arrive in milestone M3"),
+            Tok::At => Diag::new("E0001", self.span(), "unexpected `@`")
+                .hint("temporal annotations go after a function's return type: `-> f64 @ end(m - 1)`"),
             t => Diag::new("E0001", self.span(), format!("expected {what}, found {}", describe(t))),
         }
     }
@@ -164,8 +165,26 @@ impl Parser {
         }
         self.expect(Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        // `-> T @ end(m - 1)`: when the result is known (temporal types, M3)
+        let known_at = if self.eat(&Tok::At) {
+            let at = self.prev_span();
+            if ret.is_none() {
+                return Err(Diag::new("E0001", at, "a temporal annotation needs a return type")
+                    .hint("e.g. `fn signal(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) { ... }`"));
+            }
+            let (kw, ksp) = self.ident("`end(...)`")?;
+            if kw != "end" {
+                return Err(Diag::new("E0001", ksp, "expected `end(...)` after `@`").hint("write `@ end(m - 1)`"));
+            }
+            self.expect(Tok::LParen, "`(`")?;
+            let e = self.with_structs(true, |p| p.expr())?;
+            let close = self.expect(Tok::RParen, "`)`")?;
+            Some((e, at.to(close)))
+        } else {
+            None
+        };
         let body = self.block()?;
-        Ok(FnDecl { name, params, ret, span: start.to(body.span), body })
+        Ok(FnDecl { name, params, ret, known_at, span: start.to(body.span), body })
     }
 
     fn axis_decl(&mut self) -> KResult<AxisDecl> {

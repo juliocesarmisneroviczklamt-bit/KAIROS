@@ -368,6 +368,8 @@ impl Interp<'_> {
                 let a = axis_arg(&v[2]).expect("axis id");
                 wrap(tensor::contract(tensor_of(&v[0]), tensor_of(&v[1]), a).map_err(|e| te(self, e))?)
             }
+            // only the temporal check cares: at run time the data is the data
+            B::Observed => v[0].clone(),
             B::TAnd | B::TOr => {
                 let and = b == B::TAnd;
                 let r = map_n(&[as_op(&v[0]), as_op(&v[1])], true, |e| match (e[0], e[1]) {

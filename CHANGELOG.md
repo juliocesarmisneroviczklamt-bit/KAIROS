@@ -2,6 +2,42 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.3.0 — M3: tipos temporais
+
+**Usar informação do futuro numa decisão é erro de compilação.** É a garantia nº 1 da linguagem: a causa mais comum de alpha falso deixa de compilar.
+
+```text
+error[E0301]: use of future information
+16 |     let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m], 0.0), over: month) - 1.0
+   |                                      ^^^^^^^^^^^^^^^^^^^^^^^^ known at end(m), but the portfolio of month m is decided at end(m - 1)
+   = hint: `b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)
+```
+
+- **Cada valor tem um tempo de conhecimento**, calculado pelo compilador (`src/temporal.rs`, análise sobre o HIR tipado):
+  - os dados da B3 trazem o próprio tempo: retorno e CDI do mês t são conhecidos em `end(t)`, e o universo NEFIN do mês t em `end(t − 1)`;
+  - operações levam o mais tardio dos operandos;
+  - reduzir ou ranquear ao longo do tempo usa o histórico inteiro.
+- **Fluxo de controle conta:** atribuições dentro de um `if`, e tudo o que vem depois de um `continue`/`break`/`return`, dependem da condição.
+- **Laços até um ponto fixo:** o que uma iteração deixa para a próxima fica um mês mais velho.
+- **Decisões checadas:**
+  - `b3.evaluate`: os pesos do mês t só podem usar o que se sabe em `end(t − 1)`;
+  - funções anotadas com `-> T @ end(m - 1)`.
+- **`observed(x, lag: k)`:** declara quando cada linha de dados próprios é publicada.
+- **Erros:**
+
+  | código | situação |
+  |---|---|
+  | E0301 | uso do futuro |
+  | E0302 | não dá pra provar |
+  | E0303 | dado publicado depois do que a função assume |
+
+- **Consequência:** escolher uma estratégia pelo backtest e avaliar a escolhida no mesmo histórico também não compila.
+- **Aceitação:**
+  - o momentum de `examples/momentum.krs` continua idêntico, bit a bit, ao laboratório em Rust;
+  - a versão que inclui o mês corrente não compila;
+  - 14 testes de vazamento em `tests/temporal.rs`: `if`, `continue`, valores carregados pelo laço, estatística do histórico inteiro, funções anotadas, sessão interativa (REPL) e escolha por backtest.
+- **Extensão do VS Code:** cores para `@ end(...)` e `observed`.
+
 ## 0.2.1 — Kairós em qualquer sistema
 
 - **Binários para 32 e 64 bits, x86, ARM e além**, gerados e publicados automaticamente a cada versão:

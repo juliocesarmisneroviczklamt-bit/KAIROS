@@ -58,6 +58,8 @@ pub enum Builtin {
     TopK,
     BottomK,
     Contract,
+    /// `observed(x, lag: k)`: row t of x (over its temporal axis) is known at end(t + k); identity at run time
+    Observed,
     /// element-wise `and` / `or` of bool tensors (the scalar forms short-circuit and are HIR nodes)
     TAnd,
     TOr,
@@ -111,6 +113,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("top_k", Builtin::TopK),
     ("bottom_k", Builtin::BottomK),
     ("contract", Builtin::Contract),
+    ("observed", Builtin::Observed),
     // keywords, so never reachable by name: listed only for messages
     ("and", Builtin::TAnd),
     ("or", Builtin::TOr),
@@ -175,7 +178,8 @@ pub enum HExpr {
     OpAssign(HPlace, BinOp, Box<HExpr>, Span),
     If(Box<HExpr>, Box<HExpr>, Option<Box<HExpr>>),
     While(Box<HExpr>, Box<HExpr>),
-    ForRange { slot: u32, lo: Box<HExpr>, hi: Box<HExpr>, inclusive: bool, body: Box<HExpr> },
+    /// `name` is kept for the messages of the temporal check
+    ForRange { slot: u32, name: String, lo: Box<HExpr>, hi: Box<HExpr>, inclusive: bool, body: Box<HExpr> },
     ForList { pat: HPat, list: Box<HExpr>, body: Box<HExpr> },
     Match(Box<HExpr>, Vec<(HPat, HExpr)>, Span),
     Block(Vec<HExpr>, Option<Box<HExpr>>),
@@ -214,6 +218,8 @@ pub enum HPat {
 pub struct FnBody {
     pub n_slots: u32,
     pub body: HExpr,
+    /// `-> T @ end(e)`: the month index `e` (over the parameters) by which the result is known
+    pub known_at: Option<(HExpr, Span)>,
 }
 
 #[derive(Clone, Debug)]
