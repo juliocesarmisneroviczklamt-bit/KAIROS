@@ -141,7 +141,8 @@ fn the_parser_in_kairos_is_the_rust_one() {
 /// The checker written in Kairós (kairos/compiler/check.krs and body.krs) registers what each
 /// file declares (structs, enums, axes, protocols, the functions' signatures, through its
 /// imports), gives every variable of every function and of the top level the type the Rust
-/// checker gives it (tensors, `grad`, holdouts and the `b3` bridge included), and fails with the
+/// checker gives it (tensors, `grad`, holdouts and the `b3` bridge included), builds the same HIR
+/// (every function, lambda and top-level statement, node for node), and fails with the
 /// same first error. Only a file that just the Rust checker rejects is left out: the temporal
 /// analysis is not ported yet.
 #[test]
@@ -177,7 +178,7 @@ fn the_checker_in_kairos_is_the_rust_one() {
             let src = std::fs::read_to_string(path).unwrap();
             let mut s = Session::new(Box::new(std::io::sink()));
             s.mark_imported(path);
-            let rust = s.types_dump(path, &src);
+            let rust = s.hir_dump(path, &src);
             if krs.starts_with("error") {
                 errors += 1;
                 assert_eq!(krs, &rust, "the checkers differ on {path}");

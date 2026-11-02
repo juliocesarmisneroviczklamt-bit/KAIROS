@@ -1,24 +1,45 @@
 // The type checker of Kairós, written in Kairós (M12), second part: the bodies. Statements,
 // patterns, expressions and calls get the types src/types.rs gives them, by the same
-// unification in the same order, and fail with the same first error. What is not ported yet
-// (a builtin added to the Rust checker and not here yet) stops the check with the code K0000.
+// unification in the same order, and fail with the same first error; and each becomes the
+// same HIR node (src/hir.rs) the Rust checker builds. What is not ported yet (a builtin added
+// to the Rust checker and not here yet) stops the check with the code K0000.
 import "check.krs"
 
 fn mix_hint() -> str {
     "Kairós never mixes `i64` and `f64` silently: convert with `float(x)` or `int(x)`"
 }
 
-// A checked pattern: what exhaustiveness needs of it.
-struct Pat {
-    kind: str,          // "wild", "bind", "int", "str", "bool", "tuple", "variant"
-    flag: bool,         // the value of a `bool` pattern
-    eid: i64,           // a variant's enum and index
-    vi: i64,
-    subs: List[Pat],
+// An expression checked: its HIR and its type.
+struct Ex {
+    h: H,
+    t: Ty,
 }
 
-fn mk_pat(kind: str) -> Pat {
-    Pat { kind: kind, flag: false, eid: -1, vi: -1, subs: [] }
+fn typed(h: H, t: Ty) -> Ex {
+    Ex { h: h, t: t }
+}
+
+// what a failed check returns (the error is in the checker)
+fn bad() -> Ex {
+    Ex { h: h_none(), t: Ty.TUnit }
+}
+
+// a node with the span of a syntax node
+fn hspan(kind: str, text: str, kids: List[H], e: Node) -> H {
+    hn(kind, text, -1, -1, kids, e.lo, e.hi)
+}
+
+fn hlit(value: str) -> H {
+    hn("lit", value, -1, -1, [], -1, -1)
+}
+
+fn hval(h: H) -> H {
+    hk("val", [h])
+}
+
+// an axis as a builtin's argument (-1: all of them)
+fn ax_lit(a: i64) -> H {
+    hval(hlit("i64 " + str(a)))
 }
 
 fn fail_at(inout ck: Checker, code: str, e: Node, msg: str, hint: str) -> Ty {
@@ -26,8 +47,13 @@ fn fail_at(inout ck: Checker, code: str, e: Node, msg: str, hint: str) -> Ty {
     Ty.TUnit
 }
 
-fn unsupported(inout ck: Checker, e: Node, what: str) -> Ty {
-    fail_at(inout ck, "K0000", e, "not in the checker written in Kairós yet: " + what, "")
+fn fail_ex(inout ck: Checker, code: str, e: Node, msg: str, hint: str) -> Ex {
+    ck_fail(inout ck, code, e.lo, e.hi, msg, hint)
+    bad()
+}
+
+fn unsupported(inout ck: Checker, e: Node, what: str) -> Ex {
+    fail_ex(inout ck, "K0000", e, "not in the checker written in Kairós yet: " + what, "")
 }
 
 fn mismatch(inout ck: Checker, got: str, want: str, lo: i64, hi: i64, hint: str) {
@@ -44,6 +70,12 @@ fn expect_ty(inout ck: Checker, got: Ty, want: Ty, lo: i64, hi: i64) {
 
 fn expect_at(inout ck: Checker, got: Ty, want: Ty, e: Node) {
     expect_ty(inout ck, got, want, e.lo, e.hi)
+}
+
+// a fresh type variable: its id
+fn fresh_id(inout ck: Checker, kind: i64) -> i64 {
+    let _ = fresh(inout ck, kind)
+    len(ck.subst) - 1
 }
 
 fn ensure_numeric(inout ck: Checker, t: Ty, e: Node, what: str) {
@@ -216,63 +248,74 @@ fn lookup_in(inout ck: Checker, ci: i64, name: str) -> (bool, Local) {
 
 // ------------------------------------------------------------------ statements and blocks
 
-fn expr0(inout ck: Checker, e: Node) -> Ty {
+fn expr0(inout ck: Checker, e: Node) -> Ex {
     ck_expr(inout ck, e, false, Ty.TUnit)
 }
 
-fn expr1(inout ck: Checker, e: Node, want: Ty) -> Ty {
+fn expr1(inout ck: Checker, e: Node, want: Ty) -> Ex {
     ck_expr(inout ck, e, true, want)
 }
 
-fn ck_stmt(inout ck: Checker, s: Node) -> Ty {
+fn ck_stmt(inout ck: Checker, s: Node) -> Ex {
     if s.kind != "let" and s.kind != "var" { return expr0(inout ck, s) }
     var declared = Ty.TUnit
     let has_decl = s.kids[1].kind != "-"
     if has_decl {
         declared = resolve_type(inout ck, s.kids[1])
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
     }
     let init = s.kids[2]
-    var t = ck_expr(inout ck, init, has_decl, declared)
-    if ck.failed { return Ty.TUnit }
+    let r = ck_expr(inout ck, init, has_decl, declared)
+    if ck.failed { return bad() }
+    var t = r.t
     if has_decl {
         expect_at(inout ck, t, declared, init)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         t = declared
     } else {
         default_nums(inout ck, t)
     }
-    let _ = ck_pattern(inout ck, s.kids[0], t, s.kind == "var", false)
-    Ty.TUnit
+    let hp = ck_pattern(inout ck, s.kids[0], t, s.kind == "var", false)
+    if ck.failed { return bad() }
+    typed(hk("let", [hp, r.h]), Ty.TUnit)
 }
 
-fn ck_block(inout ck: Checker, b: Node, ex: bool, exp: Ty) -> Ty {
+fn ck_block(inout ck: Checker, b: Node, has_exp: bool, exp: Ty) -> Ex {
     push_scope(inout ck)
-    let t = block_in(inout ck, b, ex, exp)
+    let r = block_in(inout ck, b, has_exp, exp)
     pop_scope(inout ck)
-    t
+    r
 }
 
-fn block_in(inout ck: Checker, b: Node, ex: bool, exp: Ty) -> Ty {
+fn block_in(inout ck: Checker, b: Node, has_exp: bool, exp: Ty) -> Ex {
     var diverges = false
+    var hs: List[H] = []
     for s in b.kids[0].kids {
-        let t = ck_stmt(inout ck, s)
-        if ck.failed { return Ty.TUnit }
-        if resolve(ck, t) == Ty.TNever { diverges = true }
+        let r = ck_stmt(inout ck, s)
+        if ck.failed { return bad() }
+        if resolve(ck, r.t) == Ty.TNever { diverges = true }
+        hs.push(r.h)
     }
     let tail = b.kids[1]
-    if tail.kind != "-" { return ck_expr(inout ck, tail, ex, exp) }
-    if diverges { Ty.TNever } else { Ty.TUnit }
+    if tail.kind != "-" {
+        let r = ck_expr(inout ck, tail, has_exp, exp)
+        if ck.failed { return bad() }
+        hs.push(r.h)
+        return typed(hk("block", hs), r.t)
+    }
+    hs.push(h_none())
+    typed(hk("block", hs), if diverges { Ty.TNever } else { Ty.TUnit })
 }
 
 // ------------------------------------------------------------------ patterns
 
-fn ck_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_ok: bool) -> Pat {
+// A pattern: its HIR (`pwild`, `pbind`, `plit`, `pintlit`, `ptuple`, `pvariant`).
+fn ck_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_ok: bool) -> H {
     let k = p.kind
-    if k == "pwild" { return mk_pat("wild") }
+    if k == "pwild" { return hk("pwild", []) }
     if k == "pbind" {
-        let _ = declare(inout ck, p.text, t, mutable)
-        return mk_pat("bind")
+        let slot = declare(inout ck, p.text, t, mutable)
+        return hn("pbind", "", slot, -1, [], -1, -1)
     }
     if k == "ptuple" {
         var elems: List[Ty] = []
@@ -289,39 +332,37 @@ fn ck_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_ok: bo
         if not known {
             for q in p.kids { elems.push(fresh(inout ck, 0)) }
             expect_ty(inout ck, Ty.TTuple(elems), t, p.lo, p.hi)
-            if ck.failed { return mk_pat("wild") }
+            if ck.failed { return h_none() }
         }
-        var out = mk_pat("tuple")
+        var subs: List[H] = []
         for i in 0..len(p.kids) {
             let sub = ck_pattern(inout ck, p.kids[i], elems[i], mutable, refutable_ok)
-            if ck.failed { return out }
-            out.subs.push(sub)
+            if ck.failed { return h_none() }
+            subs.push(sub)
         }
-        return out
+        return hk("ptuple", subs)
     }
     if not refutable_ok {
         ck_fail(inout ck, "E0117", p.lo, p.hi, "this pattern can fail to match here", "use `match` to test values; `let` and `for` only bind names and tuples")
-        return mk_pat("wild")
+        return h_none()
     }
     if k == "pint" {
-        let vt = fresh(inout ck, 1)
-        expect_ty(inout ck, vt, t, p.lo, p.hi)
-        return mk_pat("int")
+        let id = fresh_id(inout ck, 1)
+        expect_ty(inout ck, Ty.TVar(id), t, p.lo, p.hi)
+        return hn("pintlit", p.text, id, -1, [], -1, -1)
     }
     if k == "pstr" {
         expect_ty(inout ck, Ty.TStr, t, p.lo, p.hi)
-        return mk_pat("str")
+        return hn("plit", "str " + p.text, -1, -1, [], -1, -1)
     }
     if k == "pbool" {
         expect_ty(inout ck, Ty.TBool, t, p.lo, p.hi)
-        var bp = mk_pat("bool")
-        bp.flag = p.text == "true"
-        return bp
+        return hn("plit", "bool " + p.text, -1, -1, [], -1, -1)
     }
     variant_pattern(inout ck, p, t, mutable, refutable_ok)
 }
 
-fn variant_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_ok: bool) -> Pat {
+fn variant_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_ok: bool) -> H {
     let dot = find(p.text, ".")
     let ename = substr(p.text, 0, dot)
     let vname = substr(p.text, dot + 1, len(p.text))
@@ -329,7 +370,7 @@ fn variant_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_o
     if ename != "" {
         if not contains(ck.enum_ids, ename) {
             ck_fail(inout ck, "E0100", p.lo, p.hi, "unknown enum `" + ename + "`", "")
-            return mk_pat("wild")
+            return h_none()
         }
         eid = ck.enum_ids[ename]
     } else {
@@ -349,17 +390,17 @@ fn variant_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_o
             }
             if len(found) == 0 {
                 ck_fail(inout ck, "E0100", p.lo, p.hi, "unknown variant `" + vname + "`", "")
-                return mk_pat("wild")
+                return h_none()
             }
             if len(found) > 1 {
                 ck_fail(inout ck, "E0100", p.lo, p.hi, "ambiguous variant `" + vname + "`", "qualify it: `Enum.Variant`")
-                return mk_pat("wild")
+                return h_none()
             }
             eid = found[0]
         }
     }
     expect_ty(inout ck, Ty.TEnum(eid), t, p.lo, p.hi)
-    if ck.failed { return mk_pat("wild") }
+    if ck.failed { return h_none() }
     let def = ck.enums[eid]
     var vi = -1
     for i in 0..len(def.variants) {
@@ -370,28 +411,26 @@ fn variant_pattern(inout ck: Checker, p: Node, t: Ty, mutable: bool, refutable_o
     }
     if vi < 0 {
         ck_fail(inout ck, "E0100", p.lo, p.hi, "enum `" + def.name + "` has no variant `" + vname + "`", "")
-        return mk_pat("wild")
+        return h_none()
     }
     let ptys = def.variants[vi].1
     if len(ptys) != len(p.kids) {
         ck_fail(inout ck, "E0103", p.lo, p.hi, "variant `" + vname + "` has " + str(len(ptys)) + " field(s), but the pattern has " + str(len(p.kids)), "")
-        return mk_pat("wild")
+        return h_none()
     }
-    var out = mk_pat("variant")
-    out.eid = eid
-    out.vi = vi
+    var subs: List[H] = []
     for i in 0..len(ptys) {
         let sub = ck_pattern(inout ck, p.kids[i], ptys[i], mutable, refutable_ok)
-        if ck.failed { return out }
-        out.subs.push(sub)
+        if ck.failed { return h_none() }
+        subs.push(sub)
     }
-    out
+    hn("pvariant", "", eid, vi, subs, -1, -1)
 }
 
-fn irrefutable(p: Pat) -> bool {
-    if p.kind == "wild" or p.kind == "bind" { return true }
-    if p.kind == "tuple" {
-        for q in p.subs {
+fn irrefutable(p: H) -> bool {
+    if p.kind == "pwild" or p.kind == "pbind" { return true }
+    if p.kind == "ptuple" {
+        for q in p.kids {
             if not irrefutable(q) { return false }
         }
         return true
@@ -399,7 +438,7 @@ fn irrefutable(p: Pat) -> bool {
     false
 }
 
-fn check_exhaustive(inout ck: Checker, t: Ty, pats: List[Pat], e: Node) {
+fn check_exhaustive(inout ck: Checker, t: Ty, pats: List[H], e: Node) {
     for p in pats {
         if irrefutable(p) { return }
     }
@@ -409,9 +448,8 @@ fn check_exhaustive(inout ck: Checker, t: Ty, pats: List[Pat], e: Node) {
             var has_true = false
             var has_false = false
             for p in pats {
-                if p.kind == "bool" {
-                    if p.flag { has_true = true } else { has_false = true }
-                }
+                if p.kind == "plit" and p.text == "bool true" { has_true = true }
+                if p.kind == "plit" and p.text == "bool false" { has_false = true }
             }
             missing = if not has_true { "true" } else if not has_false { "false" } else { "" }
         },
@@ -421,9 +459,9 @@ fn check_exhaustive(inout ck: Checker, t: Ty, pats: List[Pat], e: Node) {
             for vi in 0..len(def.variants) {
                 var covered = false
                 for p in pats {
-                    if p.kind == "variant" and p.eid == eid and p.vi == vi {
+                    if p.kind == "pvariant" and p.n == eid and p.m == vi {
                         var whole = true
-                        for q in p.subs {
+                        for q in p.kids {
                             if not irrefutable(q) { whole = false }
                         }
                         if whole { covered = true }
@@ -444,41 +482,45 @@ fn check_exhaustive(inout ck: Checker, t: Ty, pats: List[Pat], e: Node) {
 
 // ------------------------------------------------------------------ places (assignment targets)
 
-// (its type, the slot of the variable it is part of)
-fn place(inout ck: Checker, e: Node) -> (Ty, i64) {
-    if ck.failed { return (Ty.TUnit, -1) }
+// A place: its HIR (`plocal`, `pfield`, `pindex`), its type, the slot of the variable it is
+// part of.
+fn place(inout ck: Checker, e: Node) -> (H, Ty, i64) {
+    if ck.failed { return (h_none(), Ty.TUnit, -1) }
     if e.kind == "name" {
         let n = e.text
         let r = lookup(inout ck, n)
         if not r.0 {
             let _ = fail_at(inout ck, "E0100", e, "cannot find `" + n + "` in this scope", "")
-            return (Ty.TUnit, -1)
+            return (h_none(), Ty.TUnit, -1)
         }
         if r.1.affine {
             let _ = fail_at(inout ck, "E0501", e, "holdout `" + n + "` cannot be assigned or passed as `inout`", "a holdout is opened once: `open_once(h, weights)`")
-            return (Ty.TUnit, -1)
+            return (h_none(), Ty.TUnit, -1)
         }
         if not r.1.mutable {
             let _ = fail_at(inout ck, "E0104", e, "cannot modify `" + n + "`: it is not mutable", "declare it with `var " + n + " = ...` (or as an `inout` parameter)")
-            return (Ty.TUnit, -1)
+            return (h_none(), Ty.TUnit, -1)
         }
-        return (r.1.ty, r.1.slot)
+        return (hn("plocal", "", r.1.slot, -1, [], -1, -1), r.1.ty, r.1.slot)
     }
     if e.kind == "field" {
         let r = place(inout ck, e.kids[0])
         if ck.failed { return r }
-        return (field_of(inout ck, r.0, e.text, e), r.1)
+        let f = field_of(inout ck, r.1, e.text, e)
+        return (hn("pfield", "", f.0, -1, [r.0], -1, -1), f.1, r.2)
     }
     if e.kind == "tindex" {
         let r = place(inout ck, e.kids[0])
         if ck.failed { return r }
-        return (tuple_elem(inout ck, r.0, parse_int(e.text), e), r.1)
+        let k = parse_int(e.text)
+        let et = tuple_elem(inout ck, r.1, k, e)
+        return (hn("pfield", "", k, -1, [r.0], -1, -1), et, r.2)
     }
     if e.kind == "index" {
         let obj = e.kids[0]
         let r = place(inout ck, obj)
         if ck.failed { return r }
-        let t = r.0
+        let t = r.1
         if is_tensor(ck, t) {
             let _ = fail_at(inout ck, "E0116", e, "a tensor slice cannot be passed as `inout` or changed in parts", "assign to the slice directly, e.g. `x[month: i] = v`")
             return r
@@ -487,20 +529,20 @@ fn place(inout ck: Checker, e: Node) -> (Ty, i64) {
         if ck.failed { return r }
         match resolve(ck, t) {
             TMap(kt, vt) => {
-                let tk = expr1(inout ck, idx, kt)
-                expect_at(inout ck, tk, kt, idx)
-                return (vt, r.1)
+                let k = expr1(inout ck, idx, kt)
+                expect_at(inout ck, k.t, kt, idx)
+                return (hspan("pindex", "", [r.0, k.h], e), vt, r.2)
             },
             _ => {},
         }
         let elem = list_elem(inout ck, t, obj)
         if ck.failed { return r }
-        let ti = expr1(inout ck, idx, Ty.TInt)
-        expect_at(inout ck, ti, Ty.TInt, idx)
-        return (elem, r.1)
+        let i = expr1(inout ck, idx, Ty.TInt)
+        expect_at(inout ck, i.t, Ty.TInt, idx)
+        return (hspan("pindex", "", [r.0, i.h], e), elem, r.2)
     }
     let _ = fail_at(inout ck, "E0116", e, "this expression cannot be assigned to or passed as `inout`", "")
-    (Ty.TUnit, -1)
+    (h_none(), Ty.TUnit, -1)
 }
 
 // The single positional index of a list (`xs[i]`).
@@ -522,18 +564,20 @@ fn list_index(inout ck: Checker, idx: List[Node], t: Ty) -> Node {
     idx[0].kids[1]
 }
 
-fn field_of(inout ck: Checker, t: Ty, f: str, e: Node) -> Ty {
-    if ck.failed { return Ty.TUnit }
+// A field of a struct: (its index, its type).
+fn field_of(inout ck: Checker, t: Ty, f: str, e: Node) -> (i64, Ty) {
+    if ck.failed { return (-1, Ty.TUnit) }
     let r = resolve(ck, t)
     match r {
         TStruct(sid) => {
-            for fl in ck.structs[sid].fields {
-                if fl.0 == f { return fl.1 }
+            let fields = ck.structs[sid].fields
+            for i in 0..len(fields) {
+                if fields[i].0 == f { return (i, fields[i].1) }
             }
-            fail_at(inout ck, "E0105", e, "struct `" + ck.structs[sid].name + "` has no field `" + f + "`", "")
+            (-1, fail_at(inout ck, "E0105", e, "struct `" + ck.structs[sid].name + "` has no field `" + f + "`", ""))
         },
-        TVar(v) => fail_at(inout ck, "E0105", e, "type `" + show(ck, r) + "` has no field `" + f + "`", "add a type annotation so Kairós knows the type here"),
-        _ => fail_at(inout ck, "E0105", e, "type `" + show(ck, r) + "` has no field `" + f + "`", "fields exist on structs; tuple elements are `.0`, `.1`, ..."),
+        TVar(v) => (-1, fail_at(inout ck, "E0105", e, "type `" + show(ck, r) + "` has no field `" + f + "`", "add a type annotation so Kairós knows the type here")),
+        _ => (-1, fail_at(inout ck, "E0105", e, "type `" + show(ck, r) + "` has no field `" + f + "`", "fields exist on structs; tuple elements are `.0`, `.1`, ...")),
     }
 }
 
@@ -551,61 +595,66 @@ fn tuple_elem(inout ck: Checker, t: Ty, k: i64, e: Node) -> Ty {
 
 // ------------------------------------------------------------------ expressions
 
-fn ck_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
-    if ck.failed { return Ty.TUnit }
+fn ck_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
+    if ck.failed { return bad() }
     let k = e.kind
     if k == "int" {
-        let t = fresh(inout ck, 1)
-        if ex { let _ = unify(inout ck, t, exp) }
-        return t
+        let id = fresh_id(inout ck, 1)
+        let t = Ty.TVar(id)
+        if has_exp { let _ = unify(inout ck, t, exp) }
+        return typed(hn("intlit", e.text, id, -1, [], -1, -1), t)
     }
-    if k == "float" { return Ty.TFloat }
-    if k == "str" { return Ty.TStr }
-    if k == "bool" { return Ty.TBool }
-    if k == "unit" { return Ty.TUnit }
+    if k == "float" { return typed(hlit("f64 " + e.text), Ty.TFloat) }
+    if k == "str" { return typed(hlit("str " + e.text), Ty.TStr) }
+    if k == "bool" { return typed(hlit("bool " + e.text), Ty.TBool) }
+    if k == "unit" { return typed(hlit("unit"), Ty.TUnit) }
     if k == "name" { return name_expr(inout ck, e) }
-    if k == "list" { return list_expr(inout ck, e, ex, exp) }
-    if k == "map" { return map_expr(inout ck, e, ex, exp) }
-    if k == "tuple" { return tuple_expr(inout ck, e, ex, exp) }
+    if k == "list" { return list_expr(inout ck, e, has_exp, exp) }
+    if k == "map" { return map_expr(inout ck, e, has_exp, exp) }
+    if k == "tuple" { return tuple_expr(inout ck, e, has_exp, exp) }
     if k == "structlit" { return ck_struct_lit(inout ck, e) }
     if k == "field" { return field_expr(inout ck, e) }
     if k == "tindex" {
-        let t = expr0(inout ck, e.kids[0])
-        return tuple_elem(inout ck, t, parse_int(e.text), e)
+        let r = expr0(inout ck, e.kids[0])
+        let kk = parse_int(e.text)
+        let et = tuple_elem(inout ck, r.t, kk, e)
+        if ck.failed { return bad() }
+        return typed(hn("field", "", kk, -1, [r.h], -1, -1), et)
     }
     if k == "index" { return index_expr(inout ck, e) }
     if k == "call" { return call_expr(inout ck, e) }
     if k == "method" { return method_call(inout ck, e) }
-    if k == "neg" or k == "not" { return unary_expr(inout ck, e, ex, exp) }
+    if k == "neg" or k == "not" { return unary_expr(inout ck, e, has_exp, exp) }
     if k == "bin" { return binary(inout ck, e) }
     if k == "and" or k == "or" { return logic_expr(inout ck, e) }
     if k == "assign" { return assign_expr(inout ck, e) }
-    if k == "if" { return ck_if_expr(inout ck, e, ex, exp) }
+    if k == "if" { return ck_if_expr(inout ck, e, has_exp, exp) }
     if k == "while" {
         let cond = e.kids[0]
-        let tc = expr1(inout ck, cond, Ty.TBool)
-        expect_at(inout ck, tc, Ty.TBool, cond)
-        if ck.failed { return Ty.TUnit }
+        let c = expr1(inout ck, cond, Ty.TBool)
+        expect_at(inout ck, c.t, Ty.TBool, cond)
+        if ck.failed { return bad() }
         let body = e.kids[1]
-        let tb = loop_body(inout ck, body)
-        expect_at(inout ck, tb, Ty.TUnit, body)
-        return Ty.TUnit
+        let b = loop_body(inout ck, body)
+        expect_at(inout ck, b.t, Ty.TUnit, body)
+        if ck.failed { return bad() }
+        return typed(hk("while", [c.h, b.h]), Ty.TUnit)
     }
     if k == "for" { return for_expr(inout ck, e) }
-    if k == "range" { return fail_at(inout ck, "E0113", e, "ranges can only be used in `for` loops and tensor indices (for now)", "") }
-    if k == "match" { return ck_match_expr(inout ck, e, ex, exp) }
-    if k == "lambda" { return ck_lambda(inout ck, e, ex, exp) }
-    if k == "block" { return ck_block(inout ck, e, ex, exp) }
+    if k == "range" { return fail_ex(inout ck, "E0113", e, "ranges can only be used in `for` loops and tensor indices (for now)", "") }
+    if k == "match" { return ck_match_expr(inout ck, e, has_exp, exp) }
+    if k == "lambda" { return ck_lambda(inout ck, e, has_exp, exp) }
+    if k == "block" { return ck_block(inout ck, e, has_exp, exp) }
     if k == "return" { return return_expr(inout ck, e) }
     // `break` and `continue`
-    if ck.ctxs[len(ck.ctxs) - 1].loops == 0 { return fail_at(inout ck, "E0119", e, "`break` and `continue` must be inside a loop", "") }
-    Ty.TNever
+    if ck.ctxs[len(ck.ctxs) - 1].loops == 0 { return fail_ex(inout ck, "E0119", e, "`break` and `continue` must be inside a loop", "") }
+    typed(hk(k, []), Ty.TNever)
 }
 
-fn list_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn list_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     var elem = Ty.TUnit
     var known = false
-    if ex {
+    if has_exp {
         match resolve(ck, exp) {
             TList(t) => {
                 elem = t
@@ -615,19 +664,21 @@ fn list_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
         }
     }
     if not known { elem = fresh(inout ck, 0) }
+    var hs: List[H] = []
     for it in e.kids {
-        let t = expr1(inout ck, it, elem)
-        expect_at(inout ck, t, elem, it)
-        if ck.failed { return Ty.TUnit }
+        let r = expr1(inout ck, it, elem)
+        expect_at(inout ck, r.t, elem, it)
+        if ck.failed { return bad() }
+        hs.push(r.h)
     }
-    Ty.TList(elem)
+    typed(hk("list", hs), Ty.TList(elem))
 }
 
-fn map_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn map_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     var kt = Ty.TUnit
     var vt = Ty.TUnit
     var known = false
-    if ex {
+    if has_exp {
         match resolve(ck, exp) {
             TMap(a, b) => {
                 kt = a
@@ -641,24 +692,27 @@ fn map_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
         kt = fresh(inout ck, 2)
         vt = fresh(inout ck, 0)
     }
+    var hs: List[H] = []
     for pr in e.kids {
         let kn = pr.kids[0]
-        let tk = expr1(inout ck, kn, kt)
-        if ck.failed { return Ty.TUnit }
-        if not unify(inout ck, tk, kt) {
-            return fail_at(inout ck, "E0101", kn, "map keys must be `i64` or `str` (all of one type), found `" + show(ck, tk) + "`", "")
+        let rk = expr1(inout ck, kn, kt)
+        if ck.failed { return bad() }
+        if not unify(inout ck, rk.t, kt) {
+            return fail_ex(inout ck, "E0101", kn, "map keys must be `i64` or `str` (all of one type), found `" + show(ck, rk.t) + "`", "")
         }
         let vn = pr.kids[1]
-        let tv = expr1(inout ck, vn, vt)
-        expect_at(inout ck, tv, vt, vn)
-        if ck.failed { return Ty.TUnit }
+        let rv = expr1(inout ck, vn, vt)
+        expect_at(inout ck, rv.t, vt, vn)
+        if ck.failed { return bad() }
+        hs.push(rk.h)
+        hs.push(rv.h)
     }
-    Ty.TMap(kt, vt)
+    typed(hk("map", hs), Ty.TMap(kt, vt))
 }
 
-fn tuple_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn tuple_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     var want: List[Ty] = []
-    if ex {
+    if has_exp {
         match resolve(ck, exp) {
             TTuple(ts) => {
                 if len(ts) == len(e.kids) { want = ts }
@@ -666,16 +720,18 @@ fn tuple_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
             _ => {},
         }
     }
+    var hs: List[H] = []
     var ts: List[Ty] = []
     for i in 0..len(e.kids) {
-        let t = if len(want) > 0 { expr1(inout ck, e.kids[i], want[i]) } else { expr0(inout ck, e.kids[i]) }
-        if ck.failed { return Ty.TUnit }
-        ts.push(t)
+        let r = if len(want) > 0 { expr1(inout ck, e.kids[i], want[i]) } else { expr0(inout ck, e.kids[i]) }
+        if ck.failed { return bad() }
+        hs.push(r.h)
+        ts.push(r.t)
     }
-    Ty.TTuple(ts)
+    typed(hk("tuple", hs), Ty.TTuple(ts))
 }
 
-fn field_expr(inout ck: Checker, e: Node) -> Ty {
+fn field_expr(inout ck: Checker, e: Node) -> Ex {
     let obj = e.kids[0]
     if obj.kind == "name" {
         if not lookup(inout ck, obj.text).0 and contains(ck.enum_ids, obj.text) {
@@ -683,49 +739,58 @@ fn field_expr(inout ck: Checker, e: Node) -> Ty {
             return variant_ctor(inout ck, ck.enum_ids[obj.text], e.text, none, e)
         }
     }
-    let t = expr0(inout ck, obj)
-    field_of(inout ck, t, e.text, e)
+    let r = expr0(inout ck, obj)
+    let f = field_of(inout ck, r.t, e.text, e)
+    if ck.failed { return bad() }
+    typed(hn("field", "", f.0, -1, [r.h], -1, -1), f.1)
 }
 
-fn index_expr(inout ck: Checker, e: Node) -> Ty {
+fn index_expr(inout ck: Checker, e: Node) -> Ex {
     let obj = e.kids[0]
-    let to = expr0(inout ck, obj)
-    if ck.failed { return Ty.TUnit }
+    let o = expr0(inout ck, obj)
+    if ck.failed { return bad() }
+    let to = o.t
     if is_tensor(ck, to) {
-        let kept = tensor_sels(inout ck, tensor_axes(ck, to), to, e.kids[1].kids)
-        if ck.failed { return Ty.TUnit }
-        return mk_tensor(kept, elem_of(ck, to))
+        let s = tensor_sels(inout ck, tensor_axes(ck, to), to, e.kids[1].kids)
+        if ck.failed { return bad() }
+        var kids = [o.h]
+        for x in s.0 { kids.push(x) }
+        return typed(hspan("tindex", "", kids, e), mk_tensor(s.1, elem_of(ck, to)))
     }
     let idx = list_index(inout ck, e.kids[1].kids, to)
-    if ck.failed { return Ty.TUnit }
+    if ck.failed { return bad() }
     match resolve(ck, to) {
         TMap(kt, vt) => {
-            let tk = expr1(inout ck, idx, kt)
-            expect_at(inout ck, tk, kt, idx)
-            return vt
+            let rk = expr1(inout ck, idx, kt)
+            expect_at(inout ck, rk.t, kt, idx)
+            if ck.failed { return bad() }
+            return typed(hspan("index", "", [o.h, rk.h], e), vt)
         },
         _ => {},
     }
     let elem = list_elem(inout ck, to, obj)
-    if ck.failed { return Ty.TUnit }
-    let ti = expr1(inout ck, idx, Ty.TInt)
-    expect_at(inout ck, ti, Ty.TInt, idx)
-    elem
+    if ck.failed { return bad() }
+    let ri = expr1(inout ck, idx, Ty.TInt)
+    expect_at(inout ck, ri.t, Ty.TInt, idx)
+    if ck.failed { return bad() }
+    typed(hspan("index", "", [o.h, ri.h], e), elem)
 }
 
-fn unary_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn unary_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     let x = e.kids[0]
-    let t = ck_expr(inout ck, x, ex, exp)
-    if ck.failed { return Ty.TUnit }
+    let r = ck_expr(inout ck, x, has_exp, exp)
+    if ck.failed { return bad() }
+    let t = r.t
     let neg = e.kind == "neg"
+    let h = hspan("unary", if neg { "-" } else { "not" }, [r.h], e)
     match resolve(ck, t) {
         TTensor(a, elem) => {
             let want = if neg { Ty.TFloat } else { Ty.TBool }
             let word = if neg { "`-`" } else { "`not`" }
             if elem != want {
-                return fail_at(inout ck, "E0101", e, word + " needs a `" + show(ck, want) + "` tensor, found `" + show(ck, t) + "`", "")
+                return fail_ex(inout ck, "E0101", e, word + " needs a `" + show(ck, want) + "` tensor, found `" + show(ck, t) + "`", "")
             }
-            return t
+            return typed(h, t)
         },
         _ => {},
     }
@@ -734,181 +799,208 @@ fn unary_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
     } else {
         expect_at(inout ck, t, Ty.TBool, x)
     }
-    t
+    if ck.failed { return bad() }
+    typed(h, t)
 }
 
-fn logic_expr(inout ck: Checker, e: Node) -> Ty {
+fn logic_expr(inout ck: Checker, e: Node) -> Ex {
     let l = e.kids[0]
     let r = e.kids[1]
-    let tl = expr1(inout ck, l, Ty.TBool)
-    if ck.failed { return Ty.TUnit }
+    let a = expr1(inout ck, l, Ty.TBool)
+    if ck.failed { return bad() }
+    let tl = a.t
     let lt = is_tensor(ck, tl)
     if not lt {
         expect_at(inout ck, tl, Ty.TBool, l)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
     }
-    let tr = expr1(inout ck, r, Ty.TBool)
-    if ck.failed { return Ty.TUnit }
+    let b = expr1(inout ck, r, Ty.TBool)
+    if ck.failed { return bad() }
+    let tr = b.t
     if not lt and not is_tensor(ck, tr) {
         expect_at(inout ck, tr, Ty.TBool, r)
-        return Ty.TBool
+        if ck.failed { return bad() }
+        return typed(hk(e.kind, [a.h, b.h]), Ty.TBool)
     }
     // element-wise on bool tensors (no short-circuit)
     let word = "`" + e.kind + "`"
     let axes = frame_axes(inout ck, [(tl, l), (tr, r)], word, e)
-    if ck.failed { return Ty.TUnit }
+    if ck.failed { return bad() }
     let first = elem_of(ck, tl)
     let et = elem_of(ck, tr)
     if not unify(inout ck, first, et) {
-        return fail_at(inout ck, "E0101", r, word + " mixes `" + show(ck, first) + "` and `" + show(ck, et) + "` values", "")
+        return fail_ex(inout ck, "E0101", r, word + " mixes `" + show(ck, first) + "` and `" + show(ck, et) + "` values", "")
     }
     let elem = resolve(ck, first)
-    if elem != Ty.TBool { return fail_at(inout ck, "E0101", e, word + " needs `bool` values, found `" + show(ck, elem) + "`", "") }
-    mk_tensor(axes, Ty.TBool)
+    if elem != Ty.TBool { return fail_ex(inout ck, "E0101", e, word + " needs `bool` values, found `" + show(ck, elem) + "`", "") }
+    typed(hspan("builtin", e.kind, [hval(a.h), hval(b.h)], e), mk_tensor(axes, Ty.TBool))
 }
 
-fn assign_expr(inout ck: Checker, e: Node) -> Ty {
+fn assign_expr(inout ck: Checker, e: Node) -> Ex {
     let target = e.kids[0]
     let value = e.kids[1]
+    let op = e.text
     if target.kind == "index" {
         let whole = place(inout ck, target.kids[0])
-        if ck.failed { return Ty.TUnit }
-        let tw = whole.0
+        if ck.failed { return bad() }
+        let tw = whole.1
         if is_tensor(ck, tw) {
             let elem = elem_of(ck, tw)
-            let kept = tensor_sels(inout ck, tensor_axes(ck, tw), tw, target.kids[1].kids)
-            if ck.failed { return Ty.TUnit }
-            let tv = expr1(inout ck, value, elem)
-            if ck.failed { return Ty.TUnit }
-            check_tensor_store(inout ck, kept, elem, tv, e.text, true, value, e)
-            return Ty.TUnit
+            let s = tensor_sels(inout ck, tensor_axes(ck, tw), tw, target.kids[1].kids)
+            if ck.failed { return bad() }
+            let v = expr1(inout ck, value, elem)
+            if ck.failed { return bad() }
+            check_tensor_store(inout ck, s.1, elem, v.t, op, true, value, e)
+            if ck.failed { return bad() }
+            var kids = [whole.0]
+            for x in s.0 { kids.push(x) }
+            kids.push(v.h)
+            return typed(hspan("tassign", op, kids, e), Ty.TUnit)
         }
     }
     let p = place(inout ck, target)
-    if ck.failed { return Ty.TUnit }
-    let t = p.0
+    if ck.failed { return bad() }
+    let t = p.1
     if is_tensor(ck, t) {
-        let tv = expr1(inout ck, value, t)
-        if ck.failed { return Ty.TUnit }
-        check_tensor_store(inout ck, tensor_axes(ck, t), elem_of(ck, t), tv, e.text, false, value, e)
-        return Ty.TUnit
+        let v = expr1(inout ck, value, t)
+        if ck.failed { return bad() }
+        check_tensor_store(inout ck, tensor_axes(ck, t), elem_of(ck, t), v.t, op, false, value, e)
+        if ck.failed { return bad() }
+        if op == "=" { return typed(hk("assign", [p.0, v.h]), Ty.TUnit) }
+        return typed(hspan("opassign", op, [p.0, v.h], e), Ty.TUnit)
     }
-    let tv = expr1(inout ck, value, t)
-    expect_at(inout ck, tv, t, value)
-    if ck.failed { return Ty.TUnit }
-    if e.text != "=" {
-        if not (resolve(ck, t) == Ty.TStr and e.text == "+") {
-            ensure_numeric(inout ck, t, e, "`" + e.text + "=`")
-        }
+    let v = expr1(inout ck, value, t)
+    expect_at(inout ck, v.t, t, value)
+    if ck.failed { return bad() }
+    if op == "=" { return typed(hk("assign", [p.0, v.h]), Ty.TUnit) }
+    if not (resolve(ck, t) == Ty.TStr and op == "+") {
+        ensure_numeric(inout ck, t, e, "`" + op + "=`")
+        if ck.failed { return bad() }
     }
-    Ty.TUnit
+    typed(hspan("opassign", op, [p.0, v.h], e), Ty.TUnit)
 }
 
-fn ck_if_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn ck_if_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     let cond = e.kids[0]
-    let tc = expr1(inout ck, cond, Ty.TBool)
-    expect_at(inout ck, tc, Ty.TBool, cond)
-    if ck.failed { return Ty.TUnit }
+    let c = expr1(inout ck, cond, Ty.TBool)
+    expect_at(inout ck, c.t, Ty.TBool, cond)
+    if ck.failed { return bad() }
     let then = e.kids[1]
-    let tt = ck_block(inout ck, then, ex, exp)
-    if ck.failed { return Ty.TUnit }
+    let tb = ck_block(inout ck, then, has_exp, exp)
+    if ck.failed { return bad() }
+    let tt = tb.t
     let els = e.kids[2]
     if els.kind == "-" {
         if not unify(inout ck, tt, Ty.TUnit) {
             let tail = then.kids[1]
             let at = if tail.kind != "-" { tail } else { then }
             mismatch(inout ck, show(ck, tt), "()", at.lo, at.hi, "an `if` without `else` produces no value: add an `else` branch")
+            return bad()
         }
-        return Ty.TUnit
+        return typed(hk("if", [c.h, tb.h, h_none()]), Ty.TUnit)
     }
     let never = resolve(ck, tt) == Ty.TNever
-    let te = if never { ck_expr(inout ck, els, ex, exp) } else { expr1(inout ck, els, tt) }
-    if ck.failed { return Ty.TUnit }
+    let eb = if never { ck_expr(inout ck, els, has_exp, exp) } else { expr1(inout ck, els, tt) }
+    if ck.failed { return bad() }
+    let te = eb.t
     if not unify(inout ck, tt, te) {
-        return fail_at(inout ck, "E0101", els, "`if` and `else` have incompatible types: `" + show(ck, tt) + "` and `" + show(ck, te) + "`", "")
+        return fail_ex(inout ck, "E0101", els, "`if` and `else` have incompatible types: `" + show(ck, tt) + "` and `" + show(ck, te) + "`", "")
     }
-    if resolve(ck, tt) == Ty.TNever { te } else { tt }
+    typed(hk("if", [c.h, tb.h, eb.h]), if resolve(ck, tt) == Ty.TNever { te } else { tt })
 }
 
-fn return_expr(inout ck: Checker, e: Node) -> Ty {
+fn return_expr(inout ck: Checker, e: Node) -> Ex {
     let k = len(ck.ctxs) - 1
-    if ck.ctxs[k].kind == 0 { return fail_at(inout ck, "E0118", e, "`return` outside of a function", "") }
+    if ck.ctxs[k].kind == 0 { return fail_ex(inout ck, "E0118", e, "`return` outside of a function", "") }
     let ret = ck.ctxs[k].ret
     let x = e.kids[0]
     if x.kind != "-" {
-        let t = expr1(inout ck, x, ret)
-        expect_at(inout ck, t, ret, x)
-    } else {
-        expect_at(inout ck, Ty.TUnit, ret, e)
+        let r = expr1(inout ck, x, ret)
+        expect_at(inout ck, r.t, ret, x)
+        if ck.failed { return bad() }
+        return typed(hk("return", [r.h]), Ty.TNever)
     }
-    Ty.TNever
+    expect_at(inout ck, Ty.TUnit, ret, e)
+    if ck.failed { return bad() }
+    typed(hk("return", [h_none()]), Ty.TNever)
 }
 
-fn loop_body(inout ck: Checker, body: Node) -> Ty {
+fn loop_body(inout ck: Checker, body: Node) -> Ex {
     let k = len(ck.ctxs) - 1
     ck.ctxs[k].loops += 1
-    let t = ck_block(inout ck, body, true, Ty.TUnit)
+    let r = ck_block(inout ck, body, true, Ty.TUnit)
     ck.ctxs[k].loops -= 1
-    t
+    r
 }
 
-fn for_expr(inout ck: Checker, e: Node) -> Ty {
+fn for_expr(inout ck: Checker, e: Node) -> Ex {
     let pat = e.kids[0]
     let iter = e.kids[1]
     let body = e.kids[2]
     if iter.kind == "range" {
         let lo = iter.kids[0]
         let hi = iter.kids[1]
-        let tlo = expr1(inout ck, lo, Ty.TInt)
-        expect_at(inout ck, tlo, Ty.TInt, lo)
-        if ck.failed { return Ty.TUnit }
-        let thi = expr1(inout ck, hi, Ty.TInt)
-        expect_at(inout ck, thi, Ty.TInt, hi)
-        if ck.failed { return Ty.TUnit }
+        let a = expr1(inout ck, lo, Ty.TInt)
+        expect_at(inout ck, a.t, Ty.TInt, lo)
+        if ck.failed { return bad() }
+        let b = expr1(inout ck, hi, Ty.TInt)
+        expect_at(inout ck, b.t, Ty.TInt, hi)
+        if ck.failed { return bad() }
         push_scope(inout ck)
+        var slot = -1
+        var name = "_"
         if pat.kind == "pbind" {
-            let _ = declare(inout ck, pat.text, Ty.TInt, false)
+            slot = declare(inout ck, pat.text, Ty.TInt, false)
+            name = pat.text
         } else if pat.kind == "pwild" {
-            let _ = declare(inout ck, "_", Ty.TInt, false)
+            slot = declare(inout ck, "_", Ty.TInt, false)
         } else {
             pop_scope(inout ck)
-            return fail_at(inout ck, "E0117", pat, "a range loop binds a single name", "")
+            return fail_ex(inout ck, "E0117", pat, "a range loop binds a single name", "")
         }
-        let tb = loop_body(inout ck, body)
-        expect_at(inout ck, tb, Ty.TUnit, body)
+        let rb = loop_body(inout ck, body)
+        expect_at(inout ck, rb.t, Ty.TUnit, body)
         pop_scope(inout ck)
-        return Ty.TUnit
+        if ck.failed { return bad() }
+        let incl = if iter.text == "..=" { 1 } else { 0 }
+        return typed(hn("forrange", name, slot, incl, [a.h, b.h, rb.h], -1, -1), Ty.TUnit)
     }
-    let tl = expr0(inout ck, iter)
-    let elem = list_elem(inout ck, tl, iter)
-    if ck.failed { return Ty.TUnit }
+    let l = expr0(inout ck, iter)
+    let elem = list_elem(inout ck, l.t, iter)
+    if ck.failed { return bad() }
     push_scope(inout ck)
-    let _ = ck_pattern(inout ck, pat, elem, false, false)
+    let hp = ck_pattern(inout ck, pat, elem, false, false)
+    var hb = h_none()
     if not ck.failed {
-        let tb = loop_body(inout ck, body)
-        expect_at(inout ck, tb, Ty.TUnit, body)
+        let rb = loop_body(inout ck, body)
+        expect_at(inout ck, rb.t, Ty.TUnit, body)
+        hb = rb.h
     }
     pop_scope(inout ck)
-    Ty.TUnit
+    if ck.failed { return bad() }
+    typed(hk("forlist", [hp, l.h, hb]), Ty.TUnit)
 }
 
-fn ck_match_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
-    let ts = expr0(inout ck, e.kids[0])
-    if ck.failed { return Ty.TUnit }
-    var has = ex
+fn ck_match_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
+    let s = expr0(inout ck, e.kids[0])
+    if ck.failed { return bad() }
+    let ts = s.t
+    var has = has_exp
     var result = exp
-    var pats: List[Pat] = []
+    var pats: List[H] = []
+    var kids = [s.h]
     for arm in e.kids[1].kids {
         push_scope(inout ck)
         let hp = ck_pattern(inout ck, arm.kids[0], ts, false, true)
         let body = arm.kids[1]
-        var tb = Ty.TUnit
-        if not ck.failed { tb = ck_expr(inout ck, body, has, result) }
+        var rb = bad()
+        if not ck.failed { rb = ck_expr(inout ck, body, has, result) }
         pop_scope(inout ck)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        let tb = rb.t
         if has {
             if not unify(inout ck, tb, result) {
-                return fail_at(inout ck, "E0101", body, "match arms have incompatible types: `" + show(ck, result) + "` and `" + show(ck, tb) + "`", "")
+                return fail_ex(inout ck, "E0101", body, "match arms have incompatible types: `" + show(ck, result) + "` and `" + show(ck, tb) + "`", "")
             }
             if resolve(ck, result) == Ty.TNever { result = tb }
         } else {
@@ -916,18 +1008,20 @@ fn ck_match_expr(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
             has = true
         }
         pats.push(hp)
+        kids.push(hk("arm", [hp, rb.h]))
     }
     check_exhaustive(inout ck, ts, pats, e)
-    if has { result } else { Ty.TUnit }
+    if ck.failed { return bad() }
+    typed(hspan("match", "", kids, e), if has { result } else { Ty.TUnit })
 }
 
-fn ck_lambda(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
+fn ck_lambda(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
     let params = e.kids[0].kids
     let body = e.kids[1]
     var known = false
     var eps: List[Ty] = []
     var er = Ty.TUnit
-    if ex {
+    if has_exp {
         match resolve(ck, exp) {
             TFn(ps, r) => {
                 if len(ps) == len(params) {
@@ -945,10 +1039,10 @@ fn ck_lambda(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
         var t = Ty.TUnit
         if te.kind != "-" {
             t = resolve_type(inout ck, te)
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
             if known {
                 expect_at(inout ck, t, eps[i], params[i])
-                if ck.failed { return Ty.TUnit }
+                if ck.failed { return bad() }
             }
         } else if known {
             t = eps[i]
@@ -964,11 +1058,20 @@ fn ck_lambda(inout ck: Checker, e: Node, ex: bool, exp: Ty) -> Ty {
         c.scopes[0][params[i].text] = Local { slot: slot, ty: ptys[i], mutable: false, affine: false, loop_depth: 0, captured: false }
     }
     ck.ctxs.push(c)
-    let tb = expr1(inout ck, body, ret)
-    let _ = ck.ctxs.pop()
-    if ck.failed { return Ty.TUnit }
-    expect_at(inout ck, tb, ret, body)
-    Ty.TFn(ptys, ret)
+    let rb = expr1(inout ck, body, ret)
+    let done = ck.ctxs.pop()
+    if ck.failed { return bad() }
+    expect_at(inout ck, rb.t, ret, body)
+    if ck.failed { return bad() }
+    let def = len(ck.lambdas)
+    var outer = []
+    var inner: List[i64] = []
+    for cp in done.captures {
+        outer.push(str(cp.0))
+        inner.push(cp.1)
+    }
+    ck.lambdas.push(LambdaH { caps: inner, n_params: len(params), n_slots: done.n_slots, body: rb.h })
+    typed(hn("lambda", join(outer, " "), def, -1, [], -1, -1), Ty.TFn(ptys, ret))
 }
 
 // A holdout is affine: using it consumes it (M5, E0501).
@@ -990,51 +1093,59 @@ fn consume(inout ck: Checker, n: str, l: Local, e: Node) {
     ck.ctxs[k].consumed[l.slot] = true
 }
 
-fn name_expr(inout ck: Checker, e: Node) -> Ty {
+fn name_expr(inout ck: Checker, e: Node) -> Ex {
     let n = e.text
     let r = lookup(inout ck, n)
     if r.0 {
         if r.1.affine {
             consume(inout ck, n, r.1, e)
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
         }
-        return r.1.ty
+        return typed(hn("local", "", r.1.slot, -1, [], -1, -1), r.1.ty)
     }
     if contains(ck.fn_ids, n) {
-        let sig = ck.sigs[ck.fn_ids[n]]
+        let fid = ck.fn_ids[n]
+        let sig = ck.sigs[fid]
         if len(sig.type_params) > 0 {
-            return fail_at(inout ck, "E0114", e, "generic function `" + n + "` cannot be used as a value yet", "call it directly, or wrap it in a lambda with concrete types")
+            return fail_ex(inout ck, "E0114", e, "generic function `" + n + "` cannot be used as a value yet", "call it directly, or wrap it in a lambda with concrete types")
         }
         var ps: List[Ty] = []
         for p in sig.params {
-            if p.2 { return fail_at(inout ck, "E0114", e, "`" + n + "` has `inout` parameters and cannot be used as a value", "") }
+            if p.2 { return fail_ex(inout ck, "E0114", e, "`" + n + "` has `inout` parameters and cannot be used as a value", "") }
             ps.push(p.1)
         }
-        return Ty.TFn(ps, sig.ret)
+        return typed(hn("fnref", "", fid, -1, [], -1, -1), Ty.TFn(ps, sig.ret))
     }
-    if n == "nan" or n == "inf" or n == "pi" { return Ty.TFloat }
-    if n == "b3" { return fail_at(inout ck, "E0101", e, "`b3` is the B3 data module, not a value", "call its functions, e.g. `b3.monthly_returns()`") }
+    if n == "nan" { return typed(hlit("f64 NaN"), Ty.TFloat) }
+    if n == "inf" { return typed(hlit("f64 inf"), Ty.TFloat) }
+    if n == "pi" { return typed(hlit("f64 " + str(pi)), Ty.TFloat) }
+    if n == "b3" { return fail_ex(inout ck, "E0101", e, "`b3` is the B3 data module, not a value", "call its functions, e.g. `b3.monthly_returns()`") }
     if contains(ck.builtins, n) {
-        return fail_at(inout ck, "E0114", e, "builtin `" + n + "` cannot be used as a value yet", "wrap it in a lambda, e.g. `|x| " + n + "(x)`")
+        return fail_ex(inout ck, "E0114", e, "builtin `" + n + "` cannot be used as a value yet", "wrap it in a lambda, e.g. `|x| " + n + "(x)`")
     }
     if contains(ck.axis_ids, n) {
-        return fail_at(inout ck, "E0101", e, "`" + n + "` is an axis, not a value", "axes appear in types, in indices like `x[" + n + ": i]` and in arguments like `over: " + n + "`")
+        return fail_ex(inout ck, "E0101", e, "`" + n + "` is an axis, not a value", "axes appear in types, in indices like `x[" + n + ": i]` and in arguments like `over: " + n + "`")
     }
     var hint = ""
     let in_fn = len(ck.ctxs) > 0 and ck.ctxs[0].kind != 0
     if in_fn and (contains(ck.top_names, n) or find_local(ck.main, n).0) {
         hint = "functions cannot read top-level variables: pass it as a parameter"
     }
-    fail_at(inout ck, "E0100", e, "cannot find `" + n + "` in this scope", hint)
+    fail_ex(inout ck, "E0100", e, "cannot find `" + n + "` in this scope", hint)
 }
 
-fn ck_struct_lit(inout ck: Checker, e: Node) -> Ty {
+fn ck_struct_lit(inout ck: Checker, e: Node) -> Ex {
     let name = e.text
-    if not contains(ck.struct_ids, name) { return fail_at(inout ck, "E0100", e, "unknown struct `" + name + "`", "") }
+    if not contains(ck.struct_ids, name) { return fail_ex(inout ck, "E0100", e, "unknown struct `" + name + "`", "") }
     let sid = ck.struct_ids[name]
     let fields = ck.structs[sid].fields
+    // the values in the order of the declaration
+    var vals: List[H] = []
     var given: List[bool] = []
-    for f in fields { given.push(false) }
+    for f in fields {
+        vals.push(h_none())
+        given.push(false)
+    }
     for init in e.kids {
         let fname = init.text
         let fe = init.kids[0]
@@ -1045,18 +1156,19 @@ fn ck_struct_lit(inout ck: Checker, e: Node) -> Ty {
                 break
             }
         }
-        if idx < 0 { return fail_at(inout ck, "E0105", fe, "struct `" + name + "` has no field `" + fname + "`", "") }
-        if given[idx] { return fail_at(inout ck, "E0112", fe, "field `" + fname + "` is given twice", "") }
+        if idx < 0 { return fail_ex(inout ck, "E0105", fe, "struct `" + name + "` has no field `" + fname + "`", "") }
+        if given[idx] { return fail_ex(inout ck, "E0112", fe, "field `" + fname + "` is given twice", "") }
         let fty = fields[idx].1
-        let t = expr1(inout ck, fe, fty)
-        expect_at(inout ck, t, fty, fe)
-        if ck.failed { return Ty.TUnit }
+        let r = expr1(inout ck, fe, fty)
+        expect_at(inout ck, r.t, fty, fe)
+        if ck.failed { return bad() }
+        vals[idx] = r.h
         given[idx] = true
     }
     for i in 0..len(given) {
-        if not given[i] { return fail_at(inout ck, "E0105", e, "missing field `" + fields[i].0 + "` in `" + name + "`", "") }
+        if not given[i] { return fail_ex(inout ck, "E0105", e, "missing field `" + fields[i].0 + "` in `" + name + "`", "") }
     }
-    Ty.TStruct(sid)
+    typed(hn("struct", "", sid, -1, vals, -1, -1), Ty.TStruct(sid))
 }
 
 fn no_named_args(inout ck: Checker, call_args: List[Node], what: str) {
@@ -1069,7 +1181,7 @@ fn no_named_args(inout ck: Checker, call_args: List[Node], what: str) {
     }
 }
 
-fn variant_ctor(inout ck: Checker, eid: i64, vname: str, call_args: List[Node], e: Node) -> Ty {
+fn variant_ctor(inout ck: Checker, eid: i64, vname: str, call_args: List[Node], e: Node) -> Ex {
     let def = ck.enums[eid]
     var vi = -1
     for i in 0..len(def.variants) {
@@ -1078,22 +1190,24 @@ fn variant_ctor(inout ck: Checker, eid: i64, vname: str, call_args: List[Node], 
             break
         }
     }
-    if vi < 0 { return fail_at(inout ck, "E0100", e, "enum `" + def.name + "` has no variant `" + vname + "`", "") }
+    if vi < 0 { return fail_ex(inout ck, "E0100", e, "enum `" + def.name + "` has no variant `" + vname + "`", "") }
     let ptys = def.variants[vi].1
     if len(ptys) != len(call_args) {
-        return fail_at(inout ck, "E0103", e, "`" + def.name + "." + vname + "` takes " + str(len(ptys)) + " value(s), but " + str(len(call_args)) + " were given", "")
+        return fail_ex(inout ck, "E0103", e, "`" + def.name + "." + vname + "` takes " + str(len(ptys)) + " value(s), but " + str(len(call_args)) + " were given", "")
     }
     no_named_args(inout ck, call_args, "`" + def.name + "." + vname + "`")
-    if ck.failed { return Ty.TUnit }
+    if ck.failed { return bad() }
+    var hs: List[H] = []
     for i in 0..len(call_args) {
         let a = call_args[i]
         let ae = a.kids[1]
-        if a.text == "inout" { return fail_at(inout ck, "E0115", ae, "enum values are not `inout`", "") }
-        let t = expr1(inout ck, ae, ptys[i])
-        expect_at(inout ck, t, ptys[i], ae)
-        if ck.failed { return Ty.TUnit }
+        if a.text == "inout" { return fail_ex(inout ck, "E0115", ae, "enum values are not `inout`", "") }
+        let r = expr1(inout ck, ae, ptys[i])
+        expect_at(inout ck, r.t, ptys[i], ae)
+        if ck.failed { return bad() }
+        hs.push(r.h)
     }
-    Ty.TEnum(eid)
+    typed(hn("variant", "", eid, vi, hs, -1, -1), Ty.TEnum(eid))
 }
 
 // `+ - * /` on the tangent space: two values of the same type, or one with an `f64`.
@@ -1112,37 +1226,46 @@ fn tangent_binary(inout ck: Checker, op: str, tl: Ty, tr: Ty, e: Node) -> (bool,
     (true, resolve(ck, s))
 }
 
-fn binary(inout ck: Checker, e: Node) -> Ty {
+fn binary(inout ck: Checker, e: Node) -> Ex {
     let op = e.text
-    let tl = expr0(inout ck, e.kids[0])
-    if ck.failed { return Ty.TUnit }
-    let tr = expr1(inout ck, e.kids[1], tl)
-    if ck.failed { return Ty.TUnit }
-    if is_tensor(ck, tl) or is_tensor(ck, tr) { return tensor_binary(inout ck, op, tl, tr, e.kids[0], e.kids[1], e) }
+    let a = expr0(inout ck, e.kids[0])
+    if ck.failed { return bad() }
+    let tl = a.t
+    let b = expr1(inout ck, e.kids[1], tl)
+    if ck.failed { return bad() }
+    let tr = b.t
+    let h = hspan("binary", op, [a.h, b.h], e)
+    if is_tensor(ck, tl) or is_tensor(ck, tr) {
+        let t = tensor_binary(inout ck, op, tl, tr, e.kids[0], e.kids[1], e)
+        if ck.failed { return bad() }
+        return typed(h, t)
+    }
     let tg = tangent_binary(inout ck, op, tl, tr, e)
-    if ck.failed { return Ty.TUnit }
-    if tg.0 { return tg.1 }
+    if ck.failed { return bad() }
+    if tg.0 { return typed(h, tg.1) }
     if not unify(inout ck, tl, tr) {
-        let a = show(ck, tl)
-        let b = show(ck, tr)
-        let mixed = (a == "i64" and b == "f64") or (a == "f64" and b == "i64")
-        return fail_at(inout ck, if mixed { "E0107" } else { "E0101" }, e, "cannot apply `" + op + "` to `" + a + "` and `" + b + "`", if mixed { mix_hint() } else { "" })
+        let x = show(ck, tl)
+        let y = show(ck, tr)
+        let mixed = (x == "i64" and y == "f64") or (x == "f64" and y == "i64")
+        return fail_ex(inout ck, if mixed { "E0107" } else { "E0101" }, e, "cannot apply `" + op + "` to `" + x + "` and `" + y + "`", if mixed { mix_hint() } else { "" })
     }
     let t = resolve(ck, tl)
     if op == "+" {
         if t != Ty.TStr { ensure_numeric(inout ck, t, e, "`+`") }
-        return t
+        if ck.failed { return bad() }
+        return typed(h, t)
     }
     if op == "-" or op == "*" or op == "/" or op == "%" or op == "^" {
         ensure_numeric(inout ck, t, e, "`" + op + "`")
-        return t
+        if ck.failed { return bad() }
+        return typed(h, t)
     }
     if op == "==" or op == "!=" {
         match t {
-            TFn(ps, r) => { return fail_at(inout ck, "E0101", e, "functions cannot be compared", "") },
+            TFn(ps, r) => { return fail_ex(inout ck, "E0101", e, "functions cannot be compared", "") },
             _ => {},
         }
-        return Ty.TBool
+        return typed(h, Ty.TBool)
     }
     match t {
         TInt => {},
@@ -1152,12 +1275,13 @@ fn binary(inout ck: Checker, e: Node) -> Ty {
         TVar(v) => ensure_numeric(inout ck, t, e, "a comparison"),
         _ => { let _ = fail_at(inout ck, "E0101", e, "`" + show(ck, t) + "` values cannot be ordered", "") },
     }
-    Ty.TBool
+    if ck.failed { return bad() }
+    typed(h, Ty.TBool)
 }
 
 // ------------------------------------------------------------------ calls
 
-fn call_expr(inout ck: Checker, e: Node) -> Ty {
+fn call_expr(inout ck: Checker, e: Node) -> Ex {
     let callee = e.kids[0]
     let call_args = e.kids[1].kids
     if callee.kind == "name" {
@@ -1167,8 +1291,9 @@ fn call_expr(inout ck: Checker, e: Node) -> Ty {
             if contains(ck.builtins, n) { return call_builtin(inout ck, n, false, none_node(), call_args, e) }
         }
     }
-    let tc = expr0(inout ck, callee)
-    if ck.failed { return Ty.TUnit }
+    let c = expr0(inout ck, callee)
+    if ck.failed { return bad() }
+    let tc = c.t
     var ps: List[Ty] = []
     var r = Ty.TUnit
     let rc = resolve(ck, tc)
@@ -1181,28 +1306,30 @@ fn call_expr(inout ck: Checker, e: Node) -> Ty {
             for a in call_args { ps.push(fresh(inout ck, 0)) }
             r = fresh(inout ck, 0)
             expect_at(inout ck, tc, Ty.TFn(ps, r), callee)
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
         },
-        _ => { return fail_at(inout ck, "E0102", callee, "`" + show(ck, rc) + "` is not a function", "") },
+        _ => { return fail_ex(inout ck, "E0102", callee, "`" + show(ck, rc) + "` is not a function", "") },
     }
     no_named_args(inout ck, call_args, "a function value")
-    if ck.failed { return Ty.TUnit }
+    if ck.failed { return bad() }
     if len(ps) != len(call_args) {
-        return fail_at(inout ck, "E0103", e, "this function takes " + str(len(ps)) + " argument(s), but " + str(len(call_args)) + " were given", "")
+        return fail_ex(inout ck, "E0103", e, "this function takes " + str(len(ps)) + " argument(s), but " + str(len(call_args)) + " were given", "")
     }
+    var kids = [c.h]
     for i in 0..len(call_args) {
         let a = call_args[i]
         let ae = a.kids[1]
-        if a.text == "inout" { return fail_at(inout ck, "E0115", ae, "only named functions take `inout` arguments", "") }
-        let t = expr1(inout ck, ae, ps[i])
-        expect_at(inout ck, t, ps[i], ae)
-        if ck.failed { return Ty.TUnit }
+        if a.text == "inout" { return fail_ex(inout ck, "E0115", ae, "only named functions take `inout` arguments", "") }
+        let x = expr1(inout ck, ae, ps[i])
+        expect_at(inout ck, x.t, ps[i], ae)
+        if ck.failed { return bad() }
+        kids.push(x.h)
     }
-    r
+    typed(hspan("callv", "", kids, e), r)
 }
 
 // `x.f(a)` is `f(x, a)` (uniform call syntax); `Enum.Variant(a)` builds an enum value.
-fn method_call(inout ck: Checker, e: Node) -> Ty {
+fn method_call(inout ck: Checker, e: Node) -> Ex {
     let recv = e.kids[0]
     let name = e.text
     let call_args = e.kids[1].kids
@@ -1215,7 +1342,7 @@ fn method_call(inout ck: Checker, e: Node) -> Ty {
     }
     if contains(ck.fn_ids, name) { return call_user(inout ck, ck.fn_ids[name], true, recv, call_args, e) }
     if contains(ck.builtins, name) { return call_builtin(inout ck, name, true, recv, call_args, e) }
-    fail_at(inout ck, "E0100", e, "no function named `" + name + "`", "`x.f(y)` calls the function `f(x, y)`")
+    fail_ex(inout ck, "E0100", e, "no function named `" + name + "`", "`x.f(y)` calls the function `f(x, y)`")
 }
 
 fn b3_nargs(inout ck: Checker, what: str, positional: i64, want: i64, e: Node) -> bool {
@@ -1224,103 +1351,126 @@ fn b3_nargs(inout ck: Checker, what: str, positional: i64, want: i64, e: Node) -
     false
 }
 
+fn host(text: str, kids: List[H], e: Node) -> H {
+    hspan("host", text, kids, e)
+}
+
 // `b3.f(...)`: the bridge to the quant-b3 lab (data and the realistic simulator). The axes of
 // its tensors are the built-in ones: month 0, day 1, asset 2, session 3.
-fn b3_call(inout ck: Checker, e: Node) -> Ty {
+fn b3_call(inout ck: Checker, e: Node) -> Ex {
     let method = e.text
     let call_args = e.kids[1].kids
     let what = "`b3." + method + "`"
+    let none: List[H] = []
     if not contains(["evaluate", "simulate", "nefin", "nefin_daily"], method) {
         no_named_args(inout ck, call_args, what)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
     }
     for a in call_args {
-        if a.text == "inout" { return fail_at(inout ck, "E0115", a.kids[1], what + " takes no `inout` arguments", "") }
+        if a.text == "inout" { return fail_ex(inout ck, "E0115", a.kids[1], what + " takes no `inout` arguments", "") }
     }
     var positional = 0
     for a in call_args {
         if a.kids[0].kind == "-" { positional += 1 }
     }
     let fl = Ty.TFloat
-    let none = contains(["monthly_returns", "eligible", "cdi", "ipca", "months", "tickers", "daily_returns", "daily_volume", "daily_price", "daily_dividends", "sessions", "session_dates", "issuers", "classes"], method)
+    let plain = ["monthly_returns", "eligible", "cdi", "ipca", "months", "tickers", "daily_returns", "daily_volume", "daily_price", "daily_dividends", "sessions", "session_dates", "issuers", "classes"]
     let one = contains(["month_index", "evaluate", "simulate", "deflate_trial", "results_sha256", "nefin", "nefin_daily", "holdout"], method)
-    if none or one or method == "record_trial" {
-        if not b3_nargs(inout ck, what, positional, if none { 0 } else if one { 1 } else { 5 }, e) { return Ty.TUnit }
+    if contains(plain, method) or one or method == "record_trial" {
+        if not b3_nargs(inout ck, what, positional, if contains(plain, method) { 0 } else if one { 1 } else { 5 }, e) { return bad() }
     }
-    if method == "monthly_returns" { return Ty.TTensor([0, 2], fl) }
-    if method == "eligible" { return Ty.TTensor([0, 2], Ty.TBool) }
-    if method == "cdi" or method == "ipca" { return Ty.TTensor([0], fl) }
-    if method == "months" { return Ty.TList(Ty.TInt) }
-    if method == "tickers" or method == "issuers" or method == "classes" { return Ty.TList(Ty.TStr) }
-    if method == "daily_returns" or method == "daily_volume" or method == "daily_price" or method == "daily_dividends" { return Ty.TTensor([0, 3, 2], fl) }
-    if method == "sessions" { return Ty.TTensor([0, 3], Ty.TBool) }
-    if method == "session_dates" { return Ty.TTensor([0, 3], fl) }
+    if method == "monthly_returns" { return typed(host(method, none, e), Ty.TTensor([0, 2], fl)) }
+    if method == "eligible" { return typed(host(method, none, e), Ty.TTensor([0, 2], Ty.TBool)) }
+    if method == "cdi" or method == "ipca" { return typed(host(method, none, e), Ty.TTensor([0], fl)) }
+    if method == "months" { return typed(host(method, none, e), Ty.TList(Ty.TInt)) }
+    if method == "tickers" or method == "issuers" or method == "classes" { return typed(host(method, none, e), Ty.TList(Ty.TStr)) }
+    let daily = ["daily_returns", "daily_volume", "daily_price", "daily_dividends"]
+    for i in 0..len(daily) {
+        if method == daily[i] { return typed(host("daily " + str(i), none, e), Ty.TTensor([0, 3, 2], fl)) }
+    }
+    if method == "sessions" { return typed(host(method, none, e), Ty.TTensor([0, 3], Ty.TBool)) }
+    if method == "session_dates" { return typed(host(method, none, e), Ty.TTensor([0, 3], fl)) }
     if method == "month_index" {
         let x = call_args[0].kids[1]
-        let t = expr1(inout ck, x, Ty.TInt)
-        expect_at(inout ck, t, Ty.TInt, x)
-        return Ty.TInt
+        let h = int_expr(inout ck, x)
+        if ck.failed { return bad() }
+        return typed(host(method, [h], e), Ty.TInt)
     }
     if method == "evaluate" or method == "simulate" {
         let first = call_args[0]
-        if first.kids[0].kind != "-" { return fail_at(inout ck, "E0120", first.kids[1], "positional arguments must come before named ones", "") }
+        if first.kids[0].kind != "-" { return fail_ex(inout ck, "E0120", first.kids[1], "positional arguments must come before named ones", "") }
         var named: List[(str, Node, Node)] = []
         for k in 1..len(call_args) {
             let a = call_args[k]
             if a.kids[0].kind == "-" {
-                return fail_at(inout ck, "E0120", a.kids[1], "positional arguments must come before named ones", "e.g. `b3.evaluate(w, cost_bps: 25.0, lag: 1)`")
+                return fail_ex(inout ck, "E0120", a.kids[1], "positional arguments must come before named ones", "e.g. `b3.evaluate(w, cost_bps: 25.0, lag: 1)`")
             }
             named.push((a.kids[0].text, a.kids[0], a.kids[1]))
         }
-        let t = weights_and_options(inout ck, "b3.evaluate", first.kids[1], false, named, e)
-        if ck.failed or method == "evaluate" { return t }
-        if not contains(ck.struct_ids, "Simulation") { return fail_at(inout ck, "E0100", e, "the prelude's `Simulation` struct is missing", "") }
-        return Ty.TStruct(ck.struct_ids["Simulation"])
+        let w = weights_and_options(inout ck, "b3.evaluate", first.kids[1], false, named, e)
+        if ck.failed { return bad() }
+        if method == "evaluate" { return typed(host("evaluate " + str(w.0), w.1, e), Ty.TStruct(w.0)) }
+        if not contains(ck.struct_ids, "Simulation") { return fail_ex(inout ck, "E0100", e, "the prelude's `Simulation` struct is missing", "") }
+        let sim = ck.struct_ids["Simulation"]
+        return typed(host("simulate " + str(sim), w.1, e), Ty.TStruct(sim))
     }
     if method == "record_trial" {
+        var xs: List[H] = []
         for k in 0..len(call_args) {
             let want = if k < 4 { Ty.TStr } else { Ty.TList(fl) }
             let x = call_args[k].kids[1]
-            let t = expr1(inout ck, x, want)
-            expect_at(inout ck, t, want, x)
-            if ck.failed { return Ty.TUnit }
+            let r = expr1(inout ck, x, want)
+            expect_at(inout ck, r.t, want, x)
+            if ck.failed { return bad() }
+            xs.push(r.h)
         }
-        return Ty.TStr
+        return typed(host(method, xs, e), Ty.TStr)
     }
     if method == "deflate_trial" or method == "results_sha256" {
         let want = if method == "deflate_trial" { Ty.TList(fl) } else { Ty.TStr }
         let x = call_args[0].kids[1]
-        let t = expr1(inout ck, x, want)
-        expect_at(inout ck, t, want, x)
-        return want
+        let r = expr1(inout ck, x, want)
+        expect_at(inout ck, r.t, want, x)
+        if ck.failed { return bad() }
+        return typed(host(method, [r.h], e), want)
     }
     if method == "nefin" or method == "nefin_daily" {
         let first = call_args[0]
         let names = ["rm_rf", "smb", "hml", "wml", "iml", "rf"]
-        if not (first.kids[1].kind == "str" and first.kids[0].kind == "-" and contains(names, unhex(first.kids[1].text))) {
-            return fail_at(inout ck, "E0101", first.kids[1], "`b3.nefin` takes the factor's name in quotes", "one of \"rm_rf\", \"smb\", \"hml\", \"wml\", \"iml\", \"rf\" (equally weighted; `vw: true` for value weighted)")
+        var factor = -1
+        if first.kids[1].kind == "str" and first.kids[0].kind == "-" {
+            let fname = unhex(first.kids[1].text)
+            for i in 0..len(names) {
+                if names[i] == fname and factor < 0 { factor = i }
+            }
         }
+        if factor < 0 {
+            return fail_ex(inout ck, "E0101", first.kids[1], "`b3.nefin` takes the factor's name in quotes", "one of \"rm_rf\", \"smb\", \"hml\", \"wml\", \"iml\", \"rf\" (equally weighted; `vw: true` for value weighted)")
+        }
+        var vw = hlit("bool false")
         for k in 1..len(call_args) {
             let a = call_args[k]
             let nm = a.kids[0]
-            if nm.kind == "-" { return fail_at(inout ck, "E0120", a.kids[1], "positional arguments must come before named ones", "") }
-            if nm.text != "vw" { return fail_at(inout ck, "E0120", nm, "`b3.nefin` has no option `" + nm.text + "`", "its only option is `vw: true`") }
-            let t = expr1(inout ck, a.kids[1], Ty.TBool)
-            expect_at(inout ck, t, Ty.TBool, a.kids[1])
-            if ck.failed { return Ty.TUnit }
+            if nm.kind == "-" { return fail_ex(inout ck, "E0120", a.kids[1], "positional arguments must come before named ones", "") }
+            if nm.text != "vw" { return fail_ex(inout ck, "E0120", nm, "`b3.nefin` has no option `" + nm.text + "`", "its only option is `vw: true`") }
+            let r = expr1(inout ck, a.kids[1], Ty.TBool)
+            expect_at(inout ck, r.t, Ty.TBool, a.kids[1])
+            if ck.failed { return bad() }
+            vw = r.h
         }
-        return if method == "nefin" { Ty.TTensor([0], fl) } else { Ty.TTensor([0, 3], fl) }
+        if method == "nefin" { return typed(host("nefin " + str(factor), [vw], e), Ty.TTensor([0], fl)) }
+        return typed(host("nefin_daily " + str(factor), [vw], e), Ty.TTensor([0, 3], fl))
     }
     if method == "holdout" {
         let x = call_args[0].kids[1]
-        if x.kind != "str" { return fail_at(inout ck, "E0101", x, "`b3.holdout` takes the protocol's name in quotes", "") }
+        if x.kind != "str" { return fail_ex(inout ck, "E0101", x, "`b3.holdout` takes the protocol's name in quotes", "") }
         let pname = unhex(x.text)
-        for p in ck.protocols {
-            if p.name == pname { return Ty.THoldout }
+        for i in 0..len(ck.protocols) {
+            if ck.protocols[i].name == pname { return typed(host("holdout " + str(i), none, e), Ty.THoldout) }
         }
-        return fail_at(inout ck, "E0100", x, "no protocol named `" + pname + "`", "declare it first: `protocol \"" + pname + "\" { research: until 201812  holdout: from 201901  rule: \"...\" }`")
+        return fail_ex(inout ck, "E0100", x, "no protocol named `" + pname + "`", "declare it first: `protocol \"" + pname + "\" { research: until 201812  holdout: from 201901  rule: \"...\" }`")
     }
-    fail_at(inout ck, "E0100", e, "the `b3` module has no function `" + method + "`", "available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial, ipca, daily_dividends, results_sha256, deflate_trial")
+    fail_ex(inout ck, "E0100", e, "the `b3` module has no function `" + method + "`", "available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial, ipca, daily_dividends, results_sha256, deflate_trial")
 }
 
 // Replaces type parameters by their instances.
@@ -1349,7 +1499,7 @@ fn subst_params(t: Ty, inst: List[(i64, Ty)]) -> Ty {
     }
 }
 
-fn call_user(inout ck: Checker, fid: i64, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ty {
+fn call_user(inout ck: Checker, fid: i64, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ex {
     var sig = ck.sigs[fid]
     // a generic function: fresh instances of its type parameters at every call
     var inst: List[(i64, Ty)] = []
@@ -1360,26 +1510,27 @@ fn call_user(inout ck: Checker, fid: i64, has_recv: bool, recv: Node, call_args:
         sig.params = params
         sig.ret = subst_params(sig.ret, inst)
     }
-    let t = call_user_sig(inout ck, sig, has_recv, recv, call_args, e)
-    if ck.failed { return Ty.TUnit }
+    let r = call_user_sig(inout ck, fid, sig, has_recv, recv, call_args, e)
+    if ck.failed { return bad() }
     for q in inst {
         if not differentiable(ck, q.1) {
-            return fail_at(inout ck, "E0402", e, "`" + sig.name + "` needs `" + ck.type_param_names[q.0] + "` to be differentiable, found `" + show(ck, q.1) + "`", "differentiable types: f64, f64 tensors, and structs, tuples and lists of them")
+            return fail_ex(inout ck, "E0402", e, "`" + sig.name + "` needs `" + ck.type_param_names[q.0] + "` to be differentiable, found `" + show(ck, q.1) + "`", "differentiable types: f64, f64 tensors, and structs, tuples and lists of them")
         }
     }
-    t
+    r
 }
 
-fn call_user_sig(inout ck: Checker, sig: FnSig, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ty {
+fn call_user_sig(inout ck: Checker, fid: i64, sig: FnSig, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ex {
     no_named_args(inout ck, call_args, "`" + sig.name + "`")
-    if ck.failed { return Ty.TUnit }
+    if ck.failed { return bad() }
     // (the expression, written `inout`, is the receiver)
     var all: List[(Node, bool, bool)] = []
     if has_recv { all.push((recv, false, true)) }
     for a in call_args { all.push((a.kids[1], a.text == "inout", false)) }
     if len(all) != len(sig.params) {
-        return fail_at(inout ck, "E0103", e, "`" + sig.name + "` takes " + str(len(sig.params)) + " argument(s), but " + str(len(all)) + " were given", "")
+        return fail_ex(inout ck, "E0103", e, "`" + sig.name + "` takes " + str(len(sig.params)) + " argument(s), but " + str(len(all)) + " were given", "")
     }
+    var hargs: List[H] = []
     var roots: List[i64] = []
     for i in 0..len(all) {
         let x = all[i]
@@ -1387,22 +1538,24 @@ fn call_user_sig(inout ck: Checker, sig: FnSig, has_recv: bool, recv: Node, call
         let en = x.0
         if p.2 {
             if not x.1 and not x.2 {
-                return fail_at(inout ck, "E0115", en, "parameter `" + p.0 + "` of `" + sig.name + "` is `inout`", "pass it as `inout x`; the function will modify `x`")
+                return fail_ex(inout ck, "E0115", en, "parameter `" + p.0 + "` of `" + sig.name + "` is `inout`", "pass it as `inout x`; the function will modify `x`")
             }
             let pl = place(inout ck, en)
-            if ck.failed { return Ty.TUnit }
-            expect_at(inout ck, pl.0, p.1, en)
-            if ck.failed { return Ty.TUnit }
-            if contains(roots, pl.1) { return fail_at(inout ck, "E0111", en, "the same variable is passed as `inout` twice", "") }
-            roots.push(pl.1)
+            if ck.failed { return bad() }
+            expect_at(inout ck, pl.1, p.1, en)
+            if ck.failed { return bad() }
+            if contains(roots, pl.2) { return fail_ex(inout ck, "E0111", en, "the same variable is passed as `inout` twice", "") }
+            roots.push(pl.2)
+            hargs.push(hk("inout", [pl.0]))
         } else {
-            if x.1 { return fail_at(inout ck, "E0115", en, "parameter `" + p.0 + "` of `" + sig.name + "` is not `inout`", "") }
-            let t = expr1(inout ck, en, p.1)
-            expect_at(inout ck, t, p.1, en)
-            if ck.failed { return Ty.TUnit }
+            if x.1 { return fail_ex(inout ck, "E0115", en, "parameter `" + p.0 + "` of `" + sig.name + "` is not `inout`", "") }
+            let r = expr1(inout ck, en, p.1)
+            expect_at(inout ck, r.t, p.1, en)
+            if ck.failed { return bad() }
+            hargs.push(hval(r.h))
         }
     }
-    sig.ret
+    typed(hn("call", "", fid, -1, hargs, e.lo, e.hi), sig.ret)
 }
 
 // ------------------------------------------------------------------ builtins
@@ -1414,17 +1567,20 @@ fn arity_ok(inout ck: Checker, name: str, n: i64, want: i64, e: Node, positional
 }
 
 // The arguments of a builtin whose parameters have fixed types.
-fn fixed_args(inout ck: Checker, all: List[(Node, bool)], want: List[Ty], e: Node, name: str) {
+fn fixed_args(inout ck: Checker, all: List[(Node, bool)], want: List[Ty], e: Node, name: str) -> List[H] {
+    var hs: List[H] = []
     if len(all) != len(want) {
         let _ = fail_at(inout ck, "E0103", e, "`" + name + "` takes " + str(len(want)) + " argument(s), but " + str(len(all)) + " were given", "")
-        return
+        return hs
     }
     for i in 0..len(want) {
         let x = all[i].0
-        let t = expr1(inout ck, x, want[i])
-        expect_at(inout ck, t, want[i], x)
-        if ck.failed { return }
+        let r = expr1(inout ck, x, want[i])
+        expect_at(inout ck, r.t, want[i], x)
+        if ck.failed { return hs }
+        hs.push(hval(r.h))
     }
+    hs
 }
 
 // The builtins whose parameters have fixed types: (it is one, the parameters, the result).
@@ -1478,7 +1634,11 @@ fn tensor_aware(name: str) -> bool {
         "value_and_grad", "tanh", "sigmoid", "relu", "softplus", "randn", "smooth_max", "smooth_min", "smooth_step", "open_once"], name)
 }
 
-fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ty {
+fn bcall(name: str, args: List[H], e: Node) -> H {
+    hspan("builtin", name, args, e)
+}
+
+fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_args: List[Node], e: Node) -> Ex {
     // the positional arguments (the expression, written `inout`) and the named ones
     var all: List[(Node, bool)] = []
     var named: List[(str, Node, Node)] = []
@@ -1487,13 +1647,13 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
         let nm = a.kids[0]
         let ae = a.kids[1]
         if nm.kind != "-" {
-            if a.text == "inout" { return fail_at(inout ck, "E0115", ae, "named arguments are never `inout`", "") }
+            if a.text == "inout" { return fail_ex(inout ck, "E0115", ae, "named arguments are never `inout`", "") }
             for q in named {
-                if q.0 == nm.text { return fail_at(inout ck, "E0112", nm, "argument `" + nm.text + "` is given twice", "") }
+                if q.0 == nm.text { return fail_ex(inout ck, "E0112", nm, "argument `" + nm.text + "` is given twice", "") }
             }
             named.push((nm.text, nm, ae))
         } else {
-            if len(named) > 0 { return fail_at(inout ck, "E0120", ae, "positional arguments must come before named ones", "") }
+            if len(named) > 0 { return fail_ex(inout ck, "E0120", ae, "positional arguments must come before named ones", "") }
             all.push((ae, a.text == "inout"))
         }
     }
@@ -1502,126 +1662,142 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
         let is_recv = has_recv and i == 0
         let x = all[i]
         if mutating and i == 0 {
-            if not x.1 { return fail_at(inout ck, "E0115", x.0, "`" + name + "` modifies its first argument", "write `x." + name + "(...)` or `" + name + "(inout x, ...)`") }
+            if not x.1 { return fail_ex(inout ck, "E0115", x.0, "`" + name + "` modifies its first argument", "write `x." + name + "(...)` or `" + name + "(inout x, ...)`") }
         } else if x.1 and not is_recv {
-            return fail_at(inout ck, "E0115", x.0, "this argument of `" + name + "` is not `inout`", "")
+            return fail_ex(inout ck, "E0115", x.0, "this argument of `" + name + "` is not `inout`", "")
         }
     }
     if tensor_aware(name) { return tensor_builtin(inout ck, name, all, named, e) }
     if len(named) > 0 {
-        return fail_at(inout ck, "E0120", named[0].1, "`" + name + "` does not take named arguments", "pass `" + named[0].0 + "` by position")
+        return fail_ex(inout ck, "E0120", named[0].1, "`" + name + "` does not take named arguments", "pass `" + named[0].0 + "` by position")
     }
     let n = len(all)
     let fs = fixed_sig(name)
     if fs.0 {
-        fixed_args(inout ck, all, fs.1, e, name)
-        return fs.2
+        let hs = fixed_args(inout ck, all, fs.1, e, name)
+        if ck.failed { return bad() }
+        return typed(bcall(name, hs, e), fs.2)
     }
     if name == "print" {
+        var hs: List[H] = []
         for x in all {
-            let t = expr0(inout ck, x.0)
-            if ck.failed { return Ty.TUnit }
-            default_nums(inout ck, t)
+            let r = expr0(inout ck, x.0)
+            if ck.failed { return bad() }
+            default_nums(inout ck, r.t)
+            hs.push(hval(r.h))
         }
-        return Ty.TUnit
+        return typed(bcall(name, hs, e), Ty.TUnit)
     }
     if name == "len" {
-        if not arity_ok(inout ck, name, n, 1, e, false) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        match resolve(ck, t) {
+        if not arity_ok(inout ck, name, n, 1, e, false) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        match resolve(ck, r.t) {
             TStr => {},
             TList(x) => {},
             TMap(a, b) => {},
             TBytes => {},
-            _ => { let _ = list_elem(inout ck, t, all[0].0) },
+            _ => { let _ = list_elem(inout ck, r.t, all[0].0) },
         }
-        return Ty.TInt
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hval(r.h)], e), Ty.TInt)
     }
     if name == "push" or name == "pop" or name == "sort" or name == "reverse" {
-        if not arity_ok(inout ck, name, n, if name == "push" { 2 } else { 1 }, e, false) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, if name == "push" { 2 } else { 1 }, e, false) { return bad() }
         let pl = place(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        let elem = list_elem(inout ck, pl.0, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        let elem = list_elem(inout ck, pl.1, all[0].0)
+        if ck.failed { return bad() }
+        var hs = [hk("inout", [pl.0])]
         if name == "push" {
-            let te = expr1(inout ck, all[1].0, elem)
-            expect_at(inout ck, te, elem, all[1].0)
-            return Ty.TUnit
+            let r = expr1(inout ck, all[1].0, elem)
+            expect_at(inout ck, r.t, elem, all[1].0)
+            if ck.failed { return bad() }
+            hs.push(hval(r.h))
+            return typed(bcall(name, hs, e), Ty.TUnit)
         }
-        return if name == "pop" { elem } else { Ty.TUnit }
+        return typed(bcall(name, hs, e), if name == "pop" { elem } else { Ty.TUnit })
     }
     if name == "contains" {
-        if not arity_ok(inout ck, name, n, 2, e, false) { return Ty.TUnit }
-        let tl = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, false) { return bad() }
+        let l = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
         // `contains(s, sub)`: a string inside another; `contains(m, k)`: a key of a map
         var elem = Ty.TStr
-        let rl = resolve(ck, tl)
+        let rl = resolve(ck, l.t)
         if rl != Ty.TStr {
             match rl {
                 TMap(kt, vt) => { elem = kt },
-                _ => { elem = list_elem(inout ck, tl, all[0].0) },
+                _ => { elem = list_elem(inout ck, l.t, all[0].0) },
             }
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
         }
-        let tx = expr1(inout ck, all[1].0, elem)
-        expect_at(inout ck, tx, elem, all[1].0)
-        return Ty.TBool
+        let x = expr1(inout ck, all[1].0, elem)
+        expect_at(inout ck, x.t, elem, all[1].0)
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hval(l.h), hval(x.h)], e), Ty.TBool)
     }
     if name == "map" or name == "filter" {
-        if not arity_ok(inout ck, name, n, 2, e, false) { return Ty.TUnit }
-        let tl = expr0(inout ck, all[0].0)
-        let elem = list_elem(inout ck, tl, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, false) { return bad() }
+        let l = expr0(inout ck, all[0].0)
+        let elem = list_elem(inout ck, l.t, all[0].0)
+        if ck.failed { return bad() }
         let out = if name == "map" { fresh(inout ck, 0) } else { Ty.TBool }
         let want = Ty.TFn([elem], out)
-        let tf = expr1(inout ck, all[1].0, want)
-        expect_at(inout ck, tf, want, all[1].0)
-        return if name == "map" { Ty.TList(out) } else { Ty.TList(elem) }
+        let f = expr1(inout ck, all[1].0, want)
+        expect_at(inout ck, f.t, want, all[1].0)
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hval(l.h), hval(f.h)], e), if name == "map" { Ty.TList(out) } else { Ty.TList(elem) })
     }
     if name == "minimum" or name == "maximum" {
-        if not arity_ok(inout ck, name, n, 1, e, false) { return Ty.TUnit }
-        let tl = expr0(inout ck, all[0].0)
-        let elem = list_elem(inout ck, tl, all[0].0)
+        if not arity_ok(inout ck, name, n, 1, e, false) { return bad() }
+        let l = expr0(inout ck, all[0].0)
+        let elem = list_elem(inout ck, l.t, all[0].0)
         ensure_numeric(inout ck, elem, all[0].0, "`" + name + "`")
-        return elem
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hval(l.h)], e), elem)
     }
     if name == "float" or name == "int" {
-        if not arity_ok(inout ck, name, n, 1, e, false) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        ensure_numeric(inout ck, t, all[0].0, "`" + name + "`")
-        if ck.failed { return Ty.TUnit }
-        default_nums(inout ck, t)
-        return if name == "float" { Ty.TFloat } else { Ty.TInt }
+        if not arity_ok(inout ck, name, n, 1, e, false) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        ensure_numeric(inout ck, r.t, all[0].0, "`" + name + "`")
+        if ck.failed { return bad() }
+        default_nums(inout ck, r.t)
+        return typed(bcall(name, [hval(r.h)], e), if name == "float" { Ty.TFloat } else { Ty.TInt })
     }
     if name == "str" {
-        if not arity_ok(inout ck, name, n, 1, e, false) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        default_nums(inout ck, t)
-        return Ty.TStr
+        if not arity_ok(inout ck, name, n, 1, e, false) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        default_nums(inout ck, r.t)
+        return typed(bcall(name, [hval(r.h)], e), Ty.TStr)
     }
     if starts_with(name, "put_") {
-        if not arity_ok(inout ck, name, n, 2, e, false) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, false) { return bad() }
         let pl = place(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        expect_at(inout ck, pl.0, Ty.TBytes, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        expect_at(inout ck, pl.1, Ty.TBytes, all[0].0)
+        if ck.failed { return bad() }
         let want = if name == "put_f64" or name == "put_f32" { Ty.TFloat } else if name == "put_str" { Ty.TStr } else { Ty.TInt }
-        let tx = expr1(inout ck, all[1].0, want)
-        expect_at(inout ck, tx, want, all[1].0)
-        return Ty.TUnit
+        let x = expr1(inout ck, all[1].0, want)
+        expect_at(inout ck, x.t, want, all[1].0)
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hk("inout", [pl.0]), hval(x.h)], e), Ty.TUnit)
     }
     if name == "keys" or name == "values" or name == "items" or name == "get" or name == "remove" {
-        if not arity_ok(inout ck, name, n, if name == "get" { 3 } else if name == "remove" { 2 } else { 1 }, e, false) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, if name == "get" { 3 } else if name == "remove" { 2 } else { 1 }, e, false) { return bad() }
         var tm = Ty.TUnit
+        var hm = h_none()
         if name == "remove" {
-            tm = place(inout ck, all[0].0).0
+            let pl = place(inout ck, all[0].0)
+            tm = pl.1
+            hm = hk("inout", [pl.0])
         } else {
-            tm = expr0(inout ck, all[0].0)
+            let r = expr0(inout ck, all[0].0)
+            tm = r.t
+            hm = hval(r.h)
         }
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         var kt = Ty.TUnit
         var vt = Ty.TUnit
         match resolve(ck, tm) {
@@ -1629,50 +1805,52 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
                 kt = a
                 vt = b
             },
-            _ => { return fail_at(inout ck, "E0101", all[0].0, "`" + name + "` needs a map, found `" + show(ck, tm) + "`", "") },
+            _ => { return fail_ex(inout ck, "E0101", all[0].0, "`" + name + "` needs a map, found `" + show(ck, tm) + "`", "") },
         }
+        var hs = [hm]
         if name == "get" or name == "remove" {
-            let tk = expr1(inout ck, all[1].0, kt)
-            expect_at(inout ck, tk, kt, all[1].0)
-            if ck.failed { return Ty.TUnit }
+            let k = expr1(inout ck, all[1].0, kt)
+            expect_at(inout ck, k.t, kt, all[1].0)
+            if ck.failed { return bad() }
+            hs.push(hval(k.h))
         }
         if name == "get" {
-            let td = expr1(inout ck, all[2].0, vt)
-            expect_at(inout ck, td, vt, all[2].0)
-            return vt
+            let d = expr1(inout ck, all[2].0, vt)
+            expect_at(inout ck, d.t, vt, all[2].0)
+            if ck.failed { return bad() }
+            hs.push(hval(d.h))
+            return typed(bcall(name, hs, e), vt)
         }
-        if name == "keys" { return Ty.TList(kt) }
-        if name == "values" { return Ty.TList(vt) }
-        if name == "items" { return Ty.TList(Ty.TTuple([kt, vt])) }
-        return Ty.TUnit
+        if name == "keys" { return typed(bcall(name, hs, e), Ty.TList(kt)) }
+        if name == "values" { return typed(bcall(name, hs, e), Ty.TList(vt)) }
+        if name == "items" { return typed(bcall(name, hs, e), Ty.TList(Ty.TTuple([kt, vt]))) }
+        return typed(bcall(name, hs, e), Ty.TUnit)
     }
-    if name == "substr" {
-        if not arity_ok(inout ck, name, n, 3, e, false) { return Ty.TUnit }
-        let ts = expr1(inout ck, all[0].0, Ty.TStr)
-        expect_at(inout ck, ts, Ty.TStr, all[0].0)
-        let ta = expr1(inout ck, all[1].0, Ty.TInt)
-        expect_at(inout ck, ta, Ty.TInt, all[1].0)
-        let tc = expr1(inout ck, all[2].0, Ty.TInt)
-        expect_at(inout ck, tc, Ty.TInt, all[2].0)
-        return Ty.TStr
-    }
-    if name == "format_fixed" {
-        if not arity_ok(inout ck, name, n, 2, e, false) { return Ty.TUnit }
-        let tx = expr1(inout ck, all[0].0, Ty.TFloat)
-        expect_at(inout ck, tx, Ty.TFloat, all[0].0)
-        let td = expr1(inout ck, all[1].0, Ty.TInt)
-        expect_at(inout ck, td, Ty.TInt, all[1].0)
-        return Ty.TStr
+    if name == "substr" or name == "format_fixed" {
+        let want = if name == "substr" { [Ty.TStr, Ty.TInt, Ty.TInt] } else { [Ty.TFloat, Ty.TInt] }
+        if not arity_ok(inout ck, name, n, len(want), e, false) { return bad() }
+        var hs: List[H] = []
+        for i in 0..len(want) {
+            let r = expr1(inout ck, all[i].0, want[i])
+            expect_at(inout ck, r.t, want[i], all[i].0)
+            if ck.failed { return bad() }
+            hs.push(hval(r.h))
+        }
+        return typed(bcall(name, hs, e), Ty.TStr)
     }
     if name == "assert" {
-        if n != 1 and n != 2 { return fail_at(inout ck, "E0103", e, "`assert` takes a condition and an optional message", "") }
-        let tc = expr1(inout ck, all[0].0, Ty.TBool)
-        expect_at(inout ck, tc, Ty.TBool, all[0].0)
+        if n != 1 and n != 2 { return fail_ex(inout ck, "E0103", e, "`assert` takes a condition and an optional message", "") }
+        let c = expr1(inout ck, all[0].0, Ty.TBool)
+        expect_at(inout ck, c.t, Ty.TBool, all[0].0)
+        if ck.failed { return bad() }
+        var hs = [hval(c.h)]
         if n == 2 {
-            let tm = expr1(inout ck, all[1].0, Ty.TStr)
-            expect_at(inout ck, tm, Ty.TStr, all[1].0)
+            let m = expr1(inout ck, all[1].0, Ty.TStr)
+            expect_at(inout ck, m.t, Ty.TStr, all[1].0)
+            if ck.failed { return bad() }
+            hs.push(hval(m.h))
         }
-        return Ty.TUnit
+        return typed(bcall(name, hs, e), Ty.TUnit)
     }
     unsupported(inout ck, e, "`" + name + "`")
 }
@@ -1696,15 +1874,10 @@ fn tensor_axes(ck: Checker, t: Ty) -> List[i64] {
     }
 }
 
-fn axes_str(ck: Checker, axes: List[i64]) -> str {
-    var names = []
-    for a in axes { names.push(ck.axes[a].name) }
-    "[" + join(names, ", ") + "]"
-}
-
-fn int_expr(inout ck: Checker, e: Node) {
-    let t = expr1(inout ck, e, Ty.TInt)
-    expect_at(inout ck, t, Ty.TInt, e)
+fn int_expr(inout ck: Checker, e: Node) -> H {
+    let r = expr1(inout ck, e, Ty.TInt)
+    expect_at(inout ck, r.t, Ty.TInt, e)
+    r.h
 }
 
 // An integer written as a constant (`3`, `-1`): (it is one, its value).
@@ -1765,8 +1938,9 @@ fn without(axes: List[i64], a: i64) -> List[i64] {
     out
 }
 
-// Selects `x[month: i, asset: a .. b]`: the axes that remain.
-fn tensor_sels(inout ck: Checker, axes: List[i64], t: Ty, idx: List[Node]) -> List[i64] {
+// Selects `x[month: i, asset: a .. b]`: (the selectors' HIR, the axes that remain).
+fn tensor_sels(inout ck: Checker, axes: List[i64], t: Ty, idx: List[Node]) -> (List[H], List[i64]) {
+    var sels: List[H] = []
     var kept = axes
     var seen: List[i64] = []
     for it in idx {
@@ -1774,29 +1948,31 @@ fn tensor_sels(inout ck: Checker, axes: List[i64], t: Ty, idx: List[Node]) -> Li
         let ie = it.kids[1]
         if an.kind == "-" {
             let _ = fail_at(inout ck, "E0202", ie, "tensor indices must name their axis", "write `x[" + ck.axes[axes[0]].name + ": i]`: axes have names, not positions")
-            return kept
+            return (sels, kept)
         }
         let id = axis_id(inout ck, an.text, an.lo, an.hi)
-        if ck.failed { return kept }
+        if ck.failed { return (sels, kept) }
         if not contains(axes, id) {
             let _ = fail_at(inout ck, "E0201", an, "`" + show(ck, t) + "` has no axis `" + an.text + "`", "")
-            return kept
+            return (sels, kept)
         }
         if contains(seen, id) {
             let _ = fail_at(inout ck, "E0112", an, "axis `" + an.text + "` is indexed twice", "")
-            return kept
+            return (sels, kept)
         }
         if ie.kind == "range" {
-            int_expr(inout ck, ie.kids[0])
-            int_expr(inout ck, ie.kids[1])
+            let a = int_expr(inout ck, ie.kids[0])
+            if ck.failed { return (sels, kept) }
+            let b = int_expr(inout ck, ie.kids[1])
+            sels.push(hn("range", "", id, if ie.text == "..=" { 1 } else { 0 }, [a, b], -1, -1))
         } else {
             kept = without(kept, id)
-            int_expr(inout ck, ie)
+            sels.push(hn("at", "", id, -1, [int_expr(inout ck, ie)], -1, -1))
         }
-        if ck.failed { return kept }
+        if ck.failed { return (sels, kept) }
         seen.push(id)
     }
-    kept
+    (sels, kept)
 }
 
 // The axes of an element-wise combination: the tensor operand with the most axes (the last
@@ -1824,7 +2000,7 @@ fn frame_axes(inout ck: Checker, ops: List[(Ty, Node)], what: str, e: Node) -> L
     parts[bi].1
 }
 
-// `x op y` where at least one side is a tensor.
+// The type of `x op y` where at least one side is a tensor.
 fn tensor_binary(inout ck: Checker, op: str, tl: Ty, tr: Ty, l: Node, r: Node, e: Node) -> Ty {
     let what = if l.kind == "name" and r.kind == "name" { "`" + l.text + " " + op + " " + r.text + "`" } else { "`" + op + "`" }
     let axes = frame_axes(inout ck, [(tl, l), (tr, r)], what, e)
@@ -1882,28 +2058,32 @@ fn check_tensor_store(inout ck: Checker, dst: List[i64], elem: Ty, tv: Ty, op: s
 }
 
 // `max(a, b)` / `min(a, b)`: numbers, or element-wise when a tensor is involved.
-fn max_min2(inout ck: Checker, name: str, all: List[(Node, bool)], e: Node) -> Ty {
-    let ta = expr0(inout ck, all[0].0)
-    if ck.failed { return Ty.TUnit }
+fn max_min2(inout ck: Checker, name: str, all: List[(Node, bool)], e: Node) -> Ex {
+    let a = expr0(inout ck, all[0].0)
+    if ck.failed { return bad() }
+    let ta = a.t
     let ea = elem_of(ck, ta)
-    let tb = expr1(inout ck, all[1].0, ea)
-    if ck.failed { return Ty.TUnit }
+    let b = expr1(inout ck, all[1].0, ea)
+    if ck.failed { return bad() }
+    let tb = b.t
+    let h = bcall(name, [hval(a.h), hval(b.h)], e)
     if is_tensor(ck, ta) or is_tensor(ck, tb) {
         let axes = frame_axes(inout ck, [(ta, all[0].0), (tb, all[1].0)], "`" + name + "`", e)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         let eb = elem_of(ck, tb)
         if not unify(inout ck, ea, eb) or resolve(ck, ea) != Ty.TFloat {
-            return fail_at(inout ck, "E0101", e, "`" + name + "` needs `f64` values, found `" + show(ck, ta) + "` and `" + show(ck, tb) + "`", "")
+            return fail_ex(inout ck, "E0101", e, "`" + name + "` needs `f64` values, found `" + show(ck, ta) + "` and `" + show(ck, tb) + "`", "")
         }
-        return mk_tensor(axes, Ty.TFloat)
+        return typed(h, mk_tensor(axes, Ty.TFloat))
     }
     expect_at(inout ck, tb, ta, all[1].0)
     ensure_numeric(inout ck, ta, e, "`" + name + "`")
-    ta
+    if ck.failed { return bad() }
+    typed(h, ta)
 }
 
 // The builtins that understand tensors.
-fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
     if name == "observed" { return observed_ty(inout ck, all, named, e) }
     if name == "grad" or name == "value_and_grad" { return grad_ty(inout ck, name, all, named, e) }
     if name == "randn" { return randn_ty(inout ck, all, named, e) }
@@ -1914,8 +2094,8 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
     let takes_sizes = name == "zeros" or name == "ones" or name == "full"
     if not takes_sizes {
         for q in named {
-            if not takes_over { return fail_at(inout ck, "E0120", q.1, "`" + name + "` does not take named arguments", "pass `" + q.0 + "` by position") }
-            if q.0 != "over" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "the axis is given as `over: axis`") }
+            if not takes_over { return fail_ex(inout ck, "E0120", q.1, "`" + name + "` does not take named arguments", "pass `" + q.0 + "` by position") }
+            if q.0 != "over" { return fail_ex(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "the axis is given as `over: axis`") }
         }
     }
     // `over: axis`: (given, the axis, where it is written)
@@ -1925,202 +2105,229 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
     if takes_over and len(named) > 0 {
         over_at = named[0].2
         over = axis_of_expr(inout ck, over_at)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         has_over = true
     }
     let fty = Ty.TFloat
     if contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count"], name) {
         if (name == "max" or name == "min") and n == 2 {
-            if has_over { return fail_at(inout ck, "E0103", over_at, "`" + name + "` of two values takes no `over:`", "") }
+            if has_over { return fail_ex(inout ck, "E0103", over_at, "`" + name + "` of two values takes no `over:`", "") }
             return max_min2(inout ck, name, all, e)
         }
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 1, e, true) { return bad() }
         let e0 = all[0].0
-        let t = expr0(inout ck, e0)
-        if ck.failed { return Ty.TUnit }
+        let r = expr0(inout ck, e0)
+        if ck.failed { return bad() }
+        let t = r.t
         if is_tensor(ck, t) {
             if name == "count" {
                 need_elem(inout ck, name, t, Ty.TBool, e0)
             } else if name != "sum" and name != "mean" {
                 need_elem(inout ck, name, t, fty, e0)
             }
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
             let axes = tensor_axes(ck, t)
+            let h = bcall(name, [hval(r.h), ax_lit(over)], e)
             if has_over {
                 has_axis(inout ck, axes, over, t, over_at)
-                if ck.failed { return Ty.TUnit }
-                return mk_tensor(without(axes, over), fty)
+                if ck.failed { return bad() }
+                return typed(h, mk_tensor(without(axes, over), fty))
             }
-            return fty
+            return typed(h, fty)
         }
-        if has_over { return fail_at(inout ck, "E0201", over_at, "`over:` needs a tensor, found `" + show(ck, t) + "`", "") }
+        if has_over { return fail_ex(inout ck, "E0201", over_at, "`over:` needs a tensor, found `" + show(ck, t) + "`", "") }
         if name == "sum" {
             let elem = list_elem(inout ck, t, e0)
             ensure_numeric(inout ck, elem, e0, "`sum`")
-            if ck.failed { return Ty.TUnit }
-            let zt = fresh(inout ck, 1)
-            let _ = unify(inout ck, zt, elem)
-            return elem
+            if ck.failed { return bad() }
+            let zid = fresh_id(inout ck, 1)
+            let _ = unify(inout ck, Ty.TVar(zid), elem)
+            return typed(bcall(name, [hval(r.h), hval(hn("intlit", "0", zid, -1, [], -1, -1))], e), elem)
         }
         if name == "mean" or name == "prod" {
             let elem = list_elem(inout ck, t, e0)
             expect_at(inout ck, elem, fty, e0)
-            return fty
+            if ck.failed { return bad() }
+            return typed(bcall(name, [hval(r.h)], e), fty)
         }
         if name == "max" or name == "min" {
             let big = if name == "max" { "largest" } else { "smallest" }
             let list_fn = if name == "max" { "maximum" } else { "minimum" }
-            return fail_at(inout ck, "E0103", e, "`" + name + "` takes two values or a tensor", "for the " + big + " element of a list use `" + list_fn + "(xs)`")
+            return fail_ex(inout ck, "E0103", e, "`" + name + "` takes two values or a tensor", "for the " + big + " element of a list use `" + list_fn + "(xs)`")
         }
-        return fail_at(inout ck, "E0101", e0, "`" + name + "` needs a tensor, found `" + show(ck, t) + "`", "")
+        return fail_ex(inout ck, "E0101", e0, "`" + name + "` needs a tensor, found `" + show(ck, t) + "`", "")
     }
     if contains(["abs", "sqrt", "exp", "ln", "floor", "ceil", "round", "tanh", "sigmoid", "relu", "softplus"], name) {
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 1, e, true) { return bad() }
         let x = all[0].0
-        let t = if name == "abs" { expr0(inout ck, x) } else { expr1(inout ck, x, fty) }
-        if ck.failed { return Ty.TUnit }
+        let r = if name == "abs" { expr0(inout ck, x) } else { expr1(inout ck, x, fty) }
+        if ck.failed { return bad() }
+        let t = r.t
+        let h = bcall(name, [hval(r.h)], e)
         if is_tensor(ck, t) {
             need_elem(inout ck, name, t, fty, x)
-            return t
+            if ck.failed { return bad() }
+            return typed(h, t)
         }
         // field by field on the tangent space (rounding is not differentiable)
-        if tangent(ck, t) and not (name == "floor" or name == "ceil" or name == "round") { return t }
+        if tangent(ck, t) and not (name == "floor" or name == "ceil" or name == "round") { return typed(h, t) }
         if name == "abs" {
             ensure_numeric(inout ck, t, x, "`abs`")
-            return t
+            if ck.failed { return bad() }
+            return typed(h, t)
         }
         expect_at(inout ck, t, fty, x)
-        return fty
+        if ck.failed { return bad() }
+        return typed(h, fty)
     }
     if name == "is_nan" {
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
-        let t = expr1(inout ck, all[0].0, fty)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 1, e, true) { return bad() }
+        let r = expr1(inout ck, all[0].0, fty)
+        if ck.failed { return bad() }
+        let t = r.t
+        let h = bcall(name, [hval(r.h)], e)
         if is_tensor(ck, t) {
             need_elem(inout ck, name, t, fty, all[0].0)
-            return mk_tensor(tensor_axes(ck, t), Ty.TBool)
+            if ck.failed { return bad() }
+            return typed(h, mk_tensor(tensor_axes(ck, t), Ty.TBool))
         }
         expect_at(inout ck, t, fty, all[0].0)
-        return Ty.TBool
+        if ck.failed { return bad() }
+        return typed(h, Ty.TBool)
     }
     if name == "fill_nan" {
-        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
-        let t = expr1(inout ck, all[0].0, fty)
-        if ck.failed { return Ty.TUnit }
-        let tv = expr1(inout ck, all[1].0, fty)
-        expect_at(inout ck, tv, fty, all[1].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, true) { return bad() }
+        let r = expr1(inout ck, all[0].0, fty)
+        if ck.failed { return bad() }
+        let t = r.t
+        let v = expr1(inout ck, all[1].0, fty)
+        expect_at(inout ck, v.t, fty, all[1].0)
+        if ck.failed { return bad() }
+        let h = bcall(name, [hval(r.h), hval(v.h)], e)
         if is_tensor(ck, t) {
             need_elem(inout ck, name, t, fty, all[0].0)
-            return t
+            if ck.failed { return bad() }
+            return typed(h, t)
         }
         expect_at(inout ck, t, fty, all[0].0)
-        return fty
+        if ck.failed { return bad() }
+        return typed(h, fty)
     }
     if name == "where" {
-        if not arity_ok(inout ck, name, n, 3, e, true) { return Ty.TUnit }
-        let tc = expr1(inout ck, all[0].0, Ty.TBool)
-        if ck.failed { return Ty.TUnit }
-        let ta = expr0(inout ck, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        let ea = elem_of(ck, ta)
-        let tb = expr1(inout ck, all[2].0, ea)
-        if ck.failed { return Ty.TUnit }
-        let ec = elem_of(ck, tc)
+        if not arity_ok(inout ck, name, n, 3, e, true) { return bad() }
+        let c = expr1(inout ck, all[0].0, Ty.TBool)
+        if ck.failed { return bad() }
+        let a = expr0(inout ck, all[1].0)
+        if ck.failed { return bad() }
+        let ea = elem_of(ck, a.t)
+        let b = expr1(inout ck, all[2].0, ea)
+        if ck.failed { return bad() }
+        let ec = elem_of(ck, c.t)
         expect_at(inout ck, ec, Ty.TBool, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        let eb = elem_of(ck, tb)
+        if ck.failed { return bad() }
+        let eb = elem_of(ck, b.t)
         if not unify(inout ck, ea, eb) {
-            return fail_at(inout ck, "E0101", all[2].0, "`where` branches have different types: `" + show(ck, ta) + "` and `" + show(ck, tb) + "`", "")
+            return fail_ex(inout ck, "E0101", all[2].0, "`where` branches have different types: `" + show(ck, a.t) + "` and `" + show(ck, b.t) + "`", "")
         }
-        if not (is_tensor(ck, tc) or is_tensor(ck, ta) or is_tensor(ck, tb)) { return resolve(ck, ea) }
-        let axes = frame_axes(inout ck, [(tc, all[0].0), (ta, all[1].0), (tb, all[2].0)], "`where`", e)
-        if ck.failed { return Ty.TUnit }
+        let h = bcall(name, [hval(c.h), hval(a.h), hval(b.h)], e)
+        if not (is_tensor(ck, c.t) or is_tensor(ck, a.t) or is_tensor(ck, b.t)) { return typed(h, resolve(ck, ea)) }
+        let axes = frame_axes(inout ck, [(c.t, all[0].0), (a.t, all[1].0), (b.t, all[2].0)], "`where`", e)
+        if ck.failed { return bad() }
         let elem = tensor_elem(inout ck, ea, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        return mk_tensor(axes, elem)
+        if ck.failed { return bad() }
+        return typed(h, mk_tensor(axes, elem))
     }
     if name == "size" {
-        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
         let ax = axis_of_expr(inout ck, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        if not is_tensor(ck, t) {
-            return fail_at(inout ck, "E0101", all[0].0, "`size` needs a tensor, found `" + show(ck, t) + "`", "the length of a list is `len(xs)`")
+        if ck.failed { return bad() }
+        if not is_tensor(ck, r.t) {
+            return fail_ex(inout ck, "E0101", all[0].0, "`size` needs a tensor, found `" + show(ck, r.t) + "`", "the length of a list is `len(xs)`")
         }
-        has_axis(inout ck, tensor_axes(ck, t), ax, t, all[1].0)
-        return Ty.TInt
+        has_axis(inout ck, tensor_axes(ck, r.t), ax, r.t, all[1].0)
+        if ck.failed { return bad() }
+        return typed(bcall(name, [hval(r.h), ax_lit(ax)], e), Ty.TInt)
     }
     if takes_sizes {
-        if not arity_ok(inout ck, name, n, if name == "full" { 1 } else { 0 }, e, true) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, if name == "full" { 1 } else { 0 }, e, true) { return bad() }
         if len(named) == 0 {
             let v = if name == "full" { "0.0, " } else { "" }
-            return fail_at(inout ck, "E0103", e, "`" + name + "` needs the size of each axis", "e.g. `" + name + "(" + v + "month: 12, asset: 3)`")
+            return fail_ex(inout ck, "E0103", e, "`" + name + "` needs the size of each axis", "e.g. `" + name + "(" + v + "month: 12, asset: 3)`")
         }
+        var hs: List[H] = []
         var elem = fty
         if name == "full" {
-            let tv = expr1(inout ck, all[0].0, fty)
-            if ck.failed { return Ty.TUnit }
-            elem = tensor_elem(inout ck, tv, all[0].0)
-            if ck.failed { return Ty.TUnit }
+            let v = expr1(inout ck, all[0].0, fty)
+            if ck.failed { return bad() }
+            elem = tensor_elem(inout ck, v.t, all[0].0)
+            if ck.failed { return bad() }
+            hs.push(hval(v.h))
         }
         var axes: List[i64] = []
         for q in named {
             let id = axis_id(inout ck, q.0, q.1.lo, q.1.hi)
-            if ck.failed { return Ty.TUnit }
-            if contains(axes, id) { return fail_at(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
-            int_expr(inout ck, q.2)
-            if ck.failed { return Ty.TUnit }
+            if ck.failed { return bad() }
+            if contains(axes, id) { return fail_ex(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
+            let hsz = int_expr(inout ck, q.2)
+            if ck.failed { return bad() }
+            hs.push(ax_lit(id))
+            hs.push(hval(hsz))
             axes.push(id)
         }
-        return mk_tensor(axes, elem)
+        return typed(bcall(name, hs, e), mk_tensor(axes, elem))
     }
     if name == "zeros_like" or name == "full_like" {
-        if not arity_ok(inout ck, name, n, if name == "full_like" { 2 } else { 1 }, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, if name == "full_like" { 2 } else { 1 }, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        let t = r.t
         // the zero of the tangent space (optimizer state, accumulated gradients)
-        if name == "zeros_like" and (tangent(ck, t) or resolve(ck, t) == fty) { return t }
-        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        if name == "zeros_like" and (tangent(ck, t) or resolve(ck, t) == fty) { return typed(bcall(name, [hval(r.h)], e), t) }
+        if not need_tensor(inout ck, name, t, all[0].0) { return bad() }
+        var hs = [hval(r.h)]
         var elem = fty
         if name == "full_like" {
-            let tv = expr1(inout ck, all[1].0, fty)
-            if ck.failed { return Ty.TUnit }
-            elem = tensor_elem(inout ck, tv, all[1].0)
-            if ck.failed { return Ty.TUnit }
+            let v = expr1(inout ck, all[1].0, fty)
+            if ck.failed { return bad() }
+            elem = tensor_elem(inout ck, v.t, all[1].0)
+            if ck.failed { return bad() }
+            hs.push(hval(v.h))
         }
-        return mk_tensor(tensor_axes(ck, t), elem)
+        return typed(bcall(name, hs, e), mk_tensor(tensor_axes(ck, t), elem))
     }
     if name == "tensor" {
-        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
         let ax = axis_of_expr(inout ck, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        let x = list_elem(inout ck, t, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        let x = list_elem(inout ck, r.t, all[0].0)
+        if ck.failed { return bad() }
         let elem = tensor_elem(inout ck, x, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        return Ty.TTensor([ax], elem)
+        if ck.failed { return bad() }
+        let is_bool = hval(hlit(if elem == Ty.TBool { "bool true" } else { "bool false" }))
+        return typed(bcall(name, [hval(r.h), ax_lit(ax), is_bool], e), Ty.TTensor([ax], elem))
     }
     if name == "to_list" {
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
-        if len(tensor_axes(ck, t)) != 1 {
-            return fail_at(inout ck, "E0201", all[0].0, "`to_list` needs a tensor with one axis, found `" + show(ck, t) + "`", "select or reduce the other axes first")
+        if not arity_ok(inout ck, name, n, 1, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        if not need_tensor(inout ck, name, r.t, all[0].0) { return bad() }
+        if len(tensor_axes(ck, r.t)) != 1 {
+            return fail_ex(inout ck, "E0201", all[0].0, "`to_list` needs a tensor with one axis, found `" + show(ck, r.t) + "`", "select or reduce the other axes first")
         }
-        return Ty.TList(elem_of(ck, t))
+        return typed(bcall(name, [hval(r.h)], e), Ty.TList(elem_of(ck, r.t)))
     }
     if name == "nan_quantile" or name == "rank" or name == "top_k" or name == "bottom_k" {
-        if not arity_ok(inout ck, name, n, if name == "rank" { 1 } else { 2 }, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, if name == "rank" { 1 } else { 2 }, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        let t = r.t
+        if not need_tensor(inout ck, name, t, all[0].0) { return bad() }
         need_elem(inout ck, name, t, fty, all[0].0)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         let axes = tensor_axes(ck, t)
         // the axis: `over:`, or the only axis of a one-axis tensor
         var ax = -1
@@ -2130,49 +2337,57 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         } else if len(axes) == 1 {
             ax = axes[0]
         } else {
-            return fail_at(inout ck, "E0201", e, "`" + name + "` over which axis of `" + show(ck, t) + "`?", "name it with `over: " + ck.axes[axes[0]].name + "`")
+            return fail_ex(inout ck, "E0201", e, "`" + name + "` over which axis of `" + show(ck, t) + "`?", "name it with `over: " + ck.axes[axes[0]].name + "`")
         }
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
         if name == "nan_quantile" {
-            let tq = expr1(inout ck, all[1].0, fty)
-            expect_at(inout ck, tq, fty, all[1].0)
-            return mk_tensor(without(axes, ax), fty)
+            let q = expr1(inout ck, all[1].0, fty)
+            expect_at(inout ck, q.t, fty, all[1].0)
+            if ck.failed { return bad() }
+            return typed(bcall(name, [hval(r.h), hval(q.h), ax_lit(ax)], e), mk_tensor(without(axes, ax), fty))
         }
-        if name != "rank" { int_expr(inout ck, all[1].0) }
-        return mk_tensor(axes, if name == "rank" { fty } else { Ty.TBool })
+        var hs = [hval(r.h)]
+        if name != "rank" {
+            let k = int_expr(inout ck, all[1].0)
+            if ck.failed { return bad() }
+            hs.push(hval(k))
+        }
+        hs.push(ax_lit(ax))
+        return typed(bcall(name, hs, e), mk_tensor(axes, if name == "rank" { fty } else { Ty.TBool }))
     }
     if name == "merge_days" {
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
-        let t = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 1, e, true) { return bad() }
+        let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        let t = r.t
+        if not need_tensor(inout ck, name, t, all[0].0) { return bad() }
         let axes = tensor_axes(ck, t)
         if not contains(axes, 0) or not contains(axes, 3) {
-            return fail_at(inout ck, "E0201", all[0].0, "`merge_days` needs a tensor with the axes `month` and `session`, found `" + show(ck, t) + "`", "the daily data of `b3` comes as `Tensor[month, session, asset]`")
+            return fail_ex(inout ck, "E0201", all[0].0, "`merge_days` needs a tensor with the axes `month` and `session`, found `" + show(ck, t) + "`", "the daily data of `b3` comes as `Tensor[month, session, asset]`")
         }
         var out = [1]
         for a in axes {
             if a != 0 and a != 3 { out.push(a) }
         }
-        return mk_tensor(out, elem_of(ck, t))
+        return typed(bcall(name, [hval(r.h)], e), mk_tensor(out, elem_of(ck, t)))
     }
     if name == "contract" {
-        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
-        let tx = expr0(inout ck, all[0].0)
-        if ck.failed { return Ty.TUnit }
-        let ty2 = expr0(inout ck, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        if not need_tensor(inout ck, name, tx, all[0].0) { return Ty.TUnit }
-        if not need_tensor(inout ck, name, ty2, all[1].0) { return Ty.TUnit }
-        need_elem(inout ck, name, tx, fty, all[0].0)
-        need_elem(inout ck, name, ty2, fty, all[1].0)
-        if ck.failed { return Ty.TUnit }
-        if not has_over { return fail_at(inout ck, "E0103", e, "`contract` needs the axis to sum over", "e.g. `contract(x, w, over: feature)`") }
-        let ax_x = tensor_axes(ck, tx)
-        let ax_y = tensor_axes(ck, ty2)
-        has_axis(inout ck, ax_x, over, tx, over_at)
-        has_axis(inout ck, ax_y, over, ty2, over_at)
-        if ck.failed { return Ty.TUnit }
+        if not arity_ok(inout ck, name, n, 2, e, true) { return bad() }
+        let x = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        let y = expr0(inout ck, all[1].0)
+        if ck.failed { return bad() }
+        if not need_tensor(inout ck, name, x.t, all[0].0) { return bad() }
+        if not need_tensor(inout ck, name, y.t, all[1].0) { return bad() }
+        need_elem(inout ck, name, x.t, fty, all[0].0)
+        need_elem(inout ck, name, y.t, fty, all[1].0)
+        if ck.failed { return bad() }
+        if not has_over { return fail_ex(inout ck, "E0103", e, "`contract` needs the axis to sum over", "e.g. `contract(x, w, over: feature)`") }
+        let ax_x = tensor_axes(ck, x.t)
+        let ax_y = tensor_axes(ck, y.t)
+        has_axis(inout ck, ax_x, over, x.t, over_at)
+        has_axis(inout ck, ax_y, over, y.t, over_at)
+        if ck.failed { return bad() }
         var out: List[i64] = []
         for a in ax_x {
             if a != over and not contains(out, a) { out.push(a) }
@@ -2180,7 +2395,7 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         for a in ax_y {
             if a != over and not contains(out, a) { out.push(a) }
         }
-        return mk_tensor(out, fty)
+        return typed(bcall(name, [hval(x.h), hval(y.h), ax_lit(over)], e), mk_tensor(out, fty))
     }
     unsupported(inout ck, e, "`" + name + "`")
 }
@@ -2188,173 +2403,212 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
 // `grad(f)` / `grad(f, wrt: k)` / `value_and_grad(f)`: f returns f64 (a loss); the result is a
 // function with the same parameters returning the gradient (and the value) with respect to
 // parameter k (from 1).
-fn grad_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+fn grad_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
     if len(all) != 1 {
-        return fail_at(inout ck, "E0103", e, "`" + name + "` takes the function to differentiate", "e.g. `" + name + "(loss)` or `" + name + "(loss, wrt: 2)`")
+        return fail_ex(inout ck, "E0103", e, "`" + name + "` takes the function to differentiate", "e.g. `" + name + "(loss)` or `" + name + "(loss, wrt: 2)`")
     }
     var wrt = 1
     for q in named {
-        if q.0 != "wrt" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "choose the parameter with `wrt: k` (from 1)") }
+        if q.0 != "wrt" { return fail_ex(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "choose the parameter with `wrt: k` (from 1)") }
         let c = int_const(inout ck, q.2, "wrt:")
-        if not c.0 { return Ty.TUnit }
+        if not c.0 { return bad() }
         wrt = c.1
     }
     let f = all[0].0
-    let tf = expr0(inout ck, f)
-    if ck.failed { return Ty.TUnit }
+    let rf = expr0(inout ck, f)
+    if ck.failed { return bad() }
     var ps: List[Ty] = []
     var r = Ty.TUnit
-    let rf = resolve(ck, tf)
-    match rf {
+    let tf = resolve(ck, rf.t)
+    match tf {
         TFn(a, b) => {
             ps = a
             r = b
         },
-        _ => { return fail_at(inout ck, "E0101", f, "`" + name + "` needs a function, found `" + show(ck, rf) + "`", "pass a named function, or a lambda with typed parameters: `|x: f64| x * x`") },
+        _ => { return fail_ex(inout ck, "E0101", f, "`" + name + "` needs a function, found `" + show(ck, tf) + "`", "pass a named function, or a lambda with typed parameters: `|x: f64| x * x`") },
     }
     if not unify(inout ck, r, Ty.TFloat) {
-        return fail_at(inout ck, "E0401", f, "`" + name + "` needs a function that returns `f64` (a loss), found one returning `" + show(ck, r) + "`", "")
+        return fail_ex(inout ck, "E0401", f, "`" + name + "` needs a function that returns `f64` (a loss), found one returning `" + show(ck, r) + "`", "")
     }
     let k = wrt - 1
     if k < 0 or k >= len(ps) {
-        return fail_at(inout ck, "E0103", e, "`wrt: " + str(wrt) + "`, but the function has " + str(len(ps)) + " parameter(s)", "")
+        return fail_ex(inout ck, "E0103", e, "`wrt: " + str(wrt) + "`, but the function has " + str(len(ps)) + " parameter(s)", "")
     }
     let p = ps[k]
     if not differentiable(ck, p) {
-        return fail_at(inout ck, "E0402", f, "cannot differentiate with respect to a `" + show(ck, p) + "`", "differentiable types: f64, f64 tensors, and structs, tuples and lists of them")
+        return fail_ex(inout ck, "E0402", f, "cannot differentiate with respect to a `" + show(ck, p) + "`", "differentiable types: f64, f64 tensors, and structs, tuples and lists of them")
     }
-    let ret = if name == "value_and_grad" { Ty.TTuple([Ty.TFloat, p]) } else { p }
-    Ty.TFn(ps, ret)
+    let vg = name == "value_and_grad"
+    let ret = if vg { Ty.TTuple([Ty.TFloat, p]) } else { p }
+    let args = [hval(rf.h), hval(hlit("i64 " + str(k))), hval(hlit(if vg { "bool true" } else { "bool false" }))]
+    typed(bcall(name, args, e), Ty.TFn(ps, ret))
 }
 
 // `randn(seed: k, month: 12, asset: 3)`: reproducible normal samples.
-fn randn_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+fn randn_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
     let example = "e.g. `randn(seed: 7, feature: 4, hidden: 16)`"
-    if len(all) > 0 { return fail_at(inout ck, "E0103", e, "`randn` takes only named arguments", example) }
+    if len(all) > 0 { return fail_ex(inout ck, "E0103", e, "`randn` takes only named arguments", example) }
     var seed = -1
     for i in 0..len(named) {
         if named[i].0 == "seed" and seed < 0 { seed = i }
     }
-    if seed < 0 { return fail_at(inout ck, "E0103", e, "`randn` needs `seed:` (results must be reproducible)", example) }
-    int_expr(inout ck, named[seed].2)
-    if ck.failed { return Ty.TUnit }
+    if seed < 0 { return fail_ex(inout ck, "E0103", e, "`randn` needs `seed:` (results must be reproducible)", example) }
+    let hseed = int_expr(inout ck, named[seed].2)
+    if ck.failed { return bad() }
+    var hs = [hval(hseed)]
     var axes: List[i64] = []
     for q in named {
         if q.0 == "seed" { continue }
         let id = axis_id(inout ck, q.0, q.1.lo, q.1.hi)
-        if ck.failed { return Ty.TUnit }
-        if contains(axes, id) { return fail_at(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
-        int_expr(inout ck, q.2)
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        if contains(axes, id) { return fail_ex(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
+        hs.push(ax_lit(id))
+        let hsz = int_expr(inout ck, q.2)
+        if ck.failed { return bad() }
+        hs.push(hval(hsz))
         axes.push(id)
     }
-    if len(axes) == 0 { return fail_at(inout ck, "E0103", e, "`randn` needs the size of each axis", example) }
-    mk_tensor(axes, Ty.TFloat)
+    if len(axes) == 0 { return fail_ex(inout ck, "E0103", e, "`randn` needs the size of each axis", example) }
+    typed(bcall("randn", hs, e), mk_tensor(axes, Ty.TFloat))
 }
 
 // `smooth_max(x, y, scale: s)`, `smooth_min`, `smooth_step(x, scale: s)`: the exact rule outside
 // `grad`, a smooth relaxation (softplus, sigmoid) inside it.
-fn smooth_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+fn smooth_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
     let want = if name == "smooth_step" { 1 } else { 2 }
-    if len(all) != want { return fail_at(inout ck, "E0103", e, "`" + name + "` takes " + str(want) + " value(s) and `scale:`", "") }
+    if len(all) != want { return fail_ex(inout ck, "E0103", e, "`" + name + "` takes " + str(want) + " value(s) and `scale:`", "") }
     var scale = -1
     for i in 0..len(named) {
         if named[i].0 == "scale" and scale < 0 { scale = i }
     }
     if scale < 0 {
-        return fail_at(inout ck, "E0103", e, "`" + name + "` needs `scale:`: how wide the smooth transition is", "e.g. `" + name + "(x" + (if want == 2 { ", 0.0" } else { "" }) + ", scale: 100.0)`")
+        return fail_ex(inout ck, "E0103", e, "`" + name + "` needs `scale:`: how wide the smooth transition is", "e.g. `" + name + "(x" + (if want == 2 { ", 0.0" } else { "" }) + ", scale: 100.0)`")
     }
     for q in named {
-        if q.0 != "scale" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "") }
+        if q.0 != "scale" { return fail_ex(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "") }
     }
     let fty = Ty.TFloat
     var t = Ty.TUnit
+    var hs: List[H] = []
     if name == "smooth_step" {
-        t = expr1(inout ck, all[0].0, fty)
-        if ck.failed { return Ty.TUnit }
+        let r = expr1(inout ck, all[0].0, fty)
+        if ck.failed { return bad() }
+        t = r.t
         if is_tensor(ck, t) { need_elem(inout ck, name, t, fty, all[0].0) } else { expect_at(inout ck, t, fty, all[0].0) }
-        if ck.failed { return Ty.TUnit }
+        if ck.failed { return bad() }
+        hs.push(hval(r.h))
     } else {
-        t = max_min2(inout ck, if name == "smooth_max" { "max" } else { "min" }, all, e)
-        if ck.failed { return Ty.TUnit }
-        if resolve(ck, t) == Ty.TInt { return fail_at(inout ck, "E0101", e, "`" + name + "` needs `f64` values", "") }
+        let r = max_min2(inout ck, if name == "smooth_max" { "max" } else { "min" }, all, e)
+        if ck.failed { return bad() }
+        t = r.t
+        if resolve(ck, t) == Ty.TInt { return fail_ex(inout ck, "E0101", e, "`" + name + "` needs `f64` values", "") }
+        hs = r.h.kids
     }
     let se = named[scale].2
-    let ts = expr1(inout ck, se, fty)
-    expect_at(inout ck, ts, fty, se)
-    t
+    let s = expr1(inout ck, se, fty)
+    expect_at(inout ck, s.t, fty, se)
+    if ck.failed { return bad() }
+    hs.push(hval(s.h))
+    typed(bcall(name, hs, e), t)
 }
 
 // `observed(x)` / `observed(x, lag: k)`: row `t` of `x` (over its temporal axis) becomes known at
 // the end of `t + k`.
-fn observed_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
-    if len(all) != 1 { return fail_at(inout ck, "E0103", e, "`observed` takes 1 positional argument, but " + str(len(all)) + " were given", "") }
+fn observed_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
+    if len(all) != 1 { return fail_ex(inout ck, "E0103", e, "`observed` takes 1 positional argument, but " + str(len(all)) + " were given", "") }
+    var lag = 0
     for q in named {
-        if q.0 != "lag" { return fail_at(inout ck, "E0120", q.1, "`observed` has no argument `" + q.0 + "`", "the delay is given as `lag: k`") }
+        if q.0 != "lag" { return fail_ex(inout ck, "E0120", q.1, "`observed` has no argument `" + q.0 + "`", "the delay is given as `lag: k`") }
         let x = q.2
-        if not (x.kind == "int" or (x.kind == "neg" and x.kids[0].kind == "int")) {
-            return fail_at(inout ck, "E0101", x, "`lag:` must be an integer constant", "e.g. `observed(x, lag: 1)`")
+        if x.kind == "int" {
+            lag = parse_int(x.text)
+        } else if x.kind == "neg" and x.kids[0].kind == "int" {
+            lag = -parse_int(x.kids[0].text)
+        } else {
+            return fail_ex(inout ck, "E0101", x, "`lag:` must be an integer constant", "e.g. `observed(x, lag: 1)`")
         }
     }
-    let t = expr0(inout ck, all[0].0)
-    if ck.failed { return Ty.TUnit }
-    if not need_tensor(inout ck, "observed", t, all[0].0) { return Ty.TUnit }
-    var temporal = 0
+    let r = expr0(inout ck, all[0].0)
+    if ck.failed { return bad() }
+    let t = r.t
+    if not need_tensor(inout ck, "observed", t, all[0].0) { return bad() }
+    var temporal: List[i64] = []
     for a in tensor_axes(ck, t) {
-        if ck.axes[a].temporal != "" { temporal += 1 }
+        if ck.axes[a].temporal != "" { temporal.push(a) }
     }
-    if temporal != 1 {
-        return fail_at(inout ck, "E0201", all[0].0, "`observed` needs a tensor with exactly one temporal axis, found `" + show(ck, t) + "`", "temporal axes are `month`, `day` and those declared with `axis name: temporal(...)`")
+    if len(temporal) != 1 {
+        return fail_ex(inout ck, "E0201", all[0].0, "`observed` needs a tensor with exactly one temporal axis, found `" + show(ck, t) + "`", "temporal axes are `month`, `day` and those declared with `axis name: temporal(...)`")
     }
-    t
+    typed(bcall("observed", [hval(r.h), hval(hlit("i64 " + str(temporal[0]))), hval(hlit("i64 " + str(lag)))], e), t)
 }
 
 // The weights (`Tensor[month, asset; f64]`, or a function without parameters returning them
-// when `as_fn`) and the options of an evaluation: the `Evaluation` struct.
-fn weights_and_options(inout ck: Checker, what: str, w: Node, as_fn: bool, named: List[(str, Node, Node)], e: Node) -> Ty {
-    if not contains(ck.struct_ids, "Evaluation") { return fail_at(inout ck, "E0100", e, "the prelude's `Evaluation` struct is missing", "") }
+// when `as_fn`) and the options of an evaluation: (the `Evaluation` struct, the HIR of the
+// weights and of the 7 options, defaults filled in).
+fn weights_and_options(inout ck: Checker, what: str, w: Node, as_fn: bool, named: List[(str, Node, Node)], e: Node) -> (i64, List[H]) {
+    var xs: List[H] = []
+    if not contains(ck.struct_ids, "Evaluation") {
+        let _ = fail_at(inout ck, "E0100", e, "the prelude's `Evaluation` struct is missing", "")
+        return (-1, xs)
+    }
     let sid = ck.struct_ids["Evaluation"]
     let tensor = Ty.TTensor([0, 2], Ty.TFloat)
     let want = if as_fn { Ty.TFn([], tensor) } else { tensor }
-    let tw = expr1(inout ck, w, want)
-    if ck.failed { return Ty.TUnit }
+    let rw = expr1(inout ck, w, want)
+    if ck.failed { return (-1, xs) }
+    let tw = rw.t
     if not unify(inout ck, tw, want) {
         // a tensor with other axes is an axis error; anything else (including a tensor where
         // the function is expected) is a type error
         let code = if not as_fn and is_tensor(ck, tw) { "E0201" } else { "E0101" }
         let needs = if as_fn { "a function without parameters that returns the weights" } else { "weights" }
         let hint = if as_fn { "the holdout's data exists only while that function runs: e.g. `open_once(h, || weights())`" } else { "one weight per month and asset; a month whose weights are all zero stays in cash (CDI)" }
-        return fail_at(inout ck, code, w, "`" + what + "` needs " + needs + " of type `" + show(ck, want) + "`, found `" + show(ck, tw) + "`", hint)
+        let _ = fail_at(inout ck, code, w, "`" + what + "` needs " + needs + " of type `" + show(ck, want) + "`, found `" + show(ck, tw) + "`", hint)
+        return (-1, xs)
     }
     let opts = ["cost_bps", "lag", "capital", "real_costs", "tax", "cap_adv", "trial"]
     let otys = [Ty.TFloat, Ty.TInt, Ty.TFloat, Ty.TBool, Ty.TBool, Ty.TFloat, Ty.TBool]
+    var vals = [hlit("f64 25.0"), hlit("i64 1"), hlit("f64 1000000.0"), hlit("bool false"), hlit("bool false"), hlit("f64 0.0"), hlit("bool true")]
     var seen: List[str] = []
     for q in named {
         var k = -1
         for i in 0..len(opts) {
             if opts[i] == q.0 { k = i }
         }
-        if k < 0 { return fail_at(inout ck, "E0120", q.1, "`" + what + "` has no option `" + q.0 + "`", "its options are cost_bps, lag, capital, real_costs, tax, cap_adv and trial") }
-        if contains(seen, q.0) { return fail_at(inout ck, "E0112", q.1, "option `" + q.0 + "` is given twice", "") }
+        if k < 0 {
+            let _ = fail_at(inout ck, "E0120", q.1, "`" + what + "` has no option `" + q.0 + "`", "its options are cost_bps, lag, capital, real_costs, tax, cap_adv and trial")
+            return (-1, xs)
+        }
+        if contains(seen, q.0) {
+            let _ = fail_at(inout ck, "E0112", q.1, "option `" + q.0 + "` is given twice", "")
+            return (-1, xs)
+        }
         seen.push(q.0)
-        let t = expr1(inout ck, q.2, otys[k])
-        expect_at(inout ck, t, otys[k], q.2)
-        if ck.failed { return Ty.TUnit }
+        let r = expr1(inout ck, q.2, otys[k])
+        expect_at(inout ck, r.t, otys[k], q.2)
+        if ck.failed { return (-1, xs) }
+        vals[k] = r.h
     }
-    Ty.TStruct(sid)
+    xs.push(rw.h)
+    for v in vals { xs.push(v) }
+    (sid, xs)
 }
 
 // `open_once(h, || weights(), ...)`: evaluates on the holdout of `h`'s protocol, once (M5).
-fn open_once_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+fn open_once_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
     if len(all) != 2 {
-        return fail_at(inout ck, "E0103", e, "`open_once` takes the holdout and the function that computes the weights", "e.g. `open_once(h, || weights(), lag: 1)`")
+        return fail_ex(inout ck, "E0103", e, "`open_once` takes the holdout and the function that computes the weights", "e.g. `open_once(h, || weights(), lag: 1)`")
     }
-    let th = expr0(inout ck, all[0].0)
-    if ck.failed { return Ty.TUnit }
-    if resolve(ck, th) != Ty.THoldout {
-        return fail_at(inout ck, "E0101", all[0].0, "`open_once` needs a holdout, found `" + show(ck, th) + "`", "get it from a protocol: `let h = b3.holdout(\"name\")`")
+    let rh = expr0(inout ck, all[0].0)
+    if ck.failed { return bad() }
+    if resolve(ck, rh.t) != Ty.THoldout {
+        return fail_ex(inout ck, "E0101", all[0].0, "`open_once` needs a holdout, found `" + show(ck, rh.t) + "`", "get it from a protocol: `let h = b3.holdout(\"name\")`")
     }
-    weights_and_options(inout ck, "open_once", all[1].0, true, named, e)
+    let w = weights_and_options(inout ck, "open_once", all[1].0, true, named, e)
+    if ck.failed { return bad() }
+    var xs = [rh.h]
+    for x in w.1 { xs.push(x) }
+    typed(host("open_once " + str(w.0), xs, e), Ty.TStruct(w.0))
 }
 
 // ------------------------------------------------------------------ functions and files
@@ -2375,17 +2629,20 @@ fn check_fn(inout ck: Checker, id: i64, f: Node) {
     }
     // `@ end(e)`: an integer expression over the parameters (checked by the temporal pass)
     let at = f.kids[3]
+    var hat = h_none()
     if at.kind != "-" {
         let ke = at.kids[0]
-        let tk = expr1(inout ck, ke, Ty.TInt)
-        expect_at(inout ck, tk, Ty.TInt, ke)
+        let k = expr1(inout ck, ke, Ty.TInt)
+        expect_at(inout ck, k.t, Ty.TInt, ke)
+        hat = hn("at", "", -1, -1, [k.h], at.lo, at.hi)
     }
     let body = f.kids[4]
-    var t = Ty.TUnit
-    if not ck.failed { t = ck_block(inout ck, body, true, sig.ret) }
+    var r = bad()
+    if not ck.failed { r = ck_block(inout ck, body, true, sig.ret) }
     let done = ck.ctxs.pop()
     ck.generic_scope = [:]
     if ck.failed { return }
+    let t = r.t
     if not unify(inout ck, t, sig.ret) {
         let tail = body.kids[1]
         let at2 = if tail.kind != "-" { tail } else { body }
@@ -2402,6 +2659,8 @@ fn check_fn(inout ck: Checker, id: i64, f: Node) {
     }
     ck.bodies[id] = done.slot_tys
     ck.has_body[id] = true
+    ck.fn_hir[id] = r.h
+    ck.fn_at[id] = hat
 }
 
 fn top_name(inout ck: Checker, p: Node) {
@@ -2412,9 +2671,30 @@ fn top_name(inout ck: Checker, p: Node) {
     }
 }
 
+// An integer literal becomes `i64` or `f64` now that inference is done.
+fn fin_lit(ck: Checker, digits: str, tv: i64) -> str {
+    match resolve(ck, Ty.TVar(tv)) {
+        TFloat => "f64 " + str(float(parse_int(digits))),
+        _ => "i64 " + digits,
+    }
+}
+
+fn fin(ck: Checker, h: H) -> H {
+    if h.kind == "intlit" { return hlit(fin_lit(ck, h.text, h.n)) }
+    if h.kind == "pintlit" { return hn("plit", fin_lit(ck, h.text, h.n), -1, -1, [], -1, -1) }
+    if len(h.kids) == 0 { return h }
+    var kids: List[H] = []
+    for k in h.kids { kids.push(fin(ck, k)) }
+    var out = h
+    out.kids = kids
+    out
+}
+
 // Checks a batch of items (a file without its imports): the declarations, every function's
-// body, then the top-level statements.
+// body, then the top-level statements; then the integer literals take their final types.
 fn check_items(inout ck: Checker, items: List[Node]) {
+    let first_fn = len(ck.sigs)
+    let first_lambda = len(ck.lambdas)
     declare_items(inout ck, items)
     if ck.failed { return }
     for it in items {
@@ -2428,13 +2708,27 @@ fn check_items(inout ck: Checker, items: List[Node]) {
     }
     ck.ctxs.push(ck.main)
     ck.main = ctx_new(0, Ty.TUnit)
+    var tops: List[H] = []
     for it in items {
         if not contains(["fn", "struct", "enum", "axis", "protocol"], it.kind) {
-            let _ = ck_stmt(inout ck, it)
+            let r = ck_stmt(inout ck, it)
             if ck.failed { break }
+            tops.push(r.h)
         }
     }
     ck.main = ck.ctxs.pop()
+    if ck.failed { return }
+    for i in first_fn..len(ck.sigs) {
+        ck.fn_hir[i] = fin(ck, ck.fn_hir[i])
+        ck.fn_at[i] = fin(ck, ck.fn_at[i])
+    }
+    for i in first_lambda..len(ck.lambdas) {
+        let b = fin(ck, ck.lambdas[i].body)
+        ck.lambdas[i].body = b
+    }
+    var done: List[H] = []
+    for t in tops { done.push(fin(ck, t)) }
+    ck.tops = done
 }
 
 // Checks a file: its imports first (each file once), then its own items.

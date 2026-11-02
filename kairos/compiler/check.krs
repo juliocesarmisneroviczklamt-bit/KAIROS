@@ -89,6 +89,64 @@ fn new_slot(inout c: Ctx, t: Ty) -> i64 {
     slot
 }
 
+// A node of the HIR (src/hir.rs), as uniform data: what the checker hands to the temporal
+// analysis and to the interpreter. `text` holds names, operators and literal values (`i64 3`,
+// `f64 2.5`, `bool true`, `str s(61)`, `unit`); `n` and `m` slots, ids and indices (-1: none);
+// `lo`/`hi` the span (-1: none). The kinds are those `kairos hir` prints (src/hir.rs).
+struct H {
+    kind: str,
+    text: str,
+    n: i64,
+    m: i64,
+    kids: List[H],
+    lo: i64,
+    hi: i64,
+}
+
+fn hn(kind: str, text: str, n: i64, m: i64, kids: List[H], lo: i64, hi: i64) -> H {
+    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi }
+}
+
+fn hk(kind: str, kids: List[H]) -> H {
+    hn(kind, "", -1, -1, kids, -1, -1)
+}
+
+// an absent part
+fn h_none() -> H {
+    hk("-", [])
+}
+
+fn render_h(h: H, inout out: List[str]) {
+    if h.kind == "-" {
+        out.push("-")
+        return
+    }
+    out.push("(" + h.kind)
+    if h.text != "" { out.push(" " + h.text) }
+    if h.n >= 0 { out.push(" #" + str(h.n)) }
+    if h.m >= 0 { out.push(" #" + str(h.m)) }
+    for k in h.kids {
+        out.push(" ")
+        render_h(k, inout out)
+    }
+    if h.lo >= 0 { out.push(" " + str(h.lo) + ":" + str(h.hi)) }
+    out.push(")")
+}
+
+fn h_line(h: H) -> str {
+    var out = []
+    render_h(h, inout out)
+    join(out, "")
+}
+
+// A lambda's body: the slots its captures land in, its parameters and slots.
+struct LambdaH {
+    caps: List[i64],
+    n_params: i64,
+    n_slots: i64,
+    body: H,
+}
+
 struct Checker {
     structs: List[StructDef],
     struct_ids: Map[str, i64],
@@ -115,6 +173,12 @@ struct Checker {
     top_names: Map[str, bool],
     bodies: List[List[Ty]],
     has_body: List[bool],
+    // the HIR: each function's body and `@ end(...)` (or "-"), the lambdas, the top-level
+    // statements of the last batch
+    fn_hir: List[H],
+    fn_at: List[H],
+    lambdas: List[LambdaH],
+    tops: List[H],
     // the first error
     failed: bool,
     code: str,
@@ -135,6 +199,7 @@ fn new_checker(std_dir: str) -> Checker {
         sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
         builtins: b, imported: [:], std_dir: std_dir,
         ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [],
+        fn_hir: [], fn_at: [], lambdas: [], tops: [],
         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
     }
 }
@@ -614,6 +679,8 @@ fn declare_items(inout ck: Checker, items: List[Node]) {
         ck.sigs.push(FnSig { name: it.text, params: params, ret: ret, type_params: tps })
         ck.bodies.push([])
         ck.has_body.push(false)
+        ck.fn_hir.push(h_none())
+        ck.fn_at.push(h_none())
     }
 }
 
@@ -678,7 +745,7 @@ fn resolve_import(inout ck: Checker, from: str, path: str, lo: i64, hi: i64) -> 
 // ------------------------------------------------------------------ the description
 
 fn mark(ck: Checker) -> List[i64] {
-    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs), len(ck.main.slot_tys)]
+    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs), len(ck.main.slot_tys), len(ck.lambdas)]
 }
 
 fn hex_of(s: str) -> str {
@@ -738,5 +805,26 @@ fn declarations_since(ck: Checker, m: List[i64]) -> List[str] {
         for i in m[5]..len(ck.main.slot_tys) { ts.push(show(ck, ck.main.slot_tys[i])) }
         out.push("main(" + join(ts, ", ") + ")")
     }
+    out
+}
+
+// The HIR of each function and lambda checked since a mark, and of the last batch's top-level
+// statements, as `kairos hir` prints it.
+fn hir_since(ck: Checker, m: List[i64]) -> List[str] {
+    var out = []
+    for i in m[4]..len(ck.sigs) {
+        if not ck.has_body[i] { continue }
+        let name = ck.sigs[i].name
+        out.push("hir fn " + name + " " + str(len(ck.bodies[i])) + ": " + h_line(ck.fn_hir[i]))
+        let at = ck.fn_at[i]
+        if at.kind != "-" { out.push("hir at " + name + " " + str(at.lo) + ":" + str(at.hi) + ": " + h_line(at.kids[0])) }
+    }
+    for i in m[6]..len(ck.lambdas) {
+        let l = ck.lambdas[i]
+        var caps = []
+        for c in l.caps { caps.push(str(c)) }
+        out.push("hir lambda " + str(i) + " " + str(l.n_params) + " " + str(l.n_slots) + " [" + join(caps, " ") + "]: " + h_line(l.body))
+    }
+    for t in ck.tops { out.push("hir top: " + h_line(t)) }
     out
 }

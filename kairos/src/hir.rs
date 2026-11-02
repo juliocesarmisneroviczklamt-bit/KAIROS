@@ -468,3 +468,215 @@ pub struct LambdaBody {
     pub n_slots: u32,
     pub body: HExpr,
 }
+
+// ---------------------------------------------------------------------- the canonical text (M12)
+
+/// A HIR node as uniform data, `(kind text #n #m children... lo:hi)`: the text M12 compares with
+/// the HIR the checker written in Kairós (kairos/compiler/body.krs) builds. `n` and `m` are
+/// slots, ids and indices (-1: none); the kinds follow `HExpr`, `HPlace`, `HArg`, `HSel`, `HPat`.
+pub struct HNode {
+    kind: &'static str,
+    text: String,
+    n: i64,
+    m: i64,
+    kids: Vec<HNode>,
+    span: Option<Span>,
+}
+
+fn hn(kind: &'static str, text: String, n: i64, m: i64, kids: Vec<HNode>, span: Option<Span>) -> HNode {
+    HNode { kind, text, n, m, kids, span }
+}
+
+fn hk(kind: &'static str, kids: Vec<HNode>) -> HNode {
+    hn(kind, String::new(), -1, -1, kids, None)
+}
+
+fn none_node() -> HNode {
+    hk("-", Vec::new())
+}
+
+impl HNode {
+    pub fn render(&self, out: &mut String) {
+        if self.kind == "-" {
+            out.push('-');
+            return;
+        }
+        out.push('(');
+        out.push_str(self.kind);
+        if !self.text.is_empty() {
+            out.push(' ');
+            out.push_str(&self.text);
+        }
+        for x in [self.n, self.m] {
+            if x >= 0 {
+                out.push_str(&format!(" #{x}"));
+            }
+        }
+        for k in &self.kids {
+            out.push(' ');
+            k.render(out);
+        }
+        if let Some(sp) = self.span {
+            out.push_str(&format!(" {}:{}", sp.lo, sp.hi));
+        }
+        out.push(')');
+    }
+}
+
+pub fn value_text(v: &Value) -> String {
+    match v {
+        Value::Unit => "unit".into(),
+        Value::Int(i) => format!("i64 {i}"),
+        Value::Float(x) => format!("f64 {x:?}"),
+        Value::Bool(b) => format!("bool {b}"),
+        Value::Str(s) => format!("str {}", crate::ast::hex_text(s)),
+        _ => "?".into(),
+    }
+}
+
+fn host_text(f: &HostFn) -> String {
+    match f {
+        HostFn::MonthlyReturns => "monthly_returns".into(),
+        HostFn::Eligible => "eligible".into(),
+        HostFn::Cdi => "cdi".into(),
+        HostFn::Ipca => "ipca".into(),
+        HostFn::Months => "months".into(),
+        HostFn::Tickers => "tickers".into(),
+        HostFn::MonthIndex => "month_index".into(),
+        HostFn::Evaluate { result } => format!("evaluate {result}"),
+        HostFn::Holdout { proto } => format!("holdout {proto}"),
+        HostFn::OpenOnce { result } => format!("open_once {result}"),
+        HostFn::Daily { field } => format!("daily {field}"),
+        HostFn::ResultsSha256 => "results_sha256".into(),
+        HostFn::DeflateTrial => "deflate_trial".into(),
+        HostFn::Sessions => "sessions".into(),
+        HostFn::Issuers => "issuers".into(),
+        HostFn::Classes => "classes".into(),
+        HostFn::Nefin { factor } => format!("nefin {factor}"),
+        HostFn::NefinDaily { factor } => format!("nefin_daily {factor}"),
+        HostFn::Simulate { result } => format!("simulate {result}"),
+        HostFn::RecordTrial => "record_trial".into(),
+        HostFn::SessionDates => "session_dates".into(),
+    }
+}
+
+fn exprs(xs: &[HExpr]) -> Vec<HNode> {
+    xs.iter().map(expr_node).collect()
+}
+
+fn place_node(p: &HPlace) -> HNode {
+    match p {
+        HPlace::Local(s) => hn("plocal", String::new(), *s as i64, -1, vec![], None),
+        HPlace::Field(q, i) => hn("pfield", String::new(), *i as i64, -1, vec![place_node(q)], None),
+        HPlace::Index(q, e, sp) => hn("pindex", String::new(), -1, -1, vec![place_node(q), expr_node(e)], Some(*sp)),
+    }
+}
+
+fn arg_node(a: &HArg) -> HNode {
+    match a {
+        HArg::Val(e) => hk("val", vec![expr_node(e)]),
+        HArg::InOut(p) => hk("inout", vec![place_node(p)]),
+    }
+}
+
+fn sel_node(ax: u32, s: &HSel) -> HNode {
+    match s {
+        HSel::At(e) => hn("at", String::new(), ax as i64, -1, vec![expr_node(e)], None),
+        HSel::Range(a, b, incl) => hn("range", String::new(), ax as i64, *incl as i64, vec![expr_node(a), expr_node(b)], None),
+    }
+}
+
+pub fn pat_node(p: &HPat) -> HNode {
+    match p {
+        HPat::Wild => hk("pwild", vec![]),
+        HPat::Bind(s) => hn("pbind", String::new(), *s as i64, -1, vec![], None),
+        HPat::Lit(v) => hn("plit", value_text(v), -1, -1, vec![], None),
+        HPat::IntLit(v, var) => hn("pintlit", v.to_string(), *var as i64, -1, vec![], None),
+        HPat::Tuple(ps) => hk("ptuple", ps.iter().map(pat_node).collect()),
+        HPat::Variant(e, v, ps) => hn("pvariant", String::new(), *e as i64, *v as i64, ps.iter().map(pat_node).collect(), None),
+    }
+}
+
+fn opt_node(e: &Option<Box<HExpr>>) -> HNode {
+    e.as_ref().map(|x| expr_node(x)).unwrap_or_else(none_node)
+}
+
+fn op_text(op: &Option<BinOp>) -> String {
+    op.map_or("=".to_string(), |o| crate::ast::op_str(o).to_string())
+}
+
+pub fn expr_node(e: &HExpr) -> HNode {
+    let none = String::new;
+    match e {
+        HExpr::Lit(v) => hn("lit", value_text(v), -1, -1, vec![], None),
+        HExpr::IntLit(v, var) => hn("intlit", v.to_string(), *var as i64, -1, vec![], None),
+        HExpr::Local(s) => hn("local", none(), *s as i64, -1, vec![], None),
+        HExpr::FnRef(f) => hn("fnref", none(), *f as i64, -1, vec![], None),
+        HExpr::List(xs) => hk("list", exprs(xs)),
+        HExpr::MapLit(xs) => hk("map", exprs(xs)),
+        HExpr::Tuple(xs) => hk("tuple", exprs(xs)),
+        HExpr::Struct(sid, xs) => hn("struct", none(), *sid as i64, -1, exprs(xs), None),
+        HExpr::Variant(eid, vi, xs) => hn("variant", none(), *eid as i64, *vi as i64, exprs(xs), None),
+        HExpr::Field(x, i) => hn("field", none(), *i as i64, -1, vec![expr_node(x)], None),
+        HExpr::Index(a, b, sp) => hn("index", none(), -1, -1, vec![expr_node(a), expr_node(b)], Some(*sp)),
+        HExpr::TensorIndex(x, sels, sp) => {
+            let mut kids = vec![expr_node(x)];
+            kids.extend(sels.iter().map(|(a, s)| sel_node(*a, s)));
+            hn("tindex", none(), -1, -1, kids, Some(*sp))
+        }
+        HExpr::TensorAssign(p, sels, op, v, sp) => {
+            let mut kids = vec![place_node(p)];
+            kids.extend(sels.iter().map(|(a, s)| sel_node(*a, s)));
+            kids.push(expr_node(v));
+            hn("tassign", op_text(op), -1, -1, kids, Some(*sp))
+        }
+        HExpr::Host(f, xs, sp) => hn("host", host_text(f), -1, -1, exprs(xs), Some(*sp)),
+        HExpr::CallFn(f, args, sp) => hn("call", none(), *f as i64, -1, args.iter().map(arg_node).collect(), Some(*sp)),
+        HExpr::CallValue(c, xs, sp) => {
+            let mut kids = vec![expr_node(c)];
+            kids.extend(exprs(xs));
+            hn("callv", none(), -1, -1, kids, Some(*sp))
+        }
+        HExpr::CallBuiltin(b, args, sp) => hn("builtin", builtin_name(*b).to_string(), -1, -1, args.iter().map(arg_node).collect(), Some(*sp)),
+        HExpr::Unary(op, x, sp) => {
+            let t = if *op == UnOp::Neg { "-" } else { "not" };
+            hn("unary", t.to_string(), -1, -1, vec![expr_node(x)], Some(*sp))
+        }
+        HExpr::Binary(op, a, b, sp) => hn("binary", crate::ast::op_str(*op).to_string(), -1, -1, vec![expr_node(a), expr_node(b)], Some(*sp)),
+        HExpr::And(a, b) => hk("and", vec![expr_node(a), expr_node(b)]),
+        HExpr::Or(a, b) => hk("or", vec![expr_node(a), expr_node(b)]),
+        HExpr::Assign(p, v) => hk("assign", vec![place_node(p), expr_node(v)]),
+        HExpr::OpAssign(p, op, v, sp) => hn("opassign", crate::ast::op_str(*op).to_string(), -1, -1, vec![place_node(p), expr_node(v)], Some(*sp)),
+        HExpr::If(c, t, els) => hk("if", vec![expr_node(c), expr_node(t), opt_node(els)]),
+        HExpr::While(c, b) => hk("while", vec![expr_node(c), expr_node(b)]),
+        HExpr::ForRange { slot, name, lo, hi, inclusive, body } => {
+            hn("forrange", name.clone(), *slot as i64, *inclusive as i64, vec![expr_node(lo), expr_node(hi), expr_node(body)], None)
+        }
+        HExpr::ForList { pat, list, body } => hk("forlist", vec![pat_node(pat), expr_node(list), expr_node(body)]),
+        HExpr::Match(s, arms, sp) => {
+            let mut kids = vec![expr_node(s)];
+            kids.extend(arms.iter().map(|(p, b)| hk("arm", vec![pat_node(p), expr_node(b)])));
+            hn("match", none(), -1, -1, kids, Some(*sp))
+        }
+        HExpr::Block(stmts, tail) => {
+            let mut kids = exprs(stmts);
+            kids.push(opt_node(tail));
+            hk("block", kids)
+        }
+        HExpr::Let(p, init) => hk("let", vec![pat_node(p), expr_node(init)]),
+        HExpr::Lambda(def, outer) => {
+            let caps: Vec<String> = outer.iter().map(|s| s.to_string()).collect();
+            hn("lambda", caps.join(" "), *def as i64, -1, vec![], None)
+        }
+        HExpr::Return(x) => hk("return", vec![opt_node(x)]),
+        HExpr::Break => hk("break", vec![]),
+        HExpr::Continue => hk("continue", vec![]),
+    }
+}
+
+/// The canonical text of an expression.
+pub fn render(e: &HExpr) -> String {
+    let mut out = String::new();
+    expr_node(e).render(&mut out);
+    out
+}

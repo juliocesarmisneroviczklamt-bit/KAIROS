@@ -19,5 +19,6 @@ for k in 1..len(args()) {
         if ck.hint != "" { print("hint " + ck.hint) }
     } else {
         for l in declarations_since(ck, m) { print(l) }
+        for l in hir_since(ck, m) { print(l) }
     }
 }

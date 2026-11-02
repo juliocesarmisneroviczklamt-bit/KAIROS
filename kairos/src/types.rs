@@ -267,11 +267,11 @@ impl Checker {
     /// variables) counts: the declarations `since` a previous mark, as text (`kairos types`; M12
     /// compares the checker written in Kairós with this), then the type of every variable of
     /// each new function (its parameters first) and of the new top-level variables.
-    pub fn mark(&self) -> [usize; 6] {
-        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len(), self.main.slot_tys.len()]
+    pub fn mark(&self) -> [usize; 7] {
+        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len(), self.main.slot_tys.len(), self.lambdas.len()]
     }
 
-    pub fn declarations_since(&self, m: [usize; 6]) -> String {
+    pub fn declarations_since(&self, m: [usize; 7]) -> String {
         let mut out = String::new();
         for s in &self.structs[m[0]..] {
             let fs: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect();
@@ -324,6 +324,30 @@ impl Checker {
         if self.main.slot_tys.len() > m[5] {
             out.push_str(&format!("main({})
 ", shown(&self.main.slot_tys[m[5]..])));
+        }
+        out
+    }
+
+    /// The HIR of each function and lambda checked `since` a mark, and of the top-level
+    /// statements given, as canonical text (`kairos hir`; M12 compares the HIR the checker
+    /// written in Kairós builds with this).
+    pub fn hir_since(&self, m: [usize; 7], tops: &[TopStmt]) -> String {
+        use crate::hir::render;
+        let mut out = String::new();
+        for (f, b) in self.sigs[m[4]..].iter().zip(&self.bodies[m[4]..]) {
+            if let Some(b) = b {
+                out.push_str(&format!("hir fn {} {}: {}\n", f.name, b.n_slots, render(&b.body)));
+                if let Some((k, sp)) = &b.known_at {
+                    out.push_str(&format!("hir at {} {}:{}: {}\n", f.name, sp.lo, sp.hi, render(k)));
+                }
+            }
+        }
+        for (i, l) in self.lambdas.iter().enumerate().skip(m[6]) {
+            let caps: Vec<String> = l.capture_slots.iter().map(|s| s.to_string()).collect();
+            out.push_str(&format!("hir lambda {i} {} {} [{}]: {}\n", l.n_params, l.n_slots, caps.join(" "), render(&l.body)));
+        }
+        for t in tops {
+            out.push_str(&format!("hir top: {}\n", render(&t.hir)));
         }
         out
     }

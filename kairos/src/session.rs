@@ -97,9 +97,24 @@ impl Session {
     /// Checks a file and describes what it declared (its imports included), as `kairos types`
     /// prints it; or its first error.
     pub fn types_dump(&mut self, name: &str, src: &str) -> String {
+        self.dump(name, src, false)
+    }
+
+    /// The same, then the HIR of every function, lambda and top-level statement (`kairos hir`).
+    pub fn hir_dump(&mut self, name: &str, src: &str) -> String {
+        self.dump(name, src, true)
+    }
+
+    fn dump(&mut self, name: &str, src: &str, hir: bool) -> String {
         let m = self.checker.mark();
         match self.front(name, src, false) {
-            Ok(_) => self.checker.declarations_since(m),
+            Ok(tops) => {
+                let mut out = self.checker.declarations_since(m);
+                if hir {
+                    out.push_str(&self.checker.hir_since(m, &tops));
+                }
+                out
+            }
             Err(d) => {
                 let mut out = format!("error {} {} {} {}
 ", d.code, d.span.lo, d.span.hi, d.msg);

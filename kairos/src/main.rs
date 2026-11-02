@@ -50,12 +50,13 @@ fn real_main(args: Vec<String>) -> i32 {
         Some("tokens") => tokens_cmd(args.get(2)),
         // the syntax tree, one item per line (to compare with the parser written in Kairós)
         Some("ast") => ast_cmd(args.get(2)),
-        // what a file declares, as the checker sees it (to compare with the checker in Kairós)
-        Some("types") => match args.get(2).map(|p| (p, std::fs::read_to_string(p))) {
+        // what a file declares, as the checker sees it (to compare with the checker in Kairós);
+        // `hir` adds the tree the checker builds for the rest of the compiler
+        Some(cmd @ ("types" | "hir")) => match args.get(2).map(|p| (p, std::fs::read_to_string(p))) {
             Some((p, Ok(src))) => {
                 let mut s = Session::new(Box::new(std::io::stdout()));
                 s.mark_imported(p);
-                print!("{}", s.types_dump(p, &src));
+                print!("{}", if cmd == "hir" { s.hir_dump(p, &src) } else { s.types_dump(p, &src) });
                 0
             }
             _ => {
