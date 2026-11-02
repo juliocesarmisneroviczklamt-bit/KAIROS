@@ -1,0 +1,16 @@
+// Formatted strings (M20): f"..." with {expr} (its text) and {expr:.N} (a number with N decimals);
+// {{ and }} are braces. The lexer writes them as the concatenation, so they are text everywhere.
+let name = "PETR4"
+let ym = 202403
+let equity = 382.34567e9
+print(f"{name} {ym}: equity {equity / 1e9:.1} bi")      // out: PETR4 202403: equity 382.3 bi
+print(f"plain")                                          // out: plain
+print(f"{{braces}} {ym % 100}")                          // out: {braces} 3
+let xs = [1, 2, 3]
+let pair = (1, "x")
+print(f"{xs} {pair} {true} {-2.5:.2} {1:.0}")           // out: [1, 2, 3] (1, "x") true -2.50 1
+fn pct(x: f64) -> str { f"{100.0 * x:.1}%" }
+print(pct(0.12345), len(f"{ym}"), f"{ym}".len())        // out: 12.3% 6 6
+let m = ["k": 1.5]
+let key = "k"
+print(f"é{m[key]}ü{m[key] * 2.0:.3}")                   // out: é1.5ü3.000

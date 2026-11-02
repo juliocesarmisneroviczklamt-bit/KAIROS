@@ -251,6 +251,19 @@ pub fn lex(src: &str, file: u16) -> KResult<Vec<Token>> {
             i += 2;
             continue;
         }
+        // M20: f"...": a formatted string, written as the tokens of its concatenation
+        if c == 'f' && i + 1 < n && chars[i + 1].1 == '"' {
+            let (ts, next) = fstring(src, &chars, i, file)?;
+            let mut first = true;
+            for mut t in ts {
+                t.nl_before = first && nl;
+                first = false;
+                toks.push(t);
+            }
+            i = next;
+            nl = false;
+            continue;
+        }
         let tok = if c.is_alphabetic() || c == '_' {
             while i < n && (chars[i].1.is_alphanumeric() || chars[i].1 == '_') {
                 i += 1;
@@ -413,6 +426,185 @@ pub fn lex(src: &str, file: u16) -> KResult<Vec<Token>> {
     }
     toks.push(Token { tok: Tok::Eof, span: Span::new(file, src.len(), src.len()), nl_before: nl });
     Ok(insert_semicolons(toks))
+}
+
+/// The escape at chars[i] (a backslash): its character and where what follows starts.
+fn escape(src: &str, chars: &[(usize, char)], i: usize, file: u16) -> KResult<(char, usize)> {
+    let n = chars.len();
+    let pos = |k: usize| if k < n { chars[k].0 } else { src.len() };
+    let e = chars[i + 1].1;
+    // `\u{e9}`: a Unicode code point, 1 to 6 hex digits
+    if e == 'u' {
+        let bad = |j: usize| {
+            Diag::new("E0001", Span::new(file, chars[i].0, pos(j)), "invalid escape")
+                .hint("write a Unicode code point as `\\u{...}` with 1 to 6 hex digits, e.g. `\\u{e9}`")
+        };
+        if i + 2 >= n || chars[i + 2].1 != '{' {
+            return Err(bad(i + 2));
+        }
+        let mut j = i + 3;
+        let mut hex = String::new();
+        while j < n && chars[j].1 != '}' && hex.len() < 7 {
+            hex.push(chars[j].1);
+            j += 1;
+        }
+        let c = if j < n && chars[j].1 == '}' && (1..=6).contains(&hex.len()) {
+            u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+        } else {
+            None
+        };
+        let Some(c) = c else { return Err(bad((j + 1).min(n))) };
+        return Ok((c, j + 1));
+    }
+    let c = match e {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '0' => '\0',
+        '"' => '"',
+        '\\' => '\\',
+        _ => return Err(Diag::new("E0001", Span::new(file, chars[i].0, pos(i + 2)), format!("unknown escape `\\{e}`"))),
+    };
+    Ok((c, i + 2))
+}
+
+/// M20: the formatted string at chars[i] (`f"`): its tokens and where what follows starts. The
+/// text `a{x}b{y:.2}` becomes `( "a" + str ( x ) + "b" + format_fixed ( y , 2 ) )`: each `{expr}`
+/// is the text of the expression, each `{expr:.N}` that of the number with N decimals; `{{` and
+/// `}}` are braces. An expression has no quotes and no line breaks.
+fn fstring(src: &str, chars: &[(usize, char)], i0: usize, file: u16) -> KResult<(Vec<Token>, usize)> {
+    let n = chars.len();
+    let pos = |k: usize| if k < n { chars[k].0 } else { src.len() };
+    let start = chars[i0].0;
+    let tk = |tok: Tok, lo: usize, hi: usize| Token { tok, span: Span::new(file, lo, hi), nl_before: false };
+    // the pieces: a text (its characters and bytes), or an expression's tokens and its format
+    enum Piece {
+        Text(String, usize, usize),
+        Expr(Vec<Token>, Option<(i64, usize, usize)>, usize, usize),
+    }
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut text = String::new();
+    let mut text_lo = pos(i0 + 2);
+    let mut i = i0 + 2;
+    loop {
+        if i >= n {
+            return Err(Diag::new("E0001", Span::new(file, start, src.len()), "unterminated string"));
+        }
+        let ch = chars[i].1;
+        if ch == '"' {
+            break;
+        }
+        if ch == '\\' && i + 1 < n {
+            let (c, next) = escape(src, chars, i, file)?;
+            text.push(c);
+            i = next;
+            continue;
+        }
+        if (ch == '{' || ch == '}') && i + 1 < n && chars[i + 1].1 == ch {
+            text.push(ch);
+            i += 2;
+            continue;
+        }
+        if ch == '}' {
+            return Err(Diag::new("E0001", Span::new(file, chars[i].0, pos(i + 1)), "single `}` in a formatted string").hint("write `}}` for a brace"));
+        }
+        if ch != '{' {
+            text.push(ch);
+            i += 1;
+            continue;
+        }
+        // an expression: to the `}` that closes it
+        if !text.is_empty() {
+            pieces.push(Piece::Text(std::mem::take(&mut text), text_lo, chars[i].0));
+        }
+        let open = i;
+        let mut j = i + 1;
+        let mut depth = 0i32;
+        let mut colon: Option<usize> = None;
+        while j < n && !(chars[j].1 == '}' && depth == 0) {
+            match chars[j].1 {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ':' if depth == 0 => colon = Some(j),
+                '"' | '\n' => break,
+                _ => {}
+            }
+            j += 1;
+        }
+        if j >= n || chars[j].1 != '}' {
+            return Err(Diag::new("E0001", Span::new(file, chars[open].0, pos(open + 1)), "unclosed `{` in a formatted string")
+                .hint("close it with `}` (an expression has no quotes or line breaks), or write `{{` for a brace"));
+        }
+        // a format: `:.N` at the end, N decimals
+        let mut end = j;
+        let mut spec = None;
+        if let Some(k) = colon {
+            let rest: String = chars[k + 1..j].iter().map(|c| c.1).collect();
+            if rest.len() >= 2 && rest.starts_with('.') && rest[1..].chars().all(|c| c.is_ascii_digit()) {
+                let Ok(d) = rest[1..].parse::<i64>() else {
+                    return Err(Diag::new("E0001", Span::new(file, chars[k].0, chars[j].0), "too many decimals"));
+                };
+                spec = Some((d, chars[k + 2].0, chars[j].0));
+                end = k;
+            }
+        }
+        let (a, b) = (pos(open + 1), pos(end));
+        if src[a..b].trim().is_empty() {
+            return Err(Diag::new("E0001", Span::new(file, chars[open].0, pos(j + 1)), "empty `{}` in a formatted string").hint("put an expression inside, e.g. `{x}`"));
+        }
+        let mut inner = lex(&src[a..b], file).map_err(|mut d| {
+            d.span.lo += a as u32;
+            d.span.hi += a as u32;
+            d
+        })?;
+        inner.pop();
+        for t in inner.iter_mut() {
+            t.span.lo += a as u32;
+            t.span.hi += a as u32;
+            t.nl_before = false;
+        }
+        if inner.iter().any(|t| t.tok == Tok::Semi) {
+            return Err(Diag::new("E0001", Span::new(file, chars[open].0, pos(j + 1)), "a `{}` of a formatted string holds one expression"));
+        }
+        pieces.push(Piece::Expr(inner, spec, chars[open].0, pos(j + 1)));
+        i = j + 1;
+        text_lo = pos(i);
+    }
+    let close = chars[i].0;
+    if !text.is_empty() {
+        pieces.push(Piece::Text(std::mem::take(&mut text), text_lo, close));
+    }
+    let end = close + 1;
+    // no expression: a plain string
+    if !pieces.iter().any(|p| matches!(p, Piece::Expr(..))) {
+        let s = pieces.into_iter().map(|p| if let Piece::Text(s, _, _) = p { s } else { String::new() }).collect::<String>();
+        return Ok((vec![tk(Tok::Str(s), start, end)], i + 1));
+    }
+    let mut out = vec![tk(Tok::LParen, start, start + 2)];
+    for (k, p) in pieces.into_iter().enumerate() {
+        let lo = match &p {
+            Piece::Text(_, lo, _) => *lo,
+            Piece::Expr(_, _, lo, _) => *lo,
+        };
+        if k > 0 {
+            out.push(tk(Tok::Plus, lo, lo));
+        }
+        match p {
+            Piece::Text(s, lo, hi) => out.push(tk(Tok::Str(s), lo, hi)),
+            Piece::Expr(ts, spec, lo, hi) => {
+                out.push(tk(Tok::Ident(if spec.is_some() { "format_fixed" } else { "str" }.to_string()), lo, lo + 1));
+                out.push(tk(Tok::LParen, lo, lo + 1));
+                out.extend(ts);
+                if let Some((d, dlo, dhi)) = spec {
+                    out.push(tk(Tok::Comma, dlo - 1, dlo));
+                    out.push(tk(Tok::Int(d), dlo, dhi));
+                }
+                out.push(tk(Tok::RParen, hi - 1, hi));
+            }
+        }
+    }
+    out.push(tk(Tok::RParen, close, end));
+    Ok((out, i + 1))
 }
 
 fn ends_statement(t: &Tok) -> bool {

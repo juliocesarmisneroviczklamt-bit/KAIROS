@@ -28,7 +28,7 @@ for y in 2011..=2025 {
     let n = count(e)
     let has_eq = count(e and not is_nan(equity[month: m]))
     let has_inc = count(e and not is_nan(income[month: m]))
-    print(str(y) + "-12: liquid " + str(int(n)) + ", with equity " + str(int(has_eq)) + ", with income (12 months) " + str(int(has_inc)))
+    print(f"{y}-12: liquid {int(n)}, with equity {int(has_eq)}, with income (12 months) {int(has_inc)}")
 }
 
 // one company, month by month: the values change in the month a filing is received
@@ -40,7 +40,7 @@ let assets = cvm_rows(d, fs, comp, "assets", len(d.cal.months))
 let shares = cvm_rows(d, fs, comp, "shares", len(d.cal.months))
 for ym in [202301, 202302, 202303, 202304, 202305, 202306, 202307, 202308, 202309, 202310, 202311, 202312, 202401, 202402, 202403, 202404] {
     let m = cal_idx_from(d.cal, ym)
-    print("PETR4 " + str(ym) + ": equity " + format_fixed(equity[month: m, asset: petr] / 1e9, 1) + " bi, income 12m " + format_fixed(income[month: m, asset: petr] / 1e9, 1) + " bi, assets " + format_fixed(assets[month: m, asset: petr] / 1e9, 1) + " bi, shares " + format_fixed(shares[month: m, asset: petr] / 1e9, 3) + " bi")
+    print(f"PETR4 {ym}: equity {equity[month: m, asset: petr] / 1e9:.1} bi, income 12m {income[month: m, asset: petr] / 1e9:.1} bi, assets {assets[month: m, asset: petr] / 1e9:.1} bi, shares {shares[month: m, asset: petr] / 1e9:.3} bi")
 }
 
 // the rule of time, checked apart: each value of the panel is the value of a filing received by
@@ -75,4 +75,4 @@ for t in 0..len(d.tks) {
         if not ok { bad += 1 }
     }
 }
-print("rule of time: " + str(checked) + " values checked, " + str(bad) + " from a filing not received by the end of their month")
+print(f"rule of time: {checked} values checked, {bad} from a filing not received by the end of their month")

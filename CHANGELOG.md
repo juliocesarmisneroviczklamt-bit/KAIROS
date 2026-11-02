@@ -2,6 +2,24 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.20.0 — M20: texto formatado
+
+**A Kairós ganhou o texto formatado:** `f"{name} {ym}: equity {equity / 1e9:.1} bi"`. Antes, o mesmo texto era uma soma de pedaços com `str(...)` e `format_fixed(..., 1)`.
+
+- **A sintaxe:**
+  - `{expr}` é o texto da expressão (o de `str`), e `{expr:.N}` o número com N casas (o de `format_fixed`);
+  - `{{` e `}}` são chaves, e os escapes são os dos textos comuns;
+  - a expressão não tem aspas nem quebras de linha.
+- **Como funciona:** o léxico escreve o texto formatado como os tokens da concatenação. O parser, os tipos, a análise temporal e os back-ends não mudam. Os tokens das expressões guardam o lugar no arquivo, então um erro dentro de `{}` aponta para ele.
+- **Erros novos, no léxico (E0001):** um `}` sozinho, um `{` sem fechar, um `{}` vazio, duas expressões num `{}` e casas demais.
+- **As implementações:** os dois léxicos (Rust e Kairós) dão os mesmos tokens e erros em todos os arquivos do repositório. O Rust, o WebAssembly e o interpretador em Kairós dão a mesma saída.
+- **O laboratório:** [`lab/check_cvm.krs`](kairos/lab/check_cvm.krs) foi reescrito com textos formatados e imprime o mesmo relatório.
+- **O editor:** a extensão do VS Code (`editors/vscode`, 0.13.0) colore o `f`, as chaves, o formato e as expressões dentro delas. Também passou a conhecer o tipo `t3`, os escapes `\r`, `\0` e `\u{...}` e os builtins que faltavam (`ternary`, `format_fixed`, `read_line`, `zip_entries` e outros).
+- **Testes:**
+  - 10 casos do léxico (`tests/lexer/fstr_*.krs`);
+  - o programa dourado `tests/programs/fstrings.krs` e dois programas de erro;
+  - `tests/wasm/fstrings.krs`.
+
 ## 0.19.0 — M19: os demonstrativos da CVM, no ponto do tempo
 
 **O laboratório ganhou informação nova: os demonstrativos financeiros das companhias abertas,** dos dados abertos da CVM (DFP desde 2010, ITR desde 2011), escritos em Kairós. Cada número só é conhecido a partir do dia em que a CVM recebeu a entrega que o traz. E a linguagem passou a distinguir o tempo que ela prova do tempo que não conhece.

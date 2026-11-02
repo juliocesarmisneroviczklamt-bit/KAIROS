@@ -183,6 +183,7 @@ Para coletar dados e escrever relatórios em Kairós, sem passar por outra lingu
 | `http_get(url)`, `download(url, p)` | o corpo de um GET como texto; ou salvo num arquivo (devolve os bytes). Usa o `curl` do sistema (Windows 10+, macOS, Linux), então HTTPS fica com o TLS do sistema e a Kairós continua Rust puro. Falha é R0013 |
 
 - **Escapes de texto:** `\n`, `\t`, `\r`, `\0`, `\"`, `\\` e `\u{e9}`, este com 1 a 6 dígitos hexadecimais.
+- **Texto formatado (M20, §21):** `f"{nome} {ym}: {x / 1e9:.1} bi"`. `{expr}` é o texto da expressão (`str`), `{expr:.N}` o número com N casas (`format_fixed`), e `{{` e `}}` são chaves.
 - **Erros de arquivo** (não existe, sem permissão…) param o programa com R0011 e a mensagem do sistema.
 - **Tempo:** o que vem de um arquivo, da rede ou da entrada não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo leva uma marca, e com ela não decide pesos (E0301, "whose time is not known"). A marca sai quando se declara quando cada linha fica conhecida, com `observed` (§20). `args()`, `env()` e `today()` são conhecidos antes de tudo.
 - **A cerca do holdout** (§7) vale para o módulo `b3`. Ler os arquivos de mercado diretamente fica fora dela, mas aparece no código.
@@ -761,6 +762,8 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M17 | memória: um alocador que reaproveita blocos entre tamanhos (§18) | ✅ o `momentum` em WebAssembly cai de 1.565 MB para 542 MB, com os mesmos números |
 | M18 | o elemento ternário `t3` (§19) | ✅ `ternary`, `contract` só com somas e subtrações, cinco trits por byte no Rust, `grad` pelo *straight-through*; a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
 | M19 | os demonstrativos da CVM (DFP e ITR) em Kairós, no ponto do tempo (§20) | ✅ 42 mil entregas num painel mês a mês; 0 de 142.648 valores fora da regra; o tempo desconhecido do que vem de fora separado do tempo provado |
+| M20 | texto formatado `f"..."` (§21) | ✅ o léxico o escreve como a concatenação, e o resto do compilador não muda; os mesmos tokens e erros nos dois léxicos e a mesma saída nas três implementações; o relatório da CVM, reescrito com ele, sai igual |
+| M21 | o back-end nativo escrito em Kairós: o WebAssembly dos módulos traduzido para x86-64 e gravado como executável (PE no Windows, depois ELF no Linux), com a camada do sistema operacional em Kairós | o comando `kairos` roda como executável nativo, sem Rust e sem node, com a saída dos outros, e compila a si mesmo num ponto fixo |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -1071,3 +1074,37 @@ for m in 12..size(ret, month) {
 - [`lab/check_cvm.krs`](../lab/check_cvm.krs) mostra a cobertura e a Petrobras mês a mês: os números mudam em março, maio, agosto e novembro, os meses das entregas;
 - `tests/temporal.rs` tem o teste `observed_declares_the_time_of_what_comes_from_outside`, e `tests/temporal/fundamentals_*.krs` cobre o painel;
 - `tests/wasm/zip_entries.krs` dá a mesma saída nas três implementações.
+
+## 21. Texto formatado (M20, v0.20.0)
+
+Um `f` colado às aspas faz um texto formatado:
+
+```
+let name = "PETR4"
+let equity = 382.34567e9
+print(f"{name}: equity {equity / 1e9:.1} bi")    // PETR4: equity 382.3 bi
+print(f"{{braces}} {[1, 2]} {-2.5:.2}")         // {braces} [1, 2] -2.50
+fn pct(x: f64) -> str { f"{100.0 * x:.1}%" }     // pct(0.12345) == "12.3%"
+```
+
+- `{expr}` é o texto da expressão, o mesmo de `str(expr)`.
+- `{expr:.N}` é o número com N casas, o mesmo de `format_fixed(expr, N)`.
+- `{{` e `}}` são chaves, e os escapes são os dos textos comuns (`\n`, `\u{e9}`).
+- Sem nenhum `{}`, é um texto comum.
+
+**Como funciona.** O léxico escreve o texto formatado como os tokens da concatenação: `f"a{x}b{y:.2}"` vira `( "a" + str ( x ) + "b" + format_fixed ( y , 2 ) )`. O parser, os tipos, a análise temporal e os dois back-ends não mudam. Por isso o texto formatado se comporta em tudo como a concatenação que ele escreve:
+- o tempo dele é o das expressões que leva;
+- os erros de tipo são os de `str` e `format_fixed`;
+- os tokens das expressões guardam o lugar no arquivo, e um erro dentro de `{}` aponta para ele.
+
+**As regras.**
+- A expressão não tem aspas nem quebras de linha. Um texto que ela usaria vai antes, num `let`.
+- O formato é um `:.N` no fim, fora de parênteses, colchetes e chaves: em `{ret[month: m]}`, a expressão é inteira.
+- Os erros saem no léxico (E0001): um `}` sozinho, um `{` sem fechar, um `{}` vazio, duas expressões num `{}` (com `;`) e casas demais.
+
+**Conferido:**
+- o léxico em Kairós dá os mesmos tokens e erros do Rust em todos os arquivos do repositório, inclusive os 10 testes novos (`tests/lexer/fstr_*.krs`);
+- `tests/programs/fstrings.krs` é dourado, e `err_fstring_*.krs` cobre os erros;
+- `tests/wasm/fstrings.krs` dá a mesma saída no Rust, no WebAssembly e no interpretador em Kairós;
+- [`lab/check_cvm.krs`](../lab/check_cvm.krs), reescrito com textos formatados, imprime o mesmo relatório;
+- a gramática do VS Code (`editors/vscode`) colore as expressões dentro das chaves.

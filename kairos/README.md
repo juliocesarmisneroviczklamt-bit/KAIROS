@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.19.0**, com o roteiro M1–M19 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.20.0**, com o roteiro M1–M20 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -21,7 +21,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.19.0**, com 
 - M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust;
 - M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB;
 - M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações;
-- M19: os demonstrativos da CVM no ponto do tempo ([`lab/cvm.krs`](lab/cvm.krs)), e o tempo desconhecido do que vem de fora separado do tempo provado.
+- M19: os demonstrativos da CVM no ponto do tempo ([`lab/cvm.krs`](lab/cvm.krs)), e o tempo desconhecido do que vem de fora separado do tempo provado;
+- M20: o texto formatado, `f"{name}: {x / 1e9:.1} bi"`.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -189,10 +190,14 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **`zip_entries` e `read_zip_lines`:** ler um arquivo de dentro de um ZIP pelo nome.
 - **O que vem de fora tem uma marca:** um valor lido de arquivo não decide nada até `observed` declarar quando cada linha é conhecida, e a declaração não apaga um uso do futuro que o compilador prova.
 
+**M20 (texto formatado)**
+- **`f"{expr}"` é o texto da expressão, e `f"{x:.N}"` o número com N casas** ([spec §21](docs/spec.md)); `{{` e `}}` são chaves.
+- **O léxico o escreve como a concatenação** (`str` e `format_fixed`), então o texto formatado tem os tipos, o tempo e os erros dela, e um erro dentro de `{}` aponta para o lugar certo.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M20 | a definir: o custo do aluguel de ações no simulador (para o long-short) ou o `t3` compactado no WebAssembly |
+| M21 | o back-end nativo escrito em Kairós: x86-64 a partir do WebAssembly, gravado como executável (PE no Windows, depois ELF no Linux), com a camada do sistema operacional em Kairós |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
-| depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |
+| depois | o custo do aluguel de ações no simulador (falta uma fonte aberta do histórico); o `t3` compactado também no WebAssembly |

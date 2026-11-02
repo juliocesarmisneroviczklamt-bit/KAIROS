@@ -1,0 +1,3 @@
+// A formatted string with an expression the program does not have
+let ym = 202403
+print(f"{ym} {nope}")   // error: E0100

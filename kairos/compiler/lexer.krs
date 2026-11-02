@@ -120,6 +120,21 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
             i += 2
             continue
         }
+        // M20: f"...": a formatted string, written as the tokens of its concatenation
+        if c == 102 and i + 1 < n and cs[i + 1] == 34 {
+            let r = lx_fstring(src, cs, boff, i)
+            if not r.0 { return (false, toks, r.2) }
+            var first = true
+            for ft in r.1 {
+                var t2 = ft
+                t2.nl = first and nl
+                first = false
+                toks.push(t2)
+            }
+            i = r.3
+            nl = false
+            continue
+        }
         var t = lx_token("", start, 0, nl)
         if is_alphabetic(c) or c == 95 {
             while i < n and (is_alphanumeric(cs[i]) or cs[i] == 95) { i += 1 }
@@ -250,6 +265,201 @@ fn lex(src: str) -> (bool, List[Token], LexErr) {
     }
     toks.push(lx_token("Eof", boff[n], boff[n], nl))
     (true, lx_semicolons(toks), LexErr { code: "", lo: 0, hi: 0, msg: "", hint: "" })
+}
+
+// The escape at cs[i] (a backslash): (no error, its code point, where what follows starts, the error)
+fn lx_escape(cs: List[i64], boff: List[i64], i: i64) -> (bool, i64, i64, LexErr) {
+    let n = len(cs)
+    let bs = from_codes([92])
+    let u_hint = "write a Unicode code point as `" + bs + "u{...}` with 1 to 6 hex digits, e.g. `" + bs + "u{e9}`"
+    let ok = LexErr { code: "", lo: 0, hi: 0, msg: "", hint: "" }
+    let e = cs[i + 1]
+    if e == 117 {
+        if i + 2 >= n or cs[i + 2] != 123 { return (false, 0, 0, LexErr { code: "E0001", lo: boff[i], hi: boff[min(i + 2, n)], msg: "invalid escape", hint: u_hint }) }
+        var j = i + 3
+        var hex = []
+        while j < n and cs[j] != 125 and len(hex) < 7 {
+            hex.push(cs[j])
+            j += 1
+        }
+        var v = -1
+        if j < n and cs[j] == 125 and len(hex) >= 1 and len(hex) <= 6 { v = lx_hex(hex) }
+        if v < 0 or v > 1114111 or (v >= 55296 and v <= 57343) { return (false, 0, 0, LexErr { code: "E0001", lo: boff[i], hi: boff[min(j + 1, n)], msg: "invalid escape", hint: u_hint }) }
+        return (true, v, j + 1, ok)
+    }
+    let esc = if e == 110 { 10 } else if e == 116 { 9 } else if e == 114 { 13 } else if e == 48 { 0 } else if e == 34 { 34 } else if e == 92 { 92 } else { -1 }
+    if esc < 0 { return (false, 0, 0, LexErr { code: "E0001", lo: boff[i], hi: boff[min(i + 2, n)], msg: "unknown escape `" + bs + from_codes([e]) + "`", hint: "" }) }
+    (true, esc, i + 2, ok)
+}
+
+// a piece of a formatted string: a text (kind 0: its code points and bytes) or an expression
+// (kind 1: its tokens, its format, the bytes of its braces)
+struct LxPiece {
+    kind: i64,
+    chars: List[i64],
+    toks: List[Token],
+    has_spec: bool,
+    digits: i64,
+    dlo: i64,
+    dhi: i64,
+    lo: i64,
+    hi: i64,
+}
+
+// M20: the formatted string at cs[i0] (`f"`): (no error, its tokens, the error, where what
+// follows starts). The text `a{x}b{y:.2}` becomes `( "a" + str ( x ) + "b" + format_fixed ( y , 2 ) )`
+// (src/lexer.rs fstring).
+fn lx_fstring(src: str, cs: List[i64], boff: List[i64], i0: i64) -> (bool, List[Token], LexErr, i64) {
+    let n = len(cs)
+    let start = boff[i0]
+    let ok = LexErr { code: "", lo: 0, hi: 0, msg: "", hint: "" }
+    let none: List[Token] = []
+    let no_chars: List[i64] = []
+    var pieces: List[LxPiece] = []
+    var text: List[i64] = []
+    var text_lo = boff[min(i0 + 2, n)]
+    var i = i0 + 2
+    while true {
+        if i >= n { return (false, none, LexErr { code: "E0001", lo: start, hi: boff[n], msg: "unterminated string", hint: "" }, 0) }
+        let ch = cs[i]
+        if ch == 34 { break }
+        if ch == 92 and i + 1 < n {
+            let r = lx_escape(cs, boff, i)
+            if not r.0 { return (false, none, r.3, 0) }
+            text.push(r.1)
+            i = r.2
+            continue
+        }
+        if (ch == 123 or ch == 125) and i + 1 < n and cs[i + 1] == ch {
+            text.push(ch)
+            i += 2
+            continue
+        }
+        if ch == 125 { return (false, none, LexErr { code: "E0001", lo: boff[i], hi: boff[min(i + 1, n)], msg: "single `}` in a formatted string", hint: "write `}}` for a brace" }, 0) }
+        if ch != 123 {
+            text.push(ch)
+            i += 1
+            continue
+        }
+        // an expression: to the `}` that closes it
+        if len(text) > 0 {
+            pieces.push(LxPiece { kind: 0, chars: text, toks: none, has_spec: false, digits: 0, dlo: 0, dhi: 0, lo: text_lo, hi: boff[i] })
+            text = []
+        }
+        let open = i
+        var j = i + 1
+        var depth = 0
+        var colon = -1
+        while j < n and not (cs[j] == 125 and depth == 0) {
+            let cj = cs[j]
+            if cj == 40 or cj == 91 or cj == 123 {
+                depth += 1
+            } else if cj == 41 or cj == 93 or cj == 125 {
+                depth -= 1
+            } else if cj == 58 and depth == 0 {
+                colon = j
+            } else if cj == 34 or cj == 10 {
+                break
+            }
+            j += 1
+        }
+        if j >= n or cs[j] != 125 {
+            return (false, none, LexErr { code: "E0001", lo: boff[open], hi: boff[min(open + 1, n)], msg: "unclosed `{` in a formatted string",
+                hint: "close it with `}` (an expression has no quotes or line breaks), or write `{{` for a brace" }, 0)
+        }
+        // a format: `:.N` at the end, N decimals
+        var end = j
+        var has_spec = false
+        var digits = 0
+        var dlo = 0
+        var dhi = 0
+        if colon >= 0 {
+            var spec_ok = j - colon - 1 >= 2 and cs[colon + 1] == 46
+            if spec_ok {
+                for k in colon + 2..j {
+                    if not lx_digit(cs[k]) { spec_ok = false }
+                }
+            }
+            if spec_ok {
+                var v = 0
+                for k in colon + 2..j {
+                    let d = cs[k] - 48
+                    if v > (9223372036854775807 - d) / 10 { return (false, none, LexErr { code: "E0001", lo: boff[colon], hi: boff[j], msg: "too many decimals", hint: "" }, 0) }
+                    v = v * 10 + d
+                }
+                has_spec = true
+                digits = v
+                dlo = boff[colon + 2]
+                dhi = boff[j]
+                end = colon
+            }
+        }
+        let a = boff[open + 1]
+        if trim(lx_text(cs, open + 1, end)) == "" {
+            return (false, none, LexErr { code: "E0001", lo: boff[open], hi: boff[min(j + 1, n)], msg: "empty `{}` in a formatted string", hint: "put an expression inside, e.g. `{x}`" }, 0)
+        }
+        let inner = lex(lx_text(cs, open + 1, end))
+        if not inner.0 {
+            var e = inner.2
+            e.lo = e.lo + a
+            e.hi = e.hi + a
+            return (false, none, e, 0)
+        }
+        var ts: List[Token] = []
+        for k in 0..len(inner.1) - 1 {
+            var t = inner.1[k]
+            t.lo = t.lo + a
+            t.hi = t.hi + a
+            t.nl = false
+            if t.kind == "Semi" { return (false, none, LexErr { code: "E0001", lo: boff[open], hi: boff[min(j + 1, n)], msg: "a `{}` of a formatted string holds one expression", hint: "" }, 0) }
+            ts.push(t)
+        }
+        pieces.push(LxPiece { kind: 1, chars: no_chars, toks: ts, has_spec: has_spec, digits: digits, dlo: dlo, dhi: dhi, lo: boff[open], hi: boff[min(j + 1, n)] })
+        i = j + 1
+        text_lo = boff[min(i, n)]
+    }
+    let close = boff[i]
+    if len(text) > 0 { pieces.push(LxPiece { kind: 0, chars: text, toks: none, has_spec: false, digits: 0, dlo: 0, dhi: 0, lo: text_lo, hi: close }) }
+    let end_b = close + 1
+    var any_expr = false
+    for p in pieces {
+        if p.kind == 1 { any_expr = true }
+    }
+    // no expression: a plain string
+    if not any_expr {
+        var all: List[i64] = []
+        for p in pieces {
+            for c in p.chars { all.push(c) }
+        }
+        var t = lx_token("Str", start, end_b, false)
+        t.chars = all
+        return (true, [t], ok, i + 1)
+    }
+    var out = [lx_token("LParen", start, start + 2, false)]
+    for k in 0..len(pieces) {
+        let p = pieces[k]
+        if k > 0 { out.push(lx_token("Plus", p.lo, p.lo, false)) }
+        if p.kind == 0 {
+            var t = lx_token("Str", p.lo, p.hi, false)
+            t.chars = p.chars
+            out.push(t)
+        } else {
+            var f = lx_token("Ident", p.lo, p.lo + 1, false)
+            f.text = if p.has_spec { "format_fixed" } else { "str" }
+            out.push(f)
+            out.push(lx_token("LParen", p.lo, p.lo + 1, false))
+            for t in p.toks { out.push(t) }
+            if p.has_spec {
+                out.push(lx_token("Comma", p.dlo - 1, p.dlo, false))
+                var d = lx_token("Int", p.dlo, p.dhi, false)
+                d.int = p.digits
+                out.push(d)
+            }
+            out.push(lx_token("RParen", p.hi - 1, p.hi, false))
+        }
+    }
+    out.push(lx_token("RParen", close, end_b, false))
+    (true, out, ok, i + 1)
 }
 
 fn lx_ends_statement(k: str) -> bool {

@@ -1,0 +1,2 @@
+// A brace left open in a formatted string: an expression has no quotes or line breaks
+print(f"total {1 + 2")   // error: E0001

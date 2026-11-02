@@ -7,6 +7,7 @@
   "patterns": [
     { "include": "#shebang" },
     { "include": "#comments" },
+    { "include": "#fstrings" },
     { "include": "#strings" },
     { "include": "#tensor-type" },
     { "include": "#declarations" },
@@ -45,14 +46,54 @@
         }
       ]
     },
+    "fstrings": {
+      "comment": "f\"text {expr} {x:.2}\": {expr} is the text of the expression, {expr:.N} a number with N decimals; {{ and }} are braces (M20)",
+      "name": "string.quoted.double.formatted.kairos",
+      "begin": "\\b(f)(\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.kairos" },
+        "2": { "name": "punctuation.definition.string.begin.kairos" }
+      },
+      "end": "\"",
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.kairos" } },
+      "patterns": [
+        { "name": "constant.character.escape.kairos", "match": "\\{\\{|\\}\\}" },
+        { "include": "#escapes" },
+        {
+          "name": "meta.embedded.expression.kairos",
+          "begin": "\\{",
+          "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.kairos" } },
+          "end": "(?:(:)(\\.[0-9]+))?(\\})",
+          "endCaptures": {
+            "1": { "name": "punctuation.separator.format.kairos" },
+            "2": { "name": "constant.other.format.kairos" },
+            "3": { "name": "punctuation.section.embedded.end.kairos" }
+          },
+          "patterns": [
+            { "include": "#keywords" },
+            { "include": "#b3" },
+            { "include": "#builtins" },
+            { "include": "#constants" },
+            { "include": "#types" },
+            { "include": "#numbers" },
+            { "include": "#calls" },
+            { "include": "#operators" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
     "strings": {
       "name": "string.quoted.double.kairos",
       "begin": "\"",
       "end": "\"",
       "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.kairos" } },
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.kairos" } },
+      "patterns": [{ "include": "#escapes" }]
+    },
+    "escapes": {
       "patterns": [
-        { "name": "constant.character.escape.kairos", "match": "\\\\[nt\"\\\\]" },
+        { "name": "constant.character.escape.kairos", "match": "\\\\(?:[ntr0\"\\\\]|u\\{[0-9a-fA-F]{1,6}\\})" },
         { "name": "invalid.illegal.escape.kairos", "match": "\\\\." }
       ]
     },
@@ -156,7 +197,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.kairos",
-      "match": "\\b(print|len|push|pop|sort|reverse|contains|map|filter|sum|min|max|minimum|maximum|abs|sqrt|exp|ln|floor|ceil|round|float|int|str|assert|mean|prod|nan_sum|nan_mean|nan_prod|nan_count|count|is_nan|fill_nan|where|size|zeros|ones|full|zeros_like|full_like|tensor|to_list|rank|top_k|bottom_k|contract|observed|grad|value_and_grad|tanh|sigmoid|relu|softplus|randn|smooth_max|smooth_min|smooth_step|variance|std_dev|product|compound|wealth|max_drawdown|sharpe|mlp|mlp_init|mse|sgd_step|adam_step|open_once)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|push|pop|sort|reverse|contains|map|filter|sum|min|max|minimum|maximum|abs|sqrt|exp|ln|floor|ceil|round|float|int|str|assert|mean|prod|nan_sum|nan_mean|nan_prod|nan_count|count|is_nan|fill_nan|where|size|zeros|ones|full|zeros_like|full_like|tensor|to_list|rank|top_k|bottom_k|contract|observed|grad|value_and_grad|tanh|sigmoid|relu|softplus|randn|smooth_max|smooth_min|smooth_step|variance|std_dev|product|compound|wealth|max_drawdown|sharpe|mlp|mlp_init|mse|sgd_step|adam_step|open_once|ternary|format_fixed|eprint|exit|read_line|print_raw|zip_entries|read_zip_lines|try_read_text|try_read_lines|try_read_zip_lines)\\b(?=\\s*\\()"
     },
     "constants": {
       "patterns": [
@@ -166,7 +207,7 @@
     },
     "types": {
       "patterns": [
-        { "name": "support.type.primitive.kairos", "match": "\\b(i64|f64|bool|str)\\b" },
+        { "name": "support.type.primitive.kairos", "match": "\\b(i64|f64|bool|str|t3)\\b" },
         { "name": "support.type.kairos", "match": "\\b(List|Tensor)\\b" },
         { "name": "entity.name.type.kairos", "match": "\\b[[:upper:]][[:alnum:]_]*\\b" }
       ]
