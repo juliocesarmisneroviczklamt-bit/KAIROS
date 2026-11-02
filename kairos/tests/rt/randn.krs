@@ -1,0 +1,19 @@
+// rt_t_randn (the runtime, in Kairós: xoshiro256**, Box-Muller with rt_sin, rt_cos and rt_log)
+// against the interpreter's randn (libm), bit for bit: kairos run randn.krs <how many>
+import "../../compiler/rt.krs"
+
+let n = parse_int(args()[0])
+var count = 0
+var bad = 0
+for seed in [0, 1, 7, 42, -1, 123456789, 9223372036854775807, -9223372036854775807] {
+    let mine = rt_t_randn(seed, [2], [n])
+    let want = to_list(randn(seed: seed, asset: n))
+    for i in 0..n {
+        count += 1
+        if to_bits(mine.data[i]) != to_bits(want[i]) {
+            bad += 1
+            if bad < 20 { print("DIFF", seed, i, mine.data[i], want[i]) }
+        }
+    }
+}
+print(count, "values,", bad, "different")

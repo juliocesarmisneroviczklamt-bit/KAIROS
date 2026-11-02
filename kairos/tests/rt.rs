@@ -78,6 +78,11 @@ fn tanh_sigmoid_and_softplus_are_the_bits_of_libm() {
 }
 
 #[test]
+fn randn_draws_the_samples_of_the_interpreter() {
+    check("randn.krs", 2001);
+}
+
+#[test]
 fn floats_are_read_as_rust_reads_them() {
     // big integers in the interpreter of a debug build need more stack than WebAssembly's 4 MiB
     if cfg!(target_family = "wasm") {

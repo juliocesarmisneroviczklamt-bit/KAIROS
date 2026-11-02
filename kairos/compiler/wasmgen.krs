@@ -62,37 +62,37 @@ fn f_proc_exit() -> i64 {
     1
 }
 
-// after the 12 functions imported from WASI (wasi_imports)
+// after the 13 functions imported from WASI (wasi_imports)
 fn f_write() -> i64 {
-    12
-}
-
-fn f_fail() -> i64 {
     13
 }
 
-fn f_print_i64() -> i64 {
+fn f_fail() -> i64 {
     14
 }
 
-fn f_alloc() -> i64 {
+fn f_print_i64() -> i64 {
     15
 }
 
-fn f_print_str() -> i64 {
+fn f_alloc() -> i64 {
     16
 }
 
-fn f_incref() -> i64 {
+fn f_print_str() -> i64 {
     17
 }
 
-fn f_start() -> i64 {
+fn f_incref() -> i64 {
     18
 }
 
-fn first_user_fn() -> i64 {
+fn f_start() -> i64 {
     19
+}
+
+fn first_user_fn() -> i64 {
+    20
 }
 
 // The function index of a Kairós function, which is compiled once its index is asked for.
@@ -1384,6 +1384,7 @@ fn builtin_w(inout g: WGen, e: H) {
         close(inout g)
         return
     }
+    if b == "randn" { return randn_w(inout g, e) }
     if tensor_builtin_w(inout g, e) { return }
     if b == "format_fixed" { return call_rt_borrowing(inout g, "rt_format_fixed", args) }
     if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
@@ -1509,6 +1510,25 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "make_dir" { return io_w(inout g, e, "rt_make_dir", "create", Ty.TUnit) }
     if b == "args" { return call_f(inout g, rt_fn(inout g, "rt_args")) }
     if b == "today" { return call_f(inout g, rt_fn(inout g, "rt_today")) }
+    if b == "append_text" { return io_w(inout g, e, "rt_append_text", "write", Ty.TUnit) }
+    if b == "list_dir" { return io_w(inout g, e, "rt_list_dir", "list", Ty.TList(Ty.TStr)) }
+    if b == "minimum" or b == "maximum" {
+        // the first of the smallest (largest); R0004 for an empty list
+        let a0 = args[0].kids[0]
+        let tl = gen_borrow(inout g, a0, true)
+        let o = new_local(inout g, wt_i32())
+        lset(inout g, o)
+        lget(inout g, o)
+        load_at(inout g, wt_i32(), 4)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        fail_at_rt(inout g, e, "R0004", "`" + b + "` of an empty list", "")
+        close(inout g)
+        lget(inout g, o)
+        i32c(inout g, if b == "maximum" { 1 } else { 0 })
+        call_f(inout g, rt_fn(inout g, if elem_ty(g, a0.t) == Ty.TFloat { "rt_extreme_f64" } else { "rt_extreme_i64" }))
+        return drop_tmp(inout g, tl, a0.t)
+    }
     if b == "len" and (is_list(args[0].kids[0].t) or is_map(args[0].kids[0].t) or args[0].kids[0].t == Ty.TBytes) {
         let tl = gen_borrow(inout g, args[0].kids[0], true)
         load_at(inout g, wt_i32(), 4)
@@ -1518,7 +1538,7 @@ fn builtin_w(inout g: WGen, e: H) {
     // functions of the runtime on texts and lists, which borrow their arguments
     let on_rt = [("join", "rt_join"), ("codes", "rt_codes"), ("starts_with", "rt_starts_with"), ("ends_with", "rt_ends_with"),
         ("find", "rt_find"), ("file_exists", "rt_file_exists"), ("file_size", "rt_file_size"), ("env", "rt_env"), ("trim", "rt_trim"),
-        ("replace", "rt_replace"), ("to_hex", "rt_to_hex"), ("parse_float", "rt_parse_float"), ("lines", "rt_lines")]
+        ("replace", "rt_replace"), ("to_hex", "rt_to_hex"), ("parse_float", "rt_parse_float"), ("lines", "rt_lines"), ("file_date", "rt_file_date"), ("upper", "rt_upper"), ("lower", "rt_lower")]
     for r in on_rt {
         if b == r.0 { return call_rt_borrowing(inout g, r.1, args) }
     }
@@ -2881,7 +2901,8 @@ fn wasi_imports() -> List[(str, List[i64], List[i64])] {
     [("fd_write", [i, i, i, i], [i]), ("proc_exit", [i], []), ("args_sizes_get", [i, i], [i]), ("args_get", [i, i], [i]),
         ("environ_sizes_get", [i, i], [i]), ("environ_get", [i, i], [i]), ("path_open", [i, i, i, i, i, l, l, i, i], [i]),
         ("fd_read", [i, i, i, i], [i]), ("fd_close", [i], [i]), ("path_create_directory", [i, i, i], [i]),
-        ("path_filestat_get", [i, i, i, i, i], [i]), ("clock_time_get", [i, l, i], [i])]
+        ("path_filestat_get", [i, i, i, i, i], [i]), ("clock_time_get", [i, l, i], [i]),
+        ("fd_readdir", [i, i, i, l, i], [i])]
 }
 
 // `wasm_wasi_<name>(...)`: the arguments (i64 in Kairós) as WASI takes them, the result as an i64.
@@ -3868,6 +3889,55 @@ fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
         drop_tmp(inout g, tb, rtt(g))
         return true
     }
+    if b == "nan_quantile" {
+        let tx = gen_borrow(inout g, x, not changes(args[1]))
+        gen(inout g, args[1].kids[0])
+        gen(inout g, args[2].kids[0])
+        call_f(inout g, rt_fn(inout g, "rt_t_nan_quantile"))
+        if not is_tensor_t(e.t) { tensor_to_scalar(inout g, e.t) }
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "merge_days" {
+        let tx = gen_borrow(inout g, x, true)
+        call_f(inout g, rt_fn(inout g, "rt_t_merge_days"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "contract" {
+        let y = args[1].kids[0]
+        let tx = gen_borrow(inout g, x, not changes(args[1]))
+        let a = new_local(inout g, wt_i32())
+        lset(inout g, a)
+        let tyl = gen_borrow(inout g, y, true)
+        let c = new_local(inout g, wt_i32())
+        lset(inout g, c)
+        let lit = args[2].kids[0].text
+        let ax = parse_int(substr(lit, 4, len(lit) - 4))
+        // the sizes, as the interpreter checks them: the axis summed over, then those y shares
+        var shared = [ax]
+        for k in axes_of_t(y.t) {
+            if k != ax and contains(axes_of_t(x.t), k) { shared.push(k) }
+        }
+        for k in shared {
+            let sa = tensor_size(inout g, a, k)
+            let sb = tensor_size(inout g, c, k)
+            lget(inout g, sa)
+            lget(inout g, sb)
+            op(inout g, 82)
+            open(inout g, 4, 0)
+            fail_dyn2(inout g, e, "R0201", ["size mismatch on axis `" + g.ck.axes[k].name + "`: ", " vs ", ""], [(sa, "rt_str_i64"), (sb, "rt_str_i64")])
+            close(inout g)
+        }
+        lget(inout g, a)
+        lget(inout g, c)
+        i64c(inout g, ax)
+        call_f(inout g, rt_fn(inout g, "rt_t_contract"))
+        if not is_tensor_t(e.t) { tensor_to_scalar(inout g, e.t) }
+        drop_tmp(inout g, tx, rtt(g))
+        drop_tmp(inout g, tyl, rtt(g))
+        return true
+    }
     if b == "to_list" {
         let tx = gen_borrow(inout g, x, true)
         call_f(inout g, rt_fn(inout g, if elem_ty(g, e.t) == Ty.TBool { "rt_t_to_bools" } else { "rt_t_to_list" }))
@@ -3991,6 +4061,61 @@ fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
 }
 
 // The text of a tensor (glue "show"): the names of the axes, then rt_t_show.
+// randn(seed: s, a: n, ...): the seed, then each axis and its size (R0203 for a negative size, and
+// for more than 2^28 values), then the samples (rt_t_randn)
+fn randn_w(inout g: WGen, e: H) {
+    let args = e.kids
+    gen(inout g, args[0].kids[0])
+    let seed = new_local(inout g, wt_i64())
+    lset(inout g, seed)
+    i64c(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let axes = new_local(inout g, wt_i32())
+    lset(inout g, axes)
+    i64c(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let shape = new_local(inout g, wt_i32())
+    lset(inout g, shape)
+    var k = 1
+    while k + 1 < len(args) {
+        let ax = args[k].kids[0]
+        let ln = new_local(inout g, wt_i64())
+        gen(inout g, args[k + 1].kids[0])
+        lset(inout g, ln)
+        lget(inout g, ln)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        let id = parse_int(substr(ax.text, 4, len(ax.text) - 4))
+        fail_dyn2(inout g, e, "R0203", ["invalid size ", " for axis `" + g.ck.axes[id].name + "`"], [(ln, "rt_str_i64")])
+        close(inout g)
+        for pair in [(axes, -1), (shape, ln)] {
+            lget(inout g, pair.0)
+            if pair.1 < 0 { gen(inout g, ax) } else { lget(inout g, pair.1) }
+            call_f(inout g, rt_fn(inout g, "rt_t_shape_add"))
+            lget(inout g, pair.0)
+            drop_v(inout g, Ty.TList(Ty.TInt))
+            lset(inout g, pair.0)
+        }
+        k += 2
+    }
+    lget(inout g, shape)
+    call_f(inout g, rt_fn(inout g, "rt_t_too_large"))
+    open(inout g, 4, 0)
+    fail_at_rt(inout g, e, "R0203", "tensor too large", "")
+    close(inout g)
+    lget(inout g, seed)
+    lget(inout g, axes)
+    lget(inout g, shape)
+    call_f(inout g, rt_fn(inout g, "rt_t_randn"))
+    lget(inout g, axes)
+    drop_v(inout g, Ty.TList(Ty.TInt))
+    lget(inout g, shape)
+    drop_v(inout g, Ty.TList(Ty.TInt))
+}
+
 fn glue_show_tensor(inout g: WGen) {
     let n = len(g.ck.axes)
     i64c(inout g, n)

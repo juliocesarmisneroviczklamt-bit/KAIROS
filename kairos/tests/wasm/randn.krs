@@ -1,0 +1,9 @@
+// randn: the samples the interpreter draws (xoshiro256**, Box-Muller with libm's sin and cos)
+let a = randn(seed: 7, asset: 5)
+print(a)
+let b = randn(seed: -1, month: 3, asset: 2)
+print(to_list(b[month: 0]), to_list(b[month: 2]))
+print(nan_sum(randn(seed: 42, month: 100, asset: 33)))
+// out: Tensor[asset: 5; f64] [-0.15157274547711408, 0.8298970879692569, 0.5870995807125803, -0.07005746853436715, 0.09447186106493752]
+// out: [0.11775181095092058, -1.070586165639387] [-0.12190288029025048, -1.0578952796694467]
+// out: -0.1771938486112643

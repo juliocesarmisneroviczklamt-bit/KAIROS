@@ -17,6 +17,7 @@ import "rt_math.krs"
 import "rt_unicode.krs"
 import "rt_decimal.krs"
 import "rt_tensor.krs"
+import "rt_case.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0
@@ -750,13 +751,22 @@ fn wasm_wasi_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
     0
 }
 
+fn wasm_wasi_fd_readdir(fd: i64, buf: i64, size: i64, cookie: i64, used_at: i64) -> i64 {
+    0
+}
+
 // today(): the date (UTC, YYYYMMDD) of WASI's clock, as the interpreter has it (civil_from_days)
 fn rt_today() -> i64 {
     let at = rt_alloc(16)
     let _ = wasm_wasi_clock_time_get(0, 1000, at)
     let ns = wasm_load64(at)
     rt_free(at, 16)
-    let z = ns / 1000000000 / 86400 + 719468
+    rt_civil(ns / 1000000000 / 86400)
+}
+
+// The date (YYYYMMDD) of a day counted from 1970-01-01.
+fn rt_civil(days: i64) -> i64 {
+    let z = days + 719468
     let era = (if z >= 0 { z } else { z - 146096 }) / 146097
     let doe = z - era * 146097
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
@@ -943,18 +953,23 @@ fn rt_read_file(p: str) -> (i64, Bytes) {
 fn rt_write_file(p: str, q: i64, n: i64) -> i64 {
     let o = rt_open(p, true)
     if o.0 != 0 { return o.0 }
+    rt_write_fd(o.1, q, n)
+}
+
+// n bytes at q to the open file fd, which is then closed: WASI's error code.
+fn rt_write_fd(fd: i64, q: i64, n: i64) -> i64 {
     let io = rt_alloc(16)
     var at = 0
     var e = 0
     while at < n {
         wasm_store32(io, q + at)
         wasm_store32(io + 4, n - at)
-        e = wasm_wasi_fd_write(o.1, io, 1, io + 8)
+        e = wasm_wasi_fd_write(fd, io, 1, io + 8)
         if e != 0 { break }
         at += wasm_load32(io + 8)
     }
     rt_free(io, 16)
-    let _ = wasm_wasi_fd_close(o.1)
+    let _ = wasm_wasi_fd_close(fd)
     e
 }
 
@@ -987,6 +1002,92 @@ fn rt_file_exists(p: str) -> bool {
     let e = wasm_wasi_path_filestat_get(3, 1, rt_path_addr(p), rt_path_len(p), st)
     rt_free(st, 64)
     e == 0
+}
+
+// file_date(p): the day the file last changed (YYYYMMDD, UTC), or 0: WASI's filestat has the time
+// in nanoseconds at offset 48.
+fn rt_file_date(p: str) -> i64 {
+    let st = rt_alloc(64)
+    let e = wasm_wasi_path_filestat_get(3, 1, rt_path_addr(p), rt_path_len(p), st)
+    let ns = if e == 0 { wasm_load64(st + 48) } else { -1 }
+    rt_free(st, 64)
+    if ns < 0 { 0 } else { rt_civil(ns / 1000000000 / 86400) }
+}
+
+// append_text(p, s): the text at the end of the file, which is created if it is not there (WASI's
+// error code).
+fn rt_append_text(p: str, s: str) -> i64 {
+    let cell = rt_alloc(16)
+    // oflags 1: create; fdflags 1: append
+    let e = wasm_wasi_path_open(3, 1, rt_path_addr(p), rt_path_len(p), 1, 100, 0, 1, cell)
+    let fd = wasm_load32(cell)
+    rt_free(cell, 16)
+    if e != 0 { return e }
+    rt_write_fd(fd, wasm_str_addr(s) + 8, wasm_load32(wasm_str_addr(s) + 4))
+}
+
+// list_dir(p): the names in a folder, sorted (as Rust's read_dir, without . and ..): (WASI's error
+// code, the names). Each entry: the next cookie (8 bytes), the inode (8), the name's length (4),
+// the type (1), 3 more, then the name.
+fn rt_list_dir(p: str) -> (i64, List[str]) {
+    var out: List[str] = []
+    let cell = rt_alloc(16)
+    // oflags 2: a folder; the right to read it (fd_readdir: 1 << 14)
+    let e = wasm_wasi_path_open(3, 1, rt_path_addr(p), rt_path_len(p), 2, 16384, 0, 0, cell)
+    let fd = wasm_load32(cell)
+    rt_free(cell, 16)
+    if e != 0 { return (e, out) }
+    let size = 65536
+    let buf = rt_alloc(size)
+    let used_at = rt_alloc(16)
+    var cookie = 0
+    var err = 0
+    var more = true
+    while more {
+        err = wasm_wasi_fd_readdir(fd, buf, size, cookie, used_at)
+        if err != 0 { more = false }
+        let used = if err == 0 { wasm_load32(used_at) } else { 0 }
+        var at = 0
+        var whole = true
+        while whole and at + 24 <= used {
+            let n = wasm_load32(buf + at + 16)
+            if at + 24 + n > used {
+                // cut at the end of the buffer: read again from it
+                whole = false
+            } else {
+                let name = rt_text_of(buf + at + 24, n)
+                if name != "." and name != ".." { out.push(name) }
+                cookie = wasm_load64(buf + at)
+                at += 24 + n
+            }
+        }
+        if used < size { more = false }
+    }
+    rt_free(buf, size)
+    rt_free(used_at, 16)
+    let _ = wasm_wasi_fd_close(fd)
+    out.sort()
+    (err, out)
+}
+
+// minimum and maximum of a list (not empty: the back end checks): the first of the smallest or of
+// the largest, compared as the interpreter compares (NaN is never smaller nor larger)
+fn rt_extreme_i64(xs: List[i64], most: bool) -> i64 {
+    var best = xs[0]
+    for i in 1..len(xs) {
+        let x = xs[i]
+        if (most and best < x) or (not most and x < best) { best = x }
+    }
+    best
+}
+
+fn rt_extreme_f64(xs: List[f64], most: bool) -> f64 {
+    var best = xs[0]
+    for i in 1..len(xs) {
+        let x = xs[i]
+        if (most and best < x) or (not most and x < best) { best = x }
+    }
+    best
 }
 
 // make_dir: each folder on the way (as create_dir_all): WASI's error code.
@@ -1306,11 +1407,12 @@ fn rt_uni_at(p: i64, k: i64) -> i64 {
     v
 }
 
-// which: 0 alphabetic, 1 alphanumeric, 2 uppercase, 3 white space
+// which: 0 alphabetic, 1 alphanumeric, 2 uppercase, 3 white space, 4 case-ignorable, 5 cased (and
+// not case-ignorable)
 fn rt_uni_in(c: i64, which: i64) -> bool {
     // not a character: negative, a surrogate, beyond U+10FFFF
     if c < 0 or c > 1114111 or (c >= 55296 and c <= 57343) { return false }
-    let t = if which == 0 { rt_uni_alphabetic() } else if which == 1 { rt_uni_alphanumeric() } else if which == 2 { rt_uni_uppercase() } else { rt_uni_whitespace() }
+    let t = if which == 0 { rt_uni_alphabetic() } else if which == 1 { rt_uni_alphanumeric() } else if which == 2 { rt_uni_uppercase() } else if which == 3 { rt_uni_whitespace() } else if which == 4 { rt_case_ignorable() } else { rt_case_cased() }
     let p = wasm_str_addr(t)
     var lo = 0
     var hi = wasm_load32(p + 4) / 4
@@ -1319,6 +1421,66 @@ fn rt_uni_in(c: i64, which: i64) -> bool {
         if rt_uni_at(p, mid) <= c { lo = mid + 1 } else { hi = mid }
     }
     lo % 2 == 1
+}
+
+// What a case table of rt_case.krs maps c to (one to three code points), or nothing.
+fn rt_case_map(t: str, c: i64) -> List[i64] {
+    var out: List[i64] = []
+    let p = wasm_str_addr(t)
+    var lo = 0
+    var hi = wasm_load32(p + 4) / 16
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        let k = rt_uni_at(p, 4 * mid)
+        if k == c {
+            for i in 1..4 {
+                let x = rt_uni_at(p, 4 * mid + i)
+                if x != 0 { out.push(x) }
+            }
+            return out
+        }
+        if k < c { lo = mid + 1 } else { hi = mid }
+    }
+    out
+}
+
+// upper(s), lower(s): as Rust's to_uppercase and to_lowercase
+fn rt_upper(s: str) -> str {
+    let t = rt_case_upper()
+    var out: List[i64] = []
+    for c in codes(s) {
+        let m = rt_case_map(t, c)
+        if len(m) == 0 { out.push(c) } else { for x in m { out.push(x) } }
+    }
+    from_codes(out)
+}
+
+fn rt_lower(s: str) -> str {
+    let t = rt_case_lower()
+    let cs = codes(s)
+    var out: List[i64] = []
+    for i in 0..len(cs) {
+        let c = cs[i]
+        if c == 931 {
+            // Σ: ς at the end of a word, σ elsewhere
+            out.push(if rt_final_sigma(cs, i) { 962 } else { 963 })
+        } else {
+            let m = rt_case_map(t, c)
+            if len(m) == 0 { out.push(c) } else { for x in m { out.push(x) } }
+        }
+    }
+    from_codes(out)
+}
+
+// Σ at cs[i] ends a word: past the case-ignorable characters, a cased one comes before it and none
+// after it (Unicode's Final_Sigma, as Rust reads it)
+fn rt_final_sigma(cs: List[i64], i: i64) -> bool {
+    var j = i - 1
+    while j >= 0 and rt_uni_in(cs[j], 4) { j -= 1 }
+    if j < 0 or not rt_uni_in(cs[j], 5) { return false }
+    var k = i + 1
+    while k < len(cs) and rt_uni_in(cs[k], 4) { k += 1 }
+    not (k < len(cs) and rt_uni_in(cs[k], 5))
 }
 
 // ------------------------------------------------------------------ floats as text

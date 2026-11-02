@@ -57,6 +57,7 @@ struct Wasi {
     err: Vec<u8>,
     root: PathBuf,
     files: std::collections::HashMap<i32, std::fs::File>,
+    dirs: std::collections::HashMap<i32, PathBuf>,
     next_fd: i32,
     args: Vec<String>,
     env: Vec<String>,
@@ -207,14 +208,28 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
         .func_wrap(
             w,
             "path_open",
-            |mut c: Caller<'_>, dir: i32, _flags: i32, at: i32, n: i32, oflags: i32, _rights: i64, _inherit: i64, _fdflags: i32, fd_out: i32| -> i32 {
+            |mut c: Caller<'_>, dir: i32, _flags: i32, at: i32, n: i32, oflags: i32, _rights: i64, _inherit: i64, fdflags: i32, fd_out: i32| -> i32 {
                 if dir != 3 {
                     return 8;
                 }
                 let p = wasi_path(&c, at, n);
-                // 1: create, 8: truncate
+                // 2: a folder, to read with fd_readdir
+                if oflags & 2 != 0 {
+                    return match std::fs::metadata(&p) {
+                        Ok(m) if m.is_dir() => {
+                            let fd = c.data().next_fd;
+                            c.data_mut().next_fd += 1;
+                            c.data_mut().dirs.insert(fd, p);
+                            mem_write(&mut c, fd_out, &fd.to_le_bytes());
+                            0
+                        }
+                        Ok(_) => 54,
+                        Err(e) => errno(&e),
+                    };
+                }
+                // 1: create, 8: truncate; fdflags 1: append
                 let r = if oflags & 1 != 0 {
-                    std::fs::OpenOptions::new().write(true).create(true).truncate(oflags & 8 != 0).open(&p)
+                    std::fs::OpenOptions::new().write(true).create(true).truncate(oflags & 8 != 0).append(fdflags & 1 != 0).open(&p)
                 } else {
                     std::fs::File::open(&p)
                 };
@@ -255,7 +270,38 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
             0
         })
         .unwrap();
-    linker.func_wrap(w, "fd_close", |mut c: Caller<'_>, fd: i32| -> i32 { if c.data_mut().files.remove(&fd).is_some() { 0 } else { 8 } }).unwrap();
+    linker
+        .func_wrap(w, "fd_close", |mut c: Caller<'_>, fd: i32| -> i32 {
+            if c.data_mut().files.remove(&fd).is_some() || c.data_mut().dirs.remove(&fd).is_some() { 0 } else { 8 }
+        })
+        .unwrap();
+    linker
+        .func_wrap(w, "fd_readdir", |mut c: Caller<'_>, fd: i32, buf: i32, len: i32, cookie: i64, used: i32| -> i32 {
+            let Some(dir) = c.data().dirs.get(&fd).cloned() else { return 8 };
+            let mut names: Vec<String> = match std::fs::read_dir(&dir) {
+                Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect(),
+                Err(e) => return errno(&e),
+            };
+            names.sort();
+            // entries from the cookie on: next cookie, inode, the name's length, type, 3 more, the
+            // name; the last one may be cut at the end of the buffer
+            let mut out = Vec::new();
+            for (k, name) in names.iter().enumerate().skip(cookie.max(0) as usize) {
+                out.extend_from_slice(&(k as u64 + 1).to_le_bytes());
+                out.extend_from_slice(&0u64.to_le_bytes());
+                out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                out.extend_from_slice(&[0, 0, 0, 0]);
+                out.extend_from_slice(name.as_bytes());
+                if out.len() >= len as usize {
+                    break;
+                }
+            }
+            out.truncate(len as usize);
+            mem_write(&mut c, buf, &out);
+            mem_write(&mut c, used, &(out.len() as u32).to_le_bytes());
+            0
+        })
+        .unwrap();
     linker
         .func_wrap(w, "path_create_directory", |c: Caller<'_>, dir: i32, at: i32, n: i32| -> i32 {
             if dir != 3 {
@@ -278,6 +324,9 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
                     let mut st = [0u8; 64];
                     st[16] = if m.is_dir() { 3 } else { 4 };
                     st[32..40].copy_from_slice(&m.len().to_le_bytes());
+                    // the time it last changed (ns)
+                    let ns = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+                    st[48..56].copy_from_slice(&ns.to_le_bytes());
                     mem_write(&mut c, buf, &st);
                     0
                 }

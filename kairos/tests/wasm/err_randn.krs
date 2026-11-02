@@ -1,0 +1,3 @@
+// error: R0203
+let n = 2 - 5
+print(randn(seed: 1, asset: n))

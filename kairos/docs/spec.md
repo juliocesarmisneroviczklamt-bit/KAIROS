@@ -846,13 +846,17 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 - **Builtins novos no runtime:**
   - `format_fixed`: o valor exato do float, arredondado para o par, como o `{:.N}` do Rust, com inteiros grandes em Kairós;
   - `lines`;
-  - `today`, pelo relógio do WASI.
+  - `today`, pelo relógio do WASI;
+  - `minimum` e `maximum`; `append_text`, `list_dir` e `file_date`, pelo WASI;
+  - os tensores `nan_quantile`, `merge_days` e `contract`;
+  - `randn`: o xoshiro256** e o Box-Muller do interpretador, com o `sin` e o `cos` da `libm` portados para Kairós (os mesmos bits, conferidos em `tests/rt/randn.krs`);
+  - `upper` e `lower`, como o `to_uppercase` e o `to_lowercase` do Rust (um caractere pode virar dois ou três; Σ no fim de uma palavra vira ς). As tabelas ([`rt_case.krs`](../compiler/rt_case.krs)) são geradas por [`gen_case.krs`](../compiler/gen_case.krs), que pergunta ao interpretador sobre cada ponto de código.
 - **A memória cresce um oitavo por vez**, não uma página por vez: o `momentum` compilado roda em 1,4 s no node, contra 40 s antes.
-- No Windows, o node 22 pode cair (segfault) com alguns desses módulos. Eles rodam quando as funções do WASI são chamadas através de JavaScript, e também no wasmi.
+- No Windows, o node 22 pode cair (segfault) com alguns desses módulos. Eles rodam quando as funções do WASI são chamadas através de JavaScript, e também no wasmi. O WASI do node no Windows também não lê pastas (`fd_readdir`), então `list_dir` só funciona nos outros runtimes.
 
 **Ainda não compila:**
-- `grad`;
-- `upper` e `lower`;
-- a internet.
+- `grad`, `value_and_grad` e as regras suaves (`smooth_max`, `smooth_min`, `smooth_step`);
+- `read_lines` (que também lê arquivos ZIP);
+- a internet (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
 
 Um programa que os usa é recusado com W0001, no ponto exato.

@@ -459,3 +459,142 @@ fn rt_sigmoid(x: f64) -> f64 {
 fn rt_softplus(x: f64) -> f64 {
     if x > 30.0 { x } else { rt_log1p(rt_exp(x)) }
 }
+
+// ------------------------------------------------------------------ sin and cos
+//
+// libm's sin and cos (k_sin.rs, k_cos.rs, rem_pio2.rs: FreeBSD's k_sin.c, k_cos.c,
+// e_rem_pio2.c), for `randn`, whose angles are in (0, 2 pi]. The reduction of huge arguments
+// (|x| >= 2^20 pi/2, Payne-Hanek) is not ported: nothing here asks for it.
+
+fn rt_k_sin(x: f64, y: f64, iy: i64) -> f64 {
+    let z = x * x
+    let w = z * z
+    let r = 8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 + z * 2.75573137070700676789e-06) + z * w * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10)
+    let v = z * x
+    if iy == 0 { x + v * (-1.66666666666666324348e-01 + z * r) } else { x - ((z * (0.5 * y - v * r) - y) - v * -1.66666666666666324348e-01) }
+}
+
+fn rt_k_cos(x: f64, y: f64) -> f64 {
+    let z = x * x
+    let w = z * z
+    let r = z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * 2.48015872894767294178e-05)) + w * w * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11))
+    let hz = 0.5 * z
+    let w2 = 1.0 - hz
+    w2 + (((1.0 - w2) - hz) + (z * r - x * y))
+}
+
+// x = n pi/2 + (y0 + y1), |y0 + y1| <= pi/4: (n, y0, y1)
+fn rt_rem_pio2(x: f64) -> (i64, f64, f64) {
+    let p1 = 1.57079632673412561417e+00
+    let p1t = 6.07710050650619224932e-11
+    let sign = shr(to_bits(x), 63)
+    let ix = bit_and(shr(to_bits(x), 32), 2147483647)
+    var medium = false
+    if ix <= 1074752122 {
+        // |x| ~<= 5pi/4
+        if bit_and(ix, 1048575) == 598523 {
+            medium = true
+        } else if ix <= 1073928572 {
+            if sign == 0 {
+                let z = x - p1
+                let y0 = z - p1t
+                return (1, y0, (z - y0) - p1t)
+            }
+            let z = x + p1
+            let y0 = z + p1t
+            return (-1, y0, (z - y0) + p1t)
+        } else if sign == 0 {
+            let z = x - 2.0 * p1
+            let y0 = z - 2.0 * p1t
+            return (2, y0, (z - y0) - 2.0 * p1t)
+        } else {
+            let z = x + 2.0 * p1
+            let y0 = z + 2.0 * p1t
+            return (-2, y0, (z - y0) + 2.0 * p1t)
+        }
+    } else if ix <= 1075594811 {
+        // |x| ~<= 9pi/4
+        if ix <= 1075183036 {
+            if ix == 1074977148 {
+                medium = true
+            } else if sign == 0 {
+                let z = x - 3.0 * p1
+                let y0 = z - 3.0 * p1t
+                return (3, y0, (z - y0) - 3.0 * p1t)
+            } else {
+                let z = x + 3.0 * p1
+                let y0 = z + 3.0 * p1t
+                return (-3, y0, (z - y0) + 3.0 * p1t)
+            }
+        } else if ix == 1075388923 {
+            medium = true
+        } else if sign == 0 {
+            let z = x - 4.0 * p1
+            let y0 = z - 4.0 * p1t
+            return (4, y0, (z - y0) - 4.0 * p1t)
+        } else {
+            let z = x + 4.0 * p1
+            let y0 = z + 4.0 * p1t
+            return (-4, y0, (z - y0) + 4.0 * p1t)
+        }
+    } else {
+        medium = ix < 1094263291
+    }
+    if not medium {
+        // inf, NaN, or a huge argument (not ported: NaN)
+        return (0, x - x + nan, x - x + nan)
+    }
+    // rint(x / (pi/2)), rounding to the nearest
+    let to_int = 6755399441055744.0
+    let f_n = (x * 6.36619772367581382433e-01 + to_int) - to_int
+    let n = int(f_n)
+    var r = x - f_n * p1
+    var w = f_n * p1t
+    var y0 = r - w
+    let ex = shr(ix, 20)
+    var ey = bit_and(shr(to_bits(y0), 52), 2047)
+    if ex - ey > 16 {
+        // 2nd round, good to 118 bits
+        let t = r
+        w = f_n * 6.07710050630396597660e-11
+        r = t - w
+        w = f_n * 2.02226624879595063154e-21 - ((t - r) - w)
+        y0 = r - w
+        ey = bit_and(shr(to_bits(y0), 52), 2047)
+        if ex - ey > 49 {
+            // 3rd round, good to 151 bits, covers all cases
+            let t2 = r
+            w = f_n * 2.02226624871116645580e-21
+            r = t2 - w
+            w = f_n * 8.47842766036889956997e-32 - ((t2 - r) - w)
+            y0 = r - w
+        }
+    }
+    (n, y0, (r - y0) - w)
+}
+
+fn rt_sin(x: f64) -> f64 {
+    let ix = bit_and(shr(to_bits(x), 32), 2147483647)
+    if ix <= 1072243195 {
+        // |x| ~< pi/4
+        if ix < 1045430272 { return x }
+        return rt_k_sin(x, 0.0, 0)
+    }
+    if ix >= 2146435072 { return x - x }
+    let r = rt_rem_pio2(x)
+    let q = bit_and(r.0, 3)
+    if q == 0 { rt_k_sin(r.1, r.2, 1) } else if q == 1 { rt_k_cos(r.1, r.2) } else if q == 2 { -rt_k_sin(r.1, r.2, 1) } else { -rt_k_cos(r.1, r.2) }
+}
+
+fn rt_cos(x: f64) -> f64 {
+    let ix = bit_and(shr(to_bits(x), 32), 2147483647)
+    if ix <= 1072243195 {
+        // |x| ~< pi/4
+        if ix < 1044816030 { return 1.0 }
+        return rt_k_cos(x, 0.0)
+    }
+    if ix >= 2146435072 { return x - x }
+    let r = rt_rem_pio2(x)
+    let q = bit_and(r.0, 3)
+    if q == 0 { rt_k_cos(r.1, r.2) } else if q == 1 { -rt_k_sin(r.1, r.2, 1) } else if q == 2 { -rt_k_cos(r.1, r.2) } else { rt_k_sin(r.1, r.2, 1) }
+}

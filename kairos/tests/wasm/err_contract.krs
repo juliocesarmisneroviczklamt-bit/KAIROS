@@ -1,0 +1,4 @@
+// error: R0201
+let a = zeros(month: 2, asset: 3)
+let b = zeros(asset: 4)
+print(contract(a, b, over: asset))

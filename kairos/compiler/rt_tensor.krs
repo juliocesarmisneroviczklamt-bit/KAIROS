@@ -472,3 +472,143 @@ fn rt_t_show(t: RtT, names: List[str]) -> str {
     for x in t.data { vals.push(if t.boolean { if x != 0.0 { "true" } else { "false" } } else { str(x) }) }
     head + " [" + join(vals, ", ") + "]"
 }
+
+// nan_quantile(t, q, over: ax): along ax, the value at floor(q * n) of the n valid values sorted
+// ascending (q clamped to [0, 1]: NaN takes the first); NaN where there are none. The axis goes.
+fn rt_t_nan_quantile(t: RtT, q: f64, ax: i64) -> RtT {
+    let p = rt_t_pos(t, ax)
+    let qc = if q < 0.0 { 0.0 } else if q > 1.0 { 1.0 } else { q }
+    var d: List[f64] = []
+    for f in rt_t_fibers(t, p) {
+        let s = rt_t_sorted_valid(t, f)
+        if len(s) == 0 {
+            d.push(nan)
+        } else {
+            let x = qc * float(len(s))
+            let i = if is_nan(x) { 0 } else { int(floor(x)) }
+            d.push(t.data[s[min(i, len(s) - 1)]])
+        }
+    }
+    var axes: List[i64] = []
+    var shape: List[i64] = []
+    for k in 0..len(t.axes) {
+        if k != p {
+            axes.push(t.axes[k])
+            shape.push(t.shape[k])
+        }
+    }
+    RtT { axes: axes, shape: shape, data: d, boolean: false }
+}
+
+// merge_days(t): [.., month, .., session, ..] as [day, ..] (day = month * sessions + session), the
+// other axes in their order (month 0, day 1, session 3)
+fn rt_t_merge_days(t: RtT) -> RtT {
+    let pm = rt_t_pos(t, 0)
+    let ps = rt_t_pos(t, 3)
+    var order = [pm, ps]
+    for k in 0..len(t.axes) {
+        if k != pm and k != ps { order.push(k) }
+    }
+    var axes = [1]
+    var shape = [t.shape[pm] * t.shape[ps]]
+    var oaxes: List[i64] = []
+    var oshape: List[i64] = []
+    for i in 0..len(order) {
+        let k = order[i]
+        oaxes.push(t.axes[k])
+        oshape.push(t.shape[k])
+        if i >= 2 {
+            axes.push(t.axes[k])
+            shape.push(t.shape[k])
+        }
+    }
+    var d: List[f64] = []
+    for o in rt_t_offsets(t, oaxes, oshape) { d.push(t.data[o]) }
+    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean }
+}
+
+// contract(x, y, over: ax): the sum over ax of x * y (from 0.0, in the order of ax); the other
+// axes the two share are batch axes, the rest an outer product (the back end checked the sizes)
+fn rt_t_contract(x: RtT, y: RtT, ax: i64) -> RtT {
+    let px = rt_t_pos(x, ax)
+    let py = rt_t_pos(y, ax)
+    let n = x.shape[px]
+    var axes: List[i64] = []
+    var shape: List[i64] = []
+    for k in 0..len(x.axes) {
+        if x.axes[k] != ax {
+            axes.push(x.axes[k])
+            shape.push(x.shape[k])
+        }
+    }
+    for k in 0..len(y.axes) {
+        if y.axes[k] != ax and rt_t_pos(x, y.axes[k]) < 0 {
+            axes.push(y.axes[k])
+            shape.push(y.shape[k])
+        }
+    }
+    let ox = rt_t_offsets(x, axes, shape)
+    let oy = rt_t_offsets(y, axes, shape)
+    let kx = rt_t_strides(x.shape)[px]
+    let ky = rt_t_strides(y.shape)[py]
+    var d: List[f64] = []
+    for i in 0..len(ox) {
+        var acc = 0.0
+        for k in 0..n { acc = acc + x.data[ox[i] + k * kx] * y.data[oy[i] + k * ky] }
+        d.push(acc)
+    }
+    RtT { axes: axes, shape: shape, data: d, boolean: false }
+}
+
+// randn(seed: s, a: n, ...): normal samples as the interpreter draws them (src/tensor.rs): a
+// xoshiro256** seeded by splitmix64, uniforms in (0, 1] from 53 bits, then Box-Muller with libm's
+// ln, sin and cos (rt_math.krs).
+fn rt_t_rotl(x: i64, k: i64) -> i64 {
+    bit_or(shl(x, k), shr(x, 64 - k))
+}
+
+fn rt_t_unif(inout s: List[i64]) -> f64 {
+    let r = wrapping_mul(rt_t_rotl(wrapping_mul(s[1], 5), 7), 9)
+    let t = shl(s[1], 17)
+    s[2] = bit_xor(s[2], s[0])
+    s[3] = bit_xor(s[3], s[1])
+    s[1] = bit_xor(s[1], s[2])
+    s[0] = bit_xor(s[0], s[3])
+    s[2] = bit_xor(s[2], t)
+    s[3] = rt_t_rotl(s[3], 45)
+    (float(shr(r, 11)) + 1.0) / 9007199254740992.0
+}
+
+fn rt_t_randn(seed: i64, axes: List[i64], shape: List[i64]) -> RtT {
+    var sm = seed
+    var s: List[i64] = []
+    for i in 0..4 {
+        sm = wrapping_add(sm, -7046029254386353131)
+        var z = sm
+        z = wrapping_mul(bit_xor(z, shr(z, 30)), -4658895280553007687)
+        z = wrapping_mul(bit_xor(z, shr(z, 27)), -7723592293110705685)
+        s.push(bit_xor(z, shr(z, 31)))
+    }
+    let n = rt_t_count(shape)
+    var v: List[f64] = []
+    while len(v) < n {
+        let u1 = rt_t_unif(inout s)
+        let u2 = rt_t_unif(inout s)
+        let r = sqrt(-2.0 * rt_log(u1))
+        let th = 2.0 * 3.141592653589793 * u2
+        v.push(r * rt_cos(th))
+        v.push(r * rt_sin(th))
+    }
+    if len(v) > n { let _ = v.pop() }
+    RtT { axes: axes, shape: shape, data: v, boolean: false }
+}
+
+// randn's limit: more than 2^28 values (or a product that does not fit)
+fn rt_t_too_large(shape: List[i64]) -> bool {
+    var n = 1
+    for s in shape {
+        if s != 0 and n > 9223372036854775807 / s { return true }
+        n = n * s
+    }
+    n > 268435456
+}

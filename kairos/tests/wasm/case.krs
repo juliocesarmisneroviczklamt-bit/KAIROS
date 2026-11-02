@@ -1,0 +1,41 @@
+// upper and lower as Rust's to_uppercase and to_lowercase: every character up to U+1F000 (a hash
+// of what each becomes), and the rule of the final sigma (Σ at the end of a word becomes ς)
+fn mix(h: i64, s: str) -> i64 {
+    var x = h
+    for c in codes(s) { x = bit_and(wrapping_mul(bit_xor(x, c), 1099511628211), 9223372036854775807) }
+    x
+}
+
+var hu = 0
+var hl = 0
+var changed = 0
+for c in 0..126976 {
+    if c >= 55296 and c <= 57343 { continue }
+    let s = from_codes([c])
+    let u = upper(s)
+    let l = lower(s)
+    if u != s or l != s { changed += 1 }
+    hu = mix(hu, u)
+    hl = mix(hl, l)
+}
+print("characters that change", changed, "hashes", hu, hl)
+print(upper("straße ﬁ ǰ ŉ ΐ"), lower("İSTANBUL ΑΒΓ"))
+let sig = from_codes([931])
+for w in ["ΟΔΟΣ", "ΟΔΟΣ ΟΔΟΣ", "Σ", "ΑΣ.", "ΑΣ'Β", "Σ'Α", "Α'Σ", "A" + sig + "1", "1" + sig, "ΑΣΣ", "Α" + from_codes([769]) + sig, "Α" + sig + from_codes([769]), "x" + sig + from_codes([769]) + "y"] {
+    print(w, lower(w), upper(lower(w)))
+}
+// out: characters that change 3037 hashes 2788012827518767872 8177866432169021112
+// out: STRASSE FI J̌ ʼN Ϊ́ i̇stanbul αβγ
+// out: ΟΔΟΣ οδος ΟΔΟΣ
+// out: ΟΔΟΣ ΟΔΟΣ οδος οδος ΟΔΟΣ ΟΔΟΣ
+// out: Σ σ Σ
+// out: ΑΣ. ας. ΑΣ.
+// out: ΑΣ'Β ασ'β ΑΣ'Β
+// out: Σ'Α σ'α Σ'Α
+// out: Α'Σ α'ς Α'Σ
+// out: AΣ1 aς1 AΣ1
+// out: 1Σ 1σ 1Σ
+// out: ΑΣΣ ασς ΑΣΣ
+// out: ΆΣ άς ΆΣ
+// out: ΑΣ́ ας́ ΑΣ́
+// out: xΣ́y xσ́y XΣ́Y
