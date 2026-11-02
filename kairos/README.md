@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.11.0**, com o roteiro M1–M11 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.12.0**, com o roteiro M1–M12 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -13,7 +13,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.11.0**, com 
 - M8: o laboratório escrito em Kairós ([`lab/`](lab));
 - M9: arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós;
 - M10: a base de dados do laboratório montada em Kairós;
-- M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs)).
+- M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs));
+- M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -23,6 +24,9 @@ kairos run kairos/examples/momentum.krs      # momentum na B3, escrito em Kairó
 kairos run kairos/examples/finance.krs       # exemplo do núcleo
 kairos run kairos/examples/holdout.krs       # protocolo, holdout de uso único e registro de tentativas
 kairos check arquivo.krs                     # só verifica os tipos
+kairos run kairos/compiler/kc.krs kairos/std saida arquivo.krs
+                                             # o compilador escrito em Kairós grava saida/arquivo.kim
+kairos exec saida/arquivo.kim                # executa a imagem, sem o front-end Rust
 kairos ledger                                # o livro-razão de holdouts
 kairos repl                                  # sessão interativa (ou só `kairos`)
 cargo test -p kairos                         # testes dourados + teste de aceitação com os dados reais
@@ -126,10 +130,18 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **COTAHIST → `bars.bin` → eventos → `panel.bin`**, byte a byte iguais aos do Rust: [`lab/ingest.krs`](lab/ingest.krs), [`lab/build.krs`](lab/build.krs), [`lab/update.krs`](lab/update.krs).
 - **Runtime:** `read_lines` (texto de largura fixa, inclusive dentro de ZIPs), `Bytes` (formatos binários), operações de bits, downloads em paralelo.
 
+**M11 (o simulador em Kairós)**
+- **`b3.evaluate` e `b3.simulate` rodam [`std/sim.krs`](std/sim.krs):** custos, impacto, atraso, capacidade e IR de pessoa física, com os mesmos bits do simulador Rust.
+
+**M12 (o compilador em Kairós)**
+- **O front-end inteiro em [`compiler/`](compiler):** léxico, parser, verificador de tipos, HIR e análise temporal, iguais aos do Rust nó a nó em todos os arquivos `.krs` do repositório (`kairos tokens`, `ast`, `types` e `hir` mostram o que cada um vê).
+- **A inicialização:** o compilador compila a si mesmo, e a imagem que sai, executada sem o front-end Rust, compila o compilador de novo na mesma imagem, byte a byte.
+- **`kairos exec`** executa a imagem de um programa compilado pelo compilador em Kairós ([spec §14](docs/spec.md)).
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós (em andamento: o front-end inteiro em [`compiler/`](compiler): léxico, parser, verificador de tipos, HIR e análise temporal) |
+| M13 | o back-end em Kairós: o compilador escrito em Kairós passa a gerar código (WebAssembly) em vez de depender do interpretador Rust |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

@@ -11,6 +11,9 @@ usage:
   kairos run <file.krs> [args...]
                             check and run a program (`args()` gives the arguments)
   kairos check <file.krs>   type-check only
+  kairos exec <file.kim> [args...]
+                            run the image of a program compiled by the compiler written
+                            in Kairós (`kairos run compiler/kc.krs <std> <out> file.krs`)
   kairos repl               interactive session (also: just `kairos`)
   kairos ledger             the holdout ledger: months seen, protocols, holdouts opened
   kairos ledger withdraw <protocol>
@@ -43,6 +46,8 @@ fn main() {
 fn real_main(args: Vec<String>) -> i32 {
     match args.get(1).map(String::as_str) {
         Some("run") => file_cmd(args.get(2), args.get(3..).unwrap_or_default(), true),
+        // the image of a program compiled by the front end written in Kairós (compiler/kc.krs)
+        Some("exec") => exec_cmd(args.get(2), args.get(3..).unwrap_or_default()),
         Some("check") => file_cmd(args.get(2), &[], false),
         Some("repl") | None => repl(),
         Some("ledger") => ledger_cmd(&args[2..]),
@@ -158,6 +163,37 @@ fn file_cmd(path: Option<&String>, prog_args: &[String], run: bool) -> i32 {
             0
         }
         Err(d) => {
+            eprint!("{}", s.render(&d));
+            1
+        }
+    }
+}
+
+/// `kairos exec program.kim [args...]`: runs the image of a program compiled by the front end
+/// written in Kairós (`kairos run compiler/kc.krs <std> <out> program.krs`).
+fn exec_cmd(path: Option<&String>, prog_args: &[String]) -> i32 {
+    let Some(path) = path else {
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    let image = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
+    let mut s = Session::new(Box::new(std::io::stdout()));
+    let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+    s.host().set_program(&stem);
+    s.host().set_args(prog_args.to_vec());
+    match s.exec_image(&image) {
+        Ok(()) => 0,
+        Err(Ok(msg)) => {
+            eprintln!("{path}: {msg}");
+            2
+        }
+        Err(Err(d)) => {
             eprint!("{}", s.render(&d));
             1
         }

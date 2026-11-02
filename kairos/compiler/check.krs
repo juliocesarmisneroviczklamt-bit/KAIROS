@@ -101,10 +101,11 @@ struct H {
     kids: List[H],
     lo: i64,
     hi: i64,
+    f: i64,             // the file it comes from (an index of `files`; -1: none)
 }
 
 fn hn(kind: str, text: str, n: i64, m: i64, kids: List[H], lo: i64, hi: i64) -> H {
-    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi }
+    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi, f: -1 }
 }
 
 fn hk(kind: str, kids: List[H]) -> H {
@@ -263,6 +264,10 @@ struct Checker {
     // the temporal analysis: the knowledge time of each top-level slot, what each batch found
     tmain: List[TV],
     tlog: List[str],
+    // the files checked (in the order they were started) and the top-level statements of every
+    // batch, in the order they run: what an image of the program holds
+    files: List[str],
+    all_tops: List[H],
     // the first error
     failed: bool,
     code: str,
@@ -283,7 +288,7 @@ fn new_checker(std_dir: str) -> Checker {
         sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
         builtins: b, imported: [:], std_dir: std_dir,
         ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [],
-        fn_hir: [], fn_at: [], lambdas: [], tops: [], tmain: [], tlog: [],
+        fn_hir: [], fn_at: [], lambdas: [], tops: [], tmain: [], tlog: [], files: [], all_tops: [],
         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
     }
 }

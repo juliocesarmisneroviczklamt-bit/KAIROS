@@ -21,20 +21,26 @@ fn fin_lit(ck: Checker, digits: str, tv: i64) -> str {
     }
 }
 
-fn fin(ck: Checker, h: H) -> H {
-    if h.kind == "intlit" { return hlit(fin_lit(ck, h.text, h.n)) }
-    if h.kind == "pintlit" { return hn("plit", fin_lit(ck, h.text, h.n), -1, -1, [], -1, -1) }
-    if len(h.kids) == 0 { return h }
-    var kids: List[H] = []
-    for k in h.kids { kids.push(fin(ck, k)) }
+// The literals take their final types, and every node the file it comes from.
+fn fin(ck: Checker, h: H, file: i64) -> H {
     var out = h
-    out.kids = kids
+    if h.kind == "intlit" {
+        out = hlit(fin_lit(ck, h.text, h.n))
+    } else if h.kind == "pintlit" {
+        out = hn("plit", fin_lit(ck, h.text, h.n), -1, -1, [], -1, -1)
+    } else if len(h.kids) > 0 {
+        var kids: List[H] = []
+        for k in h.kids { kids.push(fin(ck, k, file)) }
+        out.kids = kids
+    }
+    out.f = file
     out
 }
 
-// Checks a batch of items: the declarations, every function's body, then the top-level
-// statements; the integer literals take their final types; then the temporal analysis.
-fn check_items(inout ck: Checker, items: List[Node]) {
+// Checks a batch of items (the file `file` without its imports): the declarations, every
+// function's body, then the top-level statements; the integer literals take their final types;
+// then the temporal analysis.
+fn check_items(inout ck: Checker, items: List[Node], file: i64) {
     let first_fn = len(ck.sigs)
     let first_lambda = len(ck.lambdas)
     declare_items(inout ck, items)
@@ -62,23 +68,27 @@ fn check_items(inout ck: Checker, items: List[Node]) {
     if ck.failed { return }
     var new_fns: List[i64] = []
     for i in first_fn..len(ck.sigs) {
-        ck.fn_hir[i] = fin(ck, ck.fn_hir[i])
-        ck.fn_at[i] = fin(ck, ck.fn_at[i])
+        ck.fn_hir[i] = fin(ck, ck.fn_hir[i], file)
+        ck.fn_at[i] = fin(ck, ck.fn_at[i], file)
         new_fns.push(i)
     }
     for i in first_lambda..len(ck.lambdas) {
-        let b = fin(ck, ck.lambdas[i].body)
+        let b = fin(ck, ck.lambdas[i].body, file)
         ck.lambdas[i].body = b
     }
     var done: List[H] = []
-    for t in tops { done.push(fin(ck, t)) }
+    for t in tops { done.push(fin(ck, t, file)) }
     ck.tops = done
     // temporal types (M3): no decision may use information from its future
     temporal_check(inout ck, new_fns, done)
+    if ck.failed { return }
+    for t in done { ck.all_tops.push(t) }
 }
 
 // Checks a file: its imports first (each file once), then its own items.
 fn check_file(inout ck: Checker, name: str, src: str) {
+    let file = len(ck.files)
+    ck.files.push(name)
     let r = parse_program(src)
     if not r.0 {
         ck_fail(inout ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
@@ -97,5 +107,5 @@ fn check_file(inout ck: Checker, name: str, src: str) {
             items.push(it)
         }
     }
-    check_items(inout ck, items)
+    check_items(inout ck, items, file)
 }

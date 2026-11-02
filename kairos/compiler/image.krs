@@ -1,0 +1,132 @@
+// The image of a checked program, written by the front end in Kairós (M12) and run by the
+// runtime (`kairos exec program.kim`) without the Rust front end: the files, the axes, structs,
+// enums, protocols and functions, the type of every slot, and the HIR of every function, lambda
+// and top-level statement (in the order they run).
+//
+// One item per line, as S-expressions of atoms; a text (a name, a literal, an operator) is an
+// atom `x` followed by the hex code points of its characters separated by dots (`x69.36.34`).
+//
+//   (file ID PATH)                       (axis NAME TEMPORAL)
+//   (struct NAME (FIELD TYPE) ...)       (enum NAME (VARIANT TYPE ...) ...)
+//   (protocol NAME UNTIL FROM MIN RULE)  (tparams NAME ...)
+//   (fn NAME (TPARAM ...) RET (PARAM INOUT TYPE) ...)
+//   (body ID NSLOTS (TYPE ...) HIR AT)   (lambda ID NPARAMS NSLOTS (CAPTURE ...) HIR)
+//   (main NSLOTS (TYPE ...))             (top HIR)
+//
+// A type: i64 f64 bool str unit never bytes holdout, (list T), (map K V), (tuple T ...),
+// (struct ID), (enum ID), (fn (T ...) R), (param ID), (tensor (AXIS ...) T), (var KIND).
+// A HIR node: (KIND TEXT N M LO HI FILE CHILD ...); an absent part: `-`.
+import "front.krs"
+
+fn atom(s: str) -> str {
+    var hs = []
+    for c in codes(s) { hs.push(to_hex(c, 0)) }
+    "x" + join(hs, ".")
+}
+
+fn ty_sx(ck: Checker, t0: Ty) -> str {
+    let t = resolve(ck, t0)
+    match t {
+        TInt => "i64",
+        TFloat => "f64",
+        TBool => "bool",
+        TStr => "str",
+        TUnit => "unit",
+        TNever => "never",
+        TBytes => "bytes",
+        THoldout => "holdout",
+        TList(x) => "(list " + ty_sx(ck, x) + ")",
+        TMap(k, x) => "(map " + ty_sx(ck, k) + " " + ty_sx(ck, x) + ")",
+        TTuple(xs) => {
+            var parts = ["(tuple"]
+            for x in xs { parts.push(ty_sx(ck, x)) }
+            join(parts, " ") + ")"
+        },
+        TStruct(i) => "(struct " + str(i) + ")",
+        TEnum(i) => "(enum " + str(i) + ")",
+        TFn(ps, r) => {
+            var parts = []
+            for x in ps { parts.push(ty_sx(ck, x)) }
+            "(fn (" + join(parts, " ") + ") " + ty_sx(ck, r) + ")"
+        },
+        TParam(p) => "(param " + str(p) + ")",
+        TTensor(axes, e) => {
+            var parts = []
+            for a in axes { parts.push(str(a)) }
+            "(tensor (" + join(parts, " ") + ") " + ty_sx(ck, e) + ")"
+        },
+        TVar(v) => "(var " + str(ck.kinds[v]) + ")",
+    }
+}
+
+fn h_sx(h: H, inout out: List[str]) {
+    if h.kind == "-" {
+        out.push("-")
+        return
+    }
+    out.push("(" + h.kind + " " + atom(h.text) + " " + str(h.n) + " " + str(h.m) + " " + str(h.lo) + " " + str(h.hi) + " " + str(h.f))
+    for k in h.kids {
+        out.push(" ")
+        h_sx(k, inout out)
+    }
+    out.push(")")
+}
+
+fn h_text(h: H) -> str {
+    var out = []
+    h_sx(h, inout out)
+    join(out, "")
+}
+
+fn tys_sx(ck: Checker, ts: List[Ty]) -> str {
+    var parts = []
+    for t in ts { parts.push(ty_sx(ck, t)) }
+    "(" + join(parts, " ") + ")"
+}
+
+// The whole program: everything the checker registered, from the prelude on.
+fn image_lines(ck: Checker) -> List[str] {
+    var out = ["kairos-image 1"]
+    for i in 0..len(ck.files) { out.push("(file " + str(i) + " " + atom(ck.files[i]) + ")") }
+    for a in ck.axes { out.push("(axis " + atom(a.name) + " " + atom(a.temporal) + ")") }
+    var tps = ["(tparams"]
+    for n in ck.type_param_names { tps.push(atom(n)) }
+    out.push(join(tps, " ") + ")")
+    for s in ck.structs {
+        var parts = ["(struct " + atom(s.name)]
+        for f in s.fields { parts.push("(" + atom(f.0) + " " + ty_sx(ck, f.1) + ")") }
+        out.push(join(parts, " ") + ")")
+    }
+    for e in ck.enums {
+        var parts = ["(enum " + atom(e.name)]
+        for v in e.variants {
+            var vs = ["(" + atom(v.0)]
+            for t in v.1 { vs.push(ty_sx(ck, t)) }
+            parts.push(join(vs, " ") + ")")
+        }
+        out.push(join(parts, " ") + ")")
+    }
+    for p in ck.protocols {
+        out.push("(protocol " + atom(p.name) + " " + str(p.research_until) + " " + str(p.holdout_from) + " " + str(p.min_months) + " " + atom(p.rule) + ")")
+    }
+    for f in ck.sigs {
+        var tp = []
+        for p in f.type_params { tp.push(str(p)) }
+        var parts = ["(fn " + atom(f.name) + " (" + join(tp, " ") + ") " + ty_sx(ck, f.ret)]
+        for p in f.params { parts.push("(" + atom(p.0) + " " + (if p.2 { "1" } else { "0" }) + " " + ty_sx(ck, p.1) + ")") }
+        out.push(join(parts, " ") + ")")
+    }
+    for i in 0..len(ck.sigs) {
+        if not ck.has_body[i] { continue }
+        out.push("(body " + str(i) + " " + str(len(ck.bodies[i])) + " " + tys_sx(ck, ck.bodies[i]) + " " + h_text(ck.fn_hir[i]) + " " + h_text(ck.fn_at[i]) + ")")
+    }
+    for i in 0..len(ck.lambdas) {
+        let l = ck.lambdas[i]
+        var caps = []
+        for c in l.caps { caps.push(str(c)) }
+        out.push("(lambda " + str(i) + " " + str(l.n_params) + " " + str(l.n_slots) + " (" + join(caps, " ") + ") " + h_text(l.body) + ")")
+    }
+    out.push("(main " + str(len(ck.main.slot_tys)) + " " + tys_sx(ck, ck.main.slot_tys) + ")")
+    for t in ck.all_tops { out.push("(top " + h_text(t) + ")") }
+    out
+}

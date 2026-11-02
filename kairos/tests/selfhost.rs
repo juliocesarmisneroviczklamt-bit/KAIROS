@@ -191,3 +191,100 @@ fn the_front_end_in_kairos_is_the_rust_one() {
         println!("{compared} files with the same types, HIR and knowledge times ({bodies} functions), {errors} with the same first error");
     })
 }
+
+/// A fresh folder for images.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("kairos-selfhost-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Runs an image with arguments: its output, and the code of its error.
+fn exec_image(image: &Path, args: Vec<String>) -> (String, Option<String>) {
+    let buf = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Session::new(Box::new(Buf(buf.clone())));
+    s.host().set_args(args);
+    let text = std::fs::read_to_string(image).unwrap();
+    let err = match s.exec_image(&text) {
+        Ok(()) => None,
+        Err(Ok(msg)) => panic!("{}: {msg}", image.display()),
+        Err(Err(d)) => Some(d.code.to_string()),
+    };
+    (String::from_utf8(buf.borrow().clone()).unwrap(), err)
+}
+
+/// The golden programs compiled by the compiler written in Kairós (kairos/compiler/kc.krs) run
+/// from their images, with no part of the Rust front end: the same output and the same errors
+/// (`// out:` and `// error:` in each program), compile errors included.
+#[test]
+fn programs_compiled_by_the_kairos_compiler_run() {
+    if cfg!(target_family = "wasm") {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = root.join("tests").join("programs");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "krs")).collect();
+        files.sort();
+        let out = scratch("programs");
+        let mut args = vec![root.join("std").to_string_lossy().into_owned(), out.to_string_lossy().into_owned()];
+        args.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
+        let report = run_compiler("kc.krs", args);
+        let (mut ran, mut rejected) = (0, 0);
+        for f in &files {
+            let src = std::fs::read_to_string(f).unwrap();
+            let name = f.file_stem().unwrap().to_string_lossy().into_owned();
+            let expected_out: Vec<String> = src.lines().filter_map(|l| l.split_once("// out: ").map(|(_, r)| r.trim_end().to_string())).collect();
+            let expected_err = src.lines().find_map(|l| l.split_once("// error: ").map(|(_, r)| r.trim().to_string()));
+            let image = out.join(format!("{name}.kim"));
+            if !image.exists() {
+                // a compile error, reported by kc as `path: error CODE ...`
+                let line = report.lines().find(|l| l.starts_with(&*f.to_string_lossy())).unwrap_or_else(|| panic!("{name}: no image and no error"));
+                let code = line[f.to_string_lossy().len()..].strip_prefix(": error ").and_then(|r| r.split_whitespace().next()).unwrap_or("");
+                assert_eq!(Some(code.to_string()), expected_err, "{name}: {line}");
+                rejected += 1;
+                continue;
+            }
+            let (got, err) = exec_image(&image, Vec::new());
+            let got: Vec<String> = got.lines().map(str::to_string).collect();
+            assert_eq!(got, expected_out, "{name}: the output");
+            assert_eq!(err, expected_err, "{name}: the error");
+            ran += 1;
+        }
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(ran > 20 && rejected > 20, "{ran} ran, {rejected} rejected");
+        println!("{ran} programs ran from their images, {rejected} rejected with the expected error");
+    })
+}
+
+/// Bootstrapping: the compiler written in Kairós compiles itself, and the image it makes (the
+/// compiler as compiled by itself), run without the Rust front end, compiles itself again into
+/// the very same image, and compiles a program into the same image as before.
+#[test]
+fn the_kairos_compiler_compiles_itself() {
+    if cfg!(target_family = "wasm") {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let std_dir = root.join("std").to_string_lossy().into_owned();
+        let kc = root.join("compiler").join("kc.krs").to_string_lossy().into_owned();
+        let prog = root.join("tests").join("programs").join("closures.krs").to_string_lossy().into_owned();
+        // stage 0: the Rust front end runs kc.krs, which compiles kc.krs (and a program)
+        let one = scratch("stage1");
+        let report = run_compiler("kc.krs", vec![std_dir.clone(), one.to_string_lossy().into_owned(), kc.clone(), prog.clone()]);
+        assert_eq!(report, "", "stage 0");
+        // stage 1: that image does the same, with no Rust front end
+        let two = scratch("stage2");
+        let (report, err) = exec_image(&one.join("kc.kim"), vec![std_dir, two.to_string_lossy().into_owned(), kc, prog]);
+        assert_eq!((report.as_str(), err), ("", None), "stage 1");
+        for f in ["kc.kim", "closures.kim"] {
+            let (a, b) = (std::fs::read(one.join(f)).unwrap(), std::fs::read(two.join(f)).unwrap());
+            assert!(a == b, "{f}: the compiler compiled by itself makes another image");
+        }
+        let size = std::fs::metadata(one.join("kc.kim")).unwrap().len();
+        let _ = std::fs::remove_dir_all(&one);
+        let _ = std::fs::remove_dir_all(&two);
+        println!("the compiler's image ({size} bytes) is a fixpoint");
+    })
+}

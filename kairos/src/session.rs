@@ -183,6 +183,42 @@ impl Session {
         Ok(echo)
     }
 
+    /// Runs the image of a program written by the front end in Kairós (kairos/compiler/kc.krs,
+    /// M12): its tables and HIR replace this session's, and its top-level statements run in
+    /// order. No lexer, parser or checker of the Rust front end takes part. An image that cannot
+    /// be read is `Err(Ok(message))`; an error while running, `Err(Err(diagnostic))`.
+    pub fn exec_image(&mut self, image: &str) -> Result<(), Result<String, Diag>> {
+        let (ck, tops, files) = Checker::from_image(image).map_err(Ok)?;
+        self.checker = ck;
+        self.sources = files
+            .into_iter()
+            .map(|f| {
+                let src = match f.as_str() {
+                    "<prelude>" => PRELUDE.to_string(),
+                    _ => match STD.iter().find(|(n, _)| format!("<{n}>") == f) {
+                        Some((_, s)) => s.to_string(),
+                        None => std::fs::read_to_string(&f).unwrap_or_default(),
+                    },
+                };
+                (f, src)
+            })
+            .collect();
+        self.jit = std::cell::RefCell::new(crate::native::Jit::new());
+        self.frame = vec![Value::Unit; self.checker.main_slots() as usize];
+        {
+            let mut it = Interp::new(&self.checker, &mut *self.out, &self.host, &self.jit);
+            for s in &tops {
+                match it.eval(&s.hir, &mut self.frame) {
+                    Ok(_) => {}
+                    Err(Ctl::Err(d)) => return Err(Err(d)),
+                    Err(_) => unreachable!("control flow escaped to the top level"),
+                }
+            }
+        }
+        let _ = self.out.flush();
+        Ok(())
+    }
+
     /// Turns native code (M7) on or off for this session; `KAIROS_JIT=0` is the default switch.
     pub fn set_jit(&mut self, on: bool) {
         self.jit = std::cell::RefCell::new(crate::native::Jit::with(on));

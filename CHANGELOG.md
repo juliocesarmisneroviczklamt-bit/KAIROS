@@ -2,6 +2,24 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.12.0 — M12: o compilador da Kairós escrito em Kairós
+
+**O compilador da Kairós agora é escrito em Kairós e compila a si mesmo.** [`kairos/compiler/`](kairos/compiler) tem o front-end inteiro: léxico, parser, verificador de tipos, HIR e análise temporal. O compilador grava a imagem de um programa, e `kairos exec` a executa sem o front-end Rust.
+
+- **O front-end em Kairós** (6.796 linhas):
+  - `lexer.krs` e `parser.krs`: os mesmos tokens e a mesma árvore do Rust, com os mesmos erros e dicas;
+  - `check.krs` e `body.krs`: inferência por unificação, eixos e tensores, `grad`, holdouts, a ponte `b3` e o HIR;
+  - `temporal.krs`: a análise temporal (E0301, E0302, E0303), com os mesmos resumos de função e tempos de conhecimento;
+  - `front.krs`, `image.krs` e `kc.krs`: o driver, a imagem do programa e o compilador de linha de comando.
+- **Igual ao Rust, conferido nó a nó:**
+  - `kairos tokens`, `kairos ast`, `kairos types` e `kairos hir` imprimem o que o front-end Rust vê;
+  - o teste de auto-hospedagem exige o mesmo texto dos dois front-ends nos 529 arquivos `.krs` do repositório: 155 com os mesmos tipos, HIR e tempos de conhecimento (2.917 funções), 374 com o mesmo primeiro erro;
+  - casos-limite: 23 do léxico, 48 do parser, 306 do verificador e 41 da análise temporal.
+- **A inicialização (bootstrap):**
+  - o compilador compila a si mesmo, e a imagem que sai (1,4 MB), executada sem o front-end Rust, compila o compilador de novo na mesma imagem, byte a byte;
+  - os programas dourados compilados por ele rodam com a mesma saída, os mesmos erros e as mesmas mensagens.
+- **`kairos exec programa.kim`** executa a imagem de um programa compilado com `kairos run kairos/compiler/kc.krs kairos/std <saída> programa.krs`.
+
 ## 0.11.0 — M11: o simulador escrito em Kairós
 
 **`b3.evaluate` e `b3.simulate` agora rodam o simulador realista do laboratório escrito em Kairós** ([`kairos/std/sim.krs`](kairos/std/sim.krs)), carregado junto com o prelúdio. O runtime ficou só com o que é garantia da linguagem: holdout aberto, cerca dos dados, pesos válidos e o registro da tentativa.

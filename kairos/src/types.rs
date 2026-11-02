@@ -11,6 +11,7 @@ use crate::hir::*;
 use crate::value::Value;
 use std::collections::HashMap;
 
+mod image;
 mod tensors;
 pub use tensors::{AX_ASSET, AX_DAY, AX_MONTH, AX_SESSION};
 

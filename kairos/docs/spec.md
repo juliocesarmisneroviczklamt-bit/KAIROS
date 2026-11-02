@@ -752,5 +752,29 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M9 | arquivos, texto, mapas, internet; biblioteca padrão escrita em Kairós (§4.6–4.8) | ✅ o registro de tentativas e a coleta macro em Kairós dão os mesmos relatórios e arquivos do Rust |
 | M10 | a base de dados em Kairós: COTAHIST, eventos da B3, painel (§4.9) | ✅ `bars.bin` (220 MB), cache de eventos, `panel.bin` (80 MB) e diagnósticos iguais aos do Rust, byte a byte |
 | M11 | o simulador em Kairós (custos, impacto, IR) | ✅ `std/sim.krs` dá os mesmos bits do simulador Rust (mercado sintético no CI; os 5 relatórios do laboratório iguais) |
-| M12 | auto-hospedagem | o compilador da Kairós, escrito em Kairós, compila a si mesmo |
+| M12 | auto-hospedagem: o compilador escrito em Kairós (§14) | ✅ léxico, parser, verificador, HIR e análise temporal iguais ao Rust nó a nó nos 529 arquivos do repositório; o compilador compila a si mesmo e a imagem é um ponto fixo; os programas dourados rodam das imagens com `kairos exec` |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
+
+## 14. O compilador escrito em Kairós (M12)
+
+O front-end da Kairós é escrito em Kairós, em [`compiler/`](../compiler):
+
+| arquivo | o que faz | igual ao Rust em |
+|---|---|---|
+| `lexer.krs` | tokens, com a inserção automática de `;` | `src/lexer.rs` |
+| `parser.krs` | a árvore sintática (Pratt + descida recursiva) | `src/parser.rs` |
+| `check.krs`, `body.krs` | declarações, inferência por unificação, eixos e tensores, `grad`, holdouts, a ponte `b3`; o HIR | `src/types.rs`, `src/types/tensors.rs` |
+| `temporal.krs` | a análise temporal (§6): E0301, E0302, E0303 | `src/temporal.rs` |
+| `front.krs` | um lote: declarações, corpos, literais, análise temporal | `Checker::check_items` |
+| `image.krs`, `kc.krs` | a imagem do programa e o compilador de linha de comando | — |
+
+**Conferido nó a nó.** `kairos tokens`, `kairos ast`, `kairos types` e `kairos hir` imprimem, em forma canônica, o que o front-end Rust vê de um arquivo: os tokens, a árvore, as declarações e o tipo de cada variável, o HIR de cada função, lambda e comando de topo, e o que a análise temporal sabe (o resumo de cada função e o tempo de conhecimento de cada variável de topo). `tests/selfhost.rs` exige o mesmo texto dos dois front-ends em todos os arquivos `.krs` do repositório, inclusive os casos-limite de `tests/lexer`, `tests/parser`, `tests/checker` e `tests/temporal`.
+
+**A imagem de um programa** é o que o runtime precisa para executá-lo: os arquivos, os eixos, as structs, os enums, os protocolos, as assinaturas, o tipo de cada slot e o HIR de cada função, lambda e comando de topo, na ordem em que rodam. Uma linha por item, em expressões-S de átomos (um texto vira `x` seguido dos seus pontos de código em hexadecimal). `kairos exec programa.kim` executa a imagem sem o léxico, o parser e o verificador do Rust:
+
+```text
+kairos run kairos/compiler/kc.krs kairos/std saida programa.krs   # o compilador em Kairós
+kairos exec saida/programa.kim                                   # o runtime executa a imagem
+```
+
+**A inicialização.** O front-end Rust roda o compilador em Kairós, que compila a si mesmo (estágio 0); a imagem que sai, executada pelo runtime, compila o compilador de novo (estágio 1). As duas imagens são iguais byte a byte: o compilador é um ponto fixo de si mesmo. O runtime (interpretador, tensores, `grad`, código nativo, a ponte com os dados) continua em Rust.

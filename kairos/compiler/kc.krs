@@ -1,0 +1,36 @@
+// kc: the compiler of Kairós written in Kairós (M12). It checks programs with the front end in
+// Kairós (the prelude first) and writes the image of each one, which `kairos exec` runs.
+//
+//   kairos run kairos/compiler/kc.krs <std folder> <output folder> program.krs [more.krs ...]
+//
+// Each `program.krs` becomes `<output folder>/program.kim`; a program with an error is reported
+// (`file: error CODE lo hi message`) and gets no image.
+import "image.krs"
+
+fn base_name(path: str) -> str {
+    let p = replace(path, from_codes([92]), "/")
+    let parts = split(p, "/")
+    let last = parts[len(parts) - 1]
+    if ends_with(last, ".krs") { substr(last, 0, len(last) - 4) } else { last }
+}
+
+let std_dir = args()[0]
+let out_dir = args()[1]
+var base = new_checker(std_dir)
+check_file(inout base, "<prelude>", read_text(std_dir + "/prelude.krs"))
+assert(not base.failed, "the prelude does not check: " + base.code + " " + base.msg)
+make_dir(out_dir)
+var failed = 0
+for k in 2..len(args()) {
+    let path = args()[k]
+    var ck = base
+    ck.imported[norm_path(path)] = true
+    check_file(inout ck, path, read_text(path))
+    if ck.failed {
+        print(path + ": error " + ck.code + " " + str(ck.elo) + " " + str(ck.ehi) + " " + ck.msg)
+        failed += 1
+    } else {
+        write_text(out_dir + "/" + base_name(path) + ".kim", join(image_lines(ck), from_codes([10])) + from_codes([10]))
+    }
+}
+if failed > 0 { print(str(failed) + " program(s) with errors") }
