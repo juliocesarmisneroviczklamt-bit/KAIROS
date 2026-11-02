@@ -9,7 +9,7 @@ use crate::bridge::Host;
 use crate::diag::{Diag, Span};
 use crate::hir::*;
 use crate::types::Checker;
-use crate::value::{FuncVal, Value, total_cmp};
+use crate::value::{FuncVal, MapVal, Value, total_cmp};
 use std::cmp::Ordering;
 use std::io::Write;
 use std::rc::Rc;
@@ -81,28 +81,51 @@ fn as_int(v: Value) -> i64 {
 
 enum Step {
     Field(u32),
-    Index(i64, Span),
+    /// a list index or a map key
+    Index(Value, Span),
+}
+
+/// The text of a map key in messages.
+fn show_key(k: &Value) -> String {
+    match k {
+        Value::Str(s) => format!("{:?}", &**s),
+        other => format!("{other:?}").trim_start_matches("Int(").trim_end_matches(')').to_string(),
+    }
 }
 
 fn place_mut<'v>(root: &'v mut Value, path: &[Step]) -> R<&'v mut Value> {
+    place_at(root, path, false)
+}
+
+/// The value at `path`; with `insert`, a missing map key at the end is added (`m[k] = v`).
+fn place_at<'v>(root: &'v mut Value, path: &[Step], insert: bool) -> R<&'v mut Value> {
     let mut cur = root;
-    for st in path {
-        cur = match st {
-            Step::Field(i) => match cur {
-                Value::Struct(_, fs) | Value::Tuple(fs) => &mut Rc::make_mut(fs)[*i as usize],
-                _ => unreachable!("field of a non-struct"),
-            },
-            Step::Index(i, sp) => match cur {
-                Value::List(xs) => {
-                    let xs = Rc::make_mut(xs);
-                    let n = xs.len();
-                    if *i < 0 || *i as u64 >= n as u64 {
-                        return err("R0001", *sp, format!("index {i} out of bounds for a list of length {n}"));
+    let last = path.len().saturating_sub(1);
+    for (k, st) in path.iter().enumerate() {
+        cur = match (st, cur) {
+            (Step::Field(i), Value::Struct(_, fs) | Value::Tuple(fs)) => &mut Rc::make_mut(fs)[*i as usize],
+            (Step::Field(_), _) => unreachable!("field of a non-struct"),
+            (Step::Index(key, sp), Value::Map(m)) => {
+                let m = Rc::make_mut(m);
+                if insert && k == last {
+                    m.slot(key)
+                } else {
+                    match m.get_mut(key) {
+                        Some(v) => v,
+                        None => return err("R0012", *sp, format!("no key {} in the map", show_key(key))),
                     }
-                    &mut xs[*i as usize]
                 }
-                _ => unreachable!("index of a non-list"),
-            },
+            }
+            (Step::Index(iv, sp), Value::List(xs)) => {
+                let i = as_int(iv.clone());
+                let xs = Rc::make_mut(xs);
+                let n = xs.len();
+                if i < 0 || i as u64 >= n as u64 {
+                    return err("R0001", *sp, format!("index {i} out of bounds for a list of length {n}"));
+                }
+                &mut xs[i as usize]
+            }
+            (Step::Index(..), _) => unreachable!("index of a non-list"),
         };
     }
     Ok(cur)
@@ -194,6 +217,14 @@ impl<'a> Interp<'a> {
             HExpr::Local(s) => Ok(f[*s as usize].clone()),
             HExpr::FnRef(id) => Ok(Value::Func(Rc::new(FuncVal::User(*id)))),
             HExpr::List(xs) => Ok(Value::List(Rc::new(self.eval_all(xs, f)?))),
+            HExpr::MapLit(xs) => {
+                let mut m = MapVal::default();
+                let mut it = self.eval_all(xs, f)?.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    m.insert(k, v);
+                }
+                Ok(Value::Map(Rc::new(m)))
+            }
             HExpr::Tuple(xs) => Ok(Value::Tuple(Rc::new(self.eval_all(xs, f)?))),
             HExpr::Struct(id, xs) => Ok(Value::Struct(*id, Rc::new(self.eval_all(xs, f)?))),
             HExpr::Variant(en, vi, xs) => Ok(Value::Enum(*en, *vi, Rc::new(self.eval_all(xs, f)?))),
@@ -203,7 +234,14 @@ impl<'a> Interp<'a> {
             },
             HExpr::Index(x, i, sp) => {
                 let xs = self.eval(x, f)?;
-                let i = as_int(self.eval(i, f)?);
+                let iv = self.eval(i, f)?;
+                if let Value::Map(m) = &xs {
+                    return match m.get(&iv) {
+                        Some(v) => Ok(v.clone()),
+                        None => err("R0012", *sp, format!("no key {} in the map", show_key(&iv))),
+                    };
+                }
+                let i = as_int(iv);
                 match xs {
                     Value::List(xs) => {
                         if i < 0 || i as u64 >= xs.len() as u64 {
@@ -258,7 +296,7 @@ impl<'a> Interp<'a> {
             HExpr::Assign(p, v) => {
                 let v = self.eval(v, f)?;
                 let (root, path) = self.resolve_place(p, f)?;
-                *place_mut(&mut f[root], &path)? = v;
+                *place_at(&mut f[root], &path, true)? = v;
                 Ok(Value::Unit)
             }
             HExpr::OpAssign(p, op, v, sp) => {
@@ -364,7 +402,7 @@ impl<'a> Interp<'a> {
             }
             HPlace::Index(inner, ie, sp) => {
                 let (r, mut path) = self.resolve_place(inner, f)?;
-                let i = as_int(self.eval(ie, f)?);
+                let i = self.eval(ie, f)?;
                 path.push(Step::Index(i, *sp));
                 Ok((r, path))
             }
@@ -475,6 +513,14 @@ impl<'a> Interp<'a> {
     }
 
     fn builtin(&mut self, b: Builtin, args: &[HArg], f: &mut Vec<Value>, sp: Span) -> R<Value> {
+        if b == Builtin::Remove {
+            let HArg::InOut(p) = &args[0] else { unreachable!("remove without a place") };
+            let key = self.val(&args[1], f)?;
+            let (root, path) = self.resolve_place(p, f)?;
+            let Value::Map(m) = place_mut(&mut f[root], &path)? else { unreachable!("remove on a non-map") };
+            Rc::make_mut(m).remove(&key);
+            return Ok(Value::Unit);
+        }
         if matches!(b, Builtin::Push | Builtin::Pop | Builtin::Sort | Builtin::Reverse) {
             let HArg::InOut(p) = &args[0] else { unreachable!("mutating builtin without place") };
             let pushed = if b == Builtin::Push { Some(self.val(&args[1], f)?) } else { None };
@@ -521,14 +567,27 @@ impl<'a> Interp<'a> {
             }
             Builtin::Len => Ok(Value::Int(match &v[0] {
                 Value::List(xs) => xs.len() as i64,
+                Value::Map(m) => m.len() as i64,
                 Value::Str(s) => s.chars().count() as i64,
                 other => unreachable!("len of {other:?}"),
             })),
             Builtin::Contains => match &v[0] {
                 Value::Str(s) => Ok(Value::Bool(s.contains(str_of(&v[1])))),
                 Value::List(xs) => Ok(Value::Bool(xs.contains(&v[1]))),
+                Value::Map(m) => Ok(Value::Bool(m.contains(&v[1]))),
                 other => unreachable!("contains on {other:?}"),
             },
+            Builtin::Keys | Builtin::Values | Builtin::Items | Builtin::Get => {
+                let Value::Map(m) = &v[0] else { unreachable!("a map builtin on a non-map") };
+                Ok(match b {
+                    Builtin::Keys => Value::List(Rc::new(m.keys().to_vec())),
+                    Builtin::Values => Value::List(Rc::new(m.values().to_vec())),
+                    Builtin::Items => Value::List(Rc::new(
+                        m.keys().iter().zip(m.values()).map(|(k, x)| Value::Tuple(Rc::new(vec![k.clone(), x.clone()]))).collect(),
+                    )),
+                    _ => m.get(&v[1]).cloned().unwrap_or_else(|| v[2].clone()),
+                })
+            }
             Builtin::Map | Builtin::Filter => {
                 let Value::List(xs) = &v[0] else { unreachable!() };
                 let mut out = Vec::with_capacity(xs.len());
@@ -739,6 +798,20 @@ impl<'a> Interp<'a> {
                 }
             }
             Value::List(xs) => format!("[{}]", join(xs)),
+            Value::Map(m) => {
+                if m.is_empty() {
+                    "[:]".into()
+                } else {
+                    let body = m
+                        .keys()
+                        .iter()
+                        .zip(m.values())
+                        .map(|(k, x)| format!("{}: {}", self.display(k, false), self.display(x, false)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[{body}]")
+                }
+            }
             Value::Tuple(xs) => {
                 if xs.len() == 1 {
                     format!("({},)", join(xs))

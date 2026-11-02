@@ -1,0 +1,2 @@
+// A literal is a list or a map, not both.
+let m = [1, "a": 2]       // error: E0003

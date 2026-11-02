@@ -172,6 +172,8 @@ pub enum ExprKind {
     Unit,
     Name(String),
     List(Vec<Expr>),
+    /// `["a": 1, "b": 2]`, `[:]` (M9)
+    Map(Vec<(Expr, Expr)>),
     Tuple(Vec<Expr>),
     StructLit { name: String, fields: Vec<(String, Expr)> },
     Field(Box<Expr>, String),

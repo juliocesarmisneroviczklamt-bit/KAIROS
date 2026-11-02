@@ -714,15 +714,35 @@ impl Parser {
             Tok::LBracket => {
                 self.bump();
                 self.with_structs(true, |p| {
+                    // `[:]`: the empty map
+                    if p.eat(&Tok::Colon) {
+                        let end = p.expect(Tok::RBracket, "`]`")?;
+                        return Ok(Expr { kind: ExprKind::Map(Vec::new()), span: sp.to(end) });
+                    }
                     let mut items = Vec::new();
+                    let mut pairs = Vec::new();
                     while *p.peek() != Tok::RBracket {
-                        items.push(p.expr()?);
+                        let e = p.expr()?;
+                        if p.eat(&Tok::Colon) {
+                            if !items.is_empty() {
+                                return Err(Diag::new("E0003", e.span, "a list element followed by a map entry")
+                                    .hint("a list is `[a, b]`, a map is `[key: value, ...]`"));
+                            }
+                            let v = p.expr()?;
+                            pairs.push((e, v));
+                        } else {
+                            if !pairs.is_empty() {
+                                return Err(Diag::new("E0003", e.span, "a map entry needs `key: value`"));
+                            }
+                            items.push(e);
+                        }
                         if !p.eat(&Tok::Comma) {
                             break;
                         }
                     }
                     let end = p.expect(Tok::RBracket, "`]`")?;
-                    Ok(Expr { kind: ExprKind::List(items), span: sp.to(end) })
+                    let kind = if pairs.is_empty() { ExprKind::List(items) } else { ExprKind::Map(pairs) };
+                    Ok(Expr { kind, span: sp.to(end) })
                 })
             }
             Tok::Pipe => self.lambda(),

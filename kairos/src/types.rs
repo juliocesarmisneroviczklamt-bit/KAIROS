@@ -24,6 +24,8 @@ pub enum Ty {
     /// type of diverging expressions (`return`, `break`); unifies with anything
     Never,
     List(Box<Ty>),
+    /// `Map[K, V]` (M9): keys `i64` or `str`
+    Map(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
     Struct(u32),
     Enum(u32),
@@ -54,6 +56,8 @@ pub struct AxisDef {
 enum Kind {
     Any,
     Num,
+    /// a map key: `i64` or `str`
+    Key,
 }
 
 /// `protocol "name" { ... }` (M5)
@@ -471,6 +475,10 @@ impl Checker {
             (Ty::Var(x), _) => self.bind(*x, b.clone()),
             (_, Ty::Var(y)) => self.bind(*y, a.clone()),
             (Ty::List(p), Ty::List(q)) => self.unify(p, q),
+            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
+                self.unify(k1, k2)?;
+                self.unify(v1, v2)
+            }
             (Ty::Tuple(p), Ty::Tuple(q)) if p.len() == q.len() => {
                 for (x, y) in p.iter().zip(q.iter()) {
                     self.unify(x, y)?;
@@ -496,13 +504,21 @@ impl Checker {
 
     fn bind(&mut self, v: u32, t: Ty) -> Result<(), ()> {
         if let Ty::Var(w) = t {
-            if self.kinds[v as usize] == Kind::Num {
-                self.kinds[w as usize] = Kind::Num;
-            }
+            let (kv, kw) = (self.kinds[v as usize], self.kinds[w as usize]);
             self.subst[v as usize] = Some(Ty::Var(w));
+            match (kv, kw) {
+                (Kind::Any, _) => {}
+                (k, Kind::Any) => self.kinds[w as usize] = k,
+                (a, b) if a == b => {}
+                // a number that is also a map key: an integer
+                _ => self.subst[w as usize] = Some(Ty::Int),
+            }
             return Ok(());
         }
         if self.kinds[v as usize] == Kind::Num && !matches!(t, Ty::Int | Ty::Float) {
+            return Err(());
+        }
+        if self.kinds[v as usize] == Kind::Key && !matches!(t, Ty::Int | Ty::Str) {
             return Err(());
         }
         if self.occurs(v, &t) {
@@ -516,6 +532,7 @@ impl Checker {
         match self.resolve(t) {
             Ty::Var(w) => w == v,
             Ty::List(x) => self.occurs(v, &x),
+            Ty::Map(k, x) => self.occurs(v, &k) || self.occurs(v, &x),
             Ty::Tuple(xs) => xs.iter().any(|x| self.occurs(v, x)),
             Ty::Fn(ps, r) => ps.iter().any(|x| self.occurs(v, x)) || self.occurs(v, &r),
             Ty::Tensor(_, e) => self.occurs(v, &e),
@@ -532,6 +549,10 @@ impl Checker {
                 }
             }
             Ty::List(x) => self.default_nums(&x),
+            Ty::Map(k, x) => {
+                self.default_nums(&k);
+                self.default_nums(&x);
+            }
             Ty::Tuple(xs) => {
                 for x in &xs {
                     self.default_nums(x);
@@ -556,6 +577,7 @@ impl Checker {
             Ty::Unit => "()".into(),
             Ty::Never => "!".into(),
             Ty::List(x) => format!("List[{}]", self.show(&x)),
+            Ty::Map(k, x) => format!("Map[{}, {}]", self.show(&k), self.show(&x)),
             Ty::Tuple(xs) => format!("({})", xs.iter().map(|x| self.show(x)).collect::<Vec<_>>().join(", ")),
             Ty::Struct(i) => self.structs[i as usize].name.clone(),
             Ty::Enum(i) => self.enums[i as usize].name.clone(),
@@ -593,6 +615,14 @@ impl Checker {
                 Ok(())
             }
             other => Err(Diag::new("E0101", span, format!("{what} needs a number, found `{}`", self.show(&other)))),
+        }
+    }
+
+    /// The key and value types of a map.
+    fn map_parts(&self, t: &Ty) -> Option<(Ty, Ty)> {
+        match self.resolve(t) {
+            Ty::Map(k, v) => Some((*k, *v)),
+            _ => None,
         }
     }
 
@@ -638,6 +668,14 @@ impl Checker {
                     "List" => {
                         arity(1)?;
                         Ty::List(Box::new(self.resolve_type(&args[0])?))
+                    }
+                    "Map" => {
+                        arity(2)?;
+                        let k = self.resolve_type(&args[0])?;
+                        if !matches!(k, Ty::Int | Ty::Str) {
+                            return Err(Diag::new("E0101", args[0].span(), format!("map keys must be `i64` or `str`, found `{}`", self.show(&k))));
+                        }
+                        Ty::Map(Box::new(k), Box::new(self.resolve_type(&args[1])?))
                     }
                     "Holdout" => {
                         arity(0)?;
@@ -948,6 +986,11 @@ impl Checker {
                         .hint("assign to the slice directly, e.g. `x[month: i] = v`"));
                 }
                 let idx = self.list_index(items, &t)?;
+                if let Some((kt, vt)) = self.map_parts(&t) {
+                    let (hk, tk) = self.expr(idx, Some(&kt))?;
+                    self.expect_ty(&tk, &kt, idx.span)?;
+                    return Ok((HPlace::Index(Box::new(p), Box::new(hk), e.span), vt));
+                }
                 let elem = self.list_elem(&t, obj.span)?;
                 let (hi, ti) = self.expr(idx, Some(&Ty::Int))?;
                 self.expect_ty(&ti, &Ty::Int, idx.span)?;
@@ -1023,6 +1066,24 @@ impl Checker {
                 }
                 Ok((HExpr::List(hs), Ty::List(Box::new(elem))))
             }
+            ExprKind::Map(pairs) => {
+                let (kt, vt) = match exp.map(|t| self.resolve(t)) {
+                    Some(Ty::Map(k, v)) => (*k, *v),
+                    _ => (self.fresh(Kind::Key).0, self.fresh(Kind::Any).0),
+                };
+                let mut hs = Vec::with_capacity(2 * pairs.len());
+                for (k, v) in pairs {
+                    let (hk, tk) = self.expr(k, Some(&kt))?;
+                    if self.unify(&tk, &kt).is_err() {
+                        return Err(Diag::new("E0101", k.span, format!("map keys must be `i64` or `str` (all of one type), found `{}`", self.show(&tk))));
+                    }
+                    let (hv, tv) = self.expr(v, Some(&vt))?;
+                    self.expect_ty(&tv, &vt, v.span)?;
+                    hs.push(hk);
+                    hs.push(hv);
+                }
+                Ok((HExpr::MapLit(hs), Ty::Map(Box::new(kt), Box::new(vt))))
+            }
             ExprKind::Tuple(items) => {
                 let exp_elems = match exp.map(|t| self.resolve(t)) {
                     Some(Ty::Tuple(ts)) if ts.len() == items.len() => Some(ts),
@@ -1062,6 +1123,11 @@ impl Checker {
                     return Ok((HExpr::TensorIndex(Box::new(ho), sels, sp), Self::mk_tensor(kept, elem)));
                 }
                 let idx = self.list_index(items, &to)?;
+                if let Some((kt, vt)) = self.map_parts(&to) {
+                    let (hk, tk) = self.expr(idx, Some(&kt))?;
+                    self.expect_ty(&tk, &kt, idx.span)?;
+                    return Ok((HExpr::Index(Box::new(ho), Box::new(hk), sp), vt));
+                }
                 let elem = self.list_elem(&to, obj.span)?;
                 let (hi, ti) = self.expr(idx, Some(&Ty::Int))?;
                 self.expect_ty(&ti, &Ty::Int, idx.span)?;
@@ -1542,6 +1608,7 @@ impl Checker {
         match t {
             Ty::Param(p) => inst.iter().find(|(q, _)| q == p).map(|(_, t)| t.clone()).unwrap_or(Ty::Param(*p)),
             Ty::List(x) => Ty::List(Box::new(self.subst_params(x, inst))),
+            Ty::Map(k, x) => Ty::Map(Box::new(self.subst_params(k, inst)), Box::new(self.subst_params(x, inst))),
             Ty::Tuple(xs) => Ty::Tuple(xs.iter().map(|x| self.subst_params(x, inst)).collect()),
             Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|x| self.subst_params(x, inst)).collect(), Box::new(self.subst_params(r, inst))),
             Ty::Tensor(a, e) => Ty::Tensor(a.clone(), Box::new(self.subst_params(e, inst))),
@@ -1654,7 +1721,7 @@ impl Checker {
                 }
             }
         }
-        let mutating = matches!(b, Builtin::Push | Builtin::Pop | Builtin::Sort | Builtin::Reverse);
+        let mutating = matches!(b, Builtin::Push | Builtin::Pop | Builtin::Sort | Builtin::Reverse | Builtin::Remove);
         for (i, (e, flag)) in all.iter().enumerate() {
             let is_recv = recv.is_some() && i == 0;
             if mutating && i == 0 {
@@ -1695,7 +1762,7 @@ impl Checker {
                 arity(1)?;
                 let (h, t) = self.expr(all[0].0, None)?;
                 match self.resolve(&t) {
-                    Ty::Str | Ty::List(_) => {}
+                    Ty::Str | Ty::List(_) | Ty::Map(..) => {}
                     _ => {
                         self.list_elem(&t, all[0].0.span)?;
                     }
@@ -1722,8 +1789,14 @@ impl Checker {
             Builtin::Contains => {
                 arity(2)?;
                 let (hl, tl) = self.expr(all[0].0, None)?;
-                // `contains(s, sub)`: a string inside another
-                let elem = if self.resolve(&tl) == Ty::Str { Ty::Str } else { self.list_elem(&tl, all[0].0.span)? };
+                // `contains(s, sub)`: a string inside another; `contains(m, k)`: a key of a map
+                let elem = if self.resolve(&tl) == Ty::Str {
+                    Ty::Str
+                } else if let Some((kt, _)) = self.map_parts(&tl) {
+                    kt
+                } else {
+                    self.list_elem(&tl, all[0].0.span)?
+                };
                 let (hx, tx) = self.expr(all[1].0, Some(&elem))?;
                 self.expect_ty(&tx, &elem, all[1].0.span)?;
                 (vec![HArg::Val(hl), HArg::Val(hx)], Ty::Bool)
@@ -1777,6 +1850,38 @@ impl Checker {
             Builtin::MakeDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Unit),
             Builtin::Args => (self.fixed_args(&all, &[], sp, name)?, Ty::List(Box::new(Ty::Str))),
             Builtin::Today => (self.fixed_args(&all, &[], sp, name)?, Ty::Int),
+            Builtin::Keys | Builtin::Values | Builtin::Items | Builtin::Get | Builtin::Remove => {
+                arity(if b == Builtin::Get { 3 } else if b == Builtin::Remove { 2 } else { 1 })?;
+                let (hm, tm) = if b == Builtin::Remove {
+                    let (place, t) = self.place(all[0].0)?;
+                    (HArg::InOut(place), t)
+                } else {
+                    let (h, t) = self.expr(all[0].0, None)?;
+                    (HArg::Val(h), t)
+                };
+                let Some((kt, vt)) = self.map_parts(&tm) else {
+                    return Err(Diag::new("E0101", all[0].0.span, format!("`{name}` needs a map, found `{}`", self.show(&tm))));
+                };
+                let mut hs = vec![hm];
+                if matches!(b, Builtin::Get | Builtin::Remove) {
+                    let (hk, tk) = self.expr(all[1].0, Some(&kt))?;
+                    self.expect_ty(&tk, &kt, all[1].0.span)?;
+                    hs.push(HArg::Val(hk));
+                }
+                if b == Builtin::Get {
+                    let (hd, td) = self.expr(all[2].0, Some(&vt))?;
+                    self.expect_ty(&td, &vt, all[2].0.span)?;
+                    hs.push(HArg::Val(hd));
+                }
+                let ty = match b {
+                    Builtin::Keys => Ty::List(Box::new(kt)),
+                    Builtin::Values => Ty::List(Box::new(vt)),
+                    Builtin::Items => Ty::List(Box::new(Ty::Tuple(vec![kt, vt]))),
+                    Builtin::Get => vt,
+                    _ => Ty::Unit,
+                };
+                (hs, ty)
+            }
             Builtin::Substr => {
                 arity(3)?;
                 let (hs, ts) = self.expr(all[0].0, Some(&Ty::Str))?;
@@ -1877,7 +1982,7 @@ impl Checker {
                 *e = HExpr::Lit(lit);
             }
             HExpr::Lit(_) | HExpr::Local(_) | HExpr::FnRef(_) | HExpr::Lambda(..) | HExpr::Break | HExpr::Continue => {}
-            HExpr::List(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) => {
+            HExpr::List(xs) | HExpr::MapLit(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) => {
                 for x in xs {
                     self.fin_expr(x);
                 }

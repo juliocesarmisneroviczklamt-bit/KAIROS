@@ -15,6 +15,7 @@ pub(super) fn has_node(v: &Value) -> bool {
     match v {
         Value::Node(_) => true,
         Value::Struct(_, xs) | Value::Tuple(xs) | Value::List(xs) | Value::Enum(_, _, xs) => xs.iter().any(has_node),
+        Value::Map(m) => m.values().iter().any(has_node),
         _ => false,
     }
 }
@@ -47,6 +48,13 @@ impl Interp<'_> {
             Value::Tuple(xs) => Value::Tuple(Rc::new(xs.iter().map(|x| self.deep_fwd(x)).collect())),
             Value::List(xs) => Value::List(Rc::new(xs.iter().map(|x| self.deep_fwd(x)).collect())),
             Value::Enum(e, k, xs) => Value::Enum(*e, *k, Rc::new(xs.iter().map(|x| self.deep_fwd(x)).collect())),
+            Value::Map(m) => {
+                let mut out = crate::value::MapVal::default();
+                for (k, x) in m.keys().iter().zip(m.values()) {
+                    out.insert(k.clone(), self.deep_fwd(x));
+                }
+                Value::Map(Rc::new(out))
+            }
             other => other.clone(),
         }
     }

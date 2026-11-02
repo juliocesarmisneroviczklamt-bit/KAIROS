@@ -372,7 +372,7 @@ fn children<'e>(e: &'e HExpr, out: &mut Vec<&'e HExpr>) {
     }
     match e {
         HExpr::Lit(_) | HExpr::IntLit(..) | HExpr::Local(_) | HExpr::FnRef(_) | HExpr::Break | HExpr::Continue | HExpr::Lambda(..) => {}
-        HExpr::List(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) | HExpr::Host(_, xs, _) => out.extend(xs.iter()),
+        HExpr::List(xs) | HExpr::MapLit(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) | HExpr::Host(_, xs, _) => out.extend(xs.iter()),
         HExpr::Field(x, _) | HExpr::Unary(_, x, _) => out.push(x),
         HExpr::Index(a, b, _) | HExpr::Binary(_, a, b, _) | HExpr::And(a, b) | HExpr::Or(a, b) | HExpr::While(a, b) => {
             out.push(a);
@@ -932,7 +932,8 @@ impl<'a> An<'a> {
     fn builtin(&mut self, b: Builtin, args: &[HArg], sp: Span, f: &mut Vec<TV>) -> KResult<TV> {
         use Builtin as B;
         match b {
-            B::Push => {
+            // removing a key: which keys are left depends on it
+            B::Push | B::Remove => {
                 let x = self.val(&args[1], f)?;
                 let HArg::InOut(p) = &args[0] else { unreachable!("push without a place") };
                 self.store_weak(p, x, f)?;
@@ -1221,7 +1222,7 @@ impl<'a> An<'a> {
                 }
                 t
             }
-            HExpr::List(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) => {
+            HExpr::List(xs) | HExpr::MapLit(xs) | HExpr::Tuple(xs) | HExpr::Struct(_, xs) | HExpr::Variant(_, _, xs) => {
                 let mut t = TV::ALWAYS;
                 for x in xs {
                     t = t.join(&self.eval(x, f)?);

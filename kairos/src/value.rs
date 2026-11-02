@@ -3,6 +3,7 @@
 
 use crate::tensor::TensorVal;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Default)]
@@ -22,6 +23,8 @@ pub enum Value {
     Tensor(Rc<TensorVal>),
     /// the holdout of a protocol (M5): affine, opened at most once (index of the protocol)
     Holdout(u32),
+    /// `Map[K, V]` (M9): keys `i64` or `str`, in insertion order
+    Map(Rc<MapVal>),
     /// a float or float tensor tracked by `grad` (M4): index of its node on the active tape
     Node(u32),
 }
@@ -50,6 +53,7 @@ impl PartialEq for Value {
             (Tensor(a), Tensor(b)) => a == b,
             (Node(a), Node(b)) => a == b,
             (Holdout(a), Holdout(b)) => a == b,
+            (Map(a), Map(b)) => a == b,
             _ => false,
         }
     }
@@ -73,5 +77,97 @@ pub fn total_cmp(a: &Value, b: &Value) -> Ordering {
             x.len().cmp(&y.len())
         }
         _ => Ordering::Equal,
+    }
+}
+
+/// A map key: the checker allows only `i64` and `str`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    I(i64),
+    S(Rc<str>),
+}
+
+fn key_of(v: &Value) -> Key {
+    match v {
+        Value::Int(i) => Key::I(*i),
+        Value::Str(s) => Key::S(s.clone()),
+        other => unreachable!("map key {other:?}"),
+    }
+}
+
+/// The value of a `Map[K, V]`: entries in insertion order, found by hashing. Writing to an
+/// existing key keeps its place; removing shifts the later ones.
+#[derive(Clone, Debug, Default)]
+pub struct MapVal {
+    keys: Vec<Value>,
+    vals: Vec<Value>,
+    index: HashMap<Key, usize>,
+}
+
+impl MapVal {
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn keys(&self) -> &[Value] {
+        &self.keys
+    }
+
+    pub fn values(&self) -> &[Value] {
+        &self.vals
+    }
+
+    pub fn get(&self, k: &Value) -> Option<&Value> {
+        self.index.get(&key_of(k)).map(|&i| &self.vals[i])
+    }
+
+    pub fn contains(&self, k: &Value) -> bool {
+        self.index.contains_key(&key_of(k))
+    }
+
+    /// The value of `k`, if there is one, to change in place.
+    pub fn get_mut(&mut self, k: &Value) -> Option<&mut Value> {
+        let i = *self.index.get(&key_of(k))?;
+        Some(&mut self.vals[i])
+    }
+
+    /// The value of `k`, added (as `()`, to be written) when it is missing.
+    pub fn slot(&mut self, k: &Value) -> &mut Value {
+        let key = key_of(k);
+        let i = match self.index.get(&key) {
+            Some(&i) => i,
+            None => {
+                self.index.insert(key, self.keys.len());
+                self.keys.push(k.clone());
+                self.vals.push(Value::Unit);
+                self.keys.len() - 1
+            }
+        };
+        &mut self.vals[i]
+    }
+
+    pub fn insert(&mut self, k: Value, v: Value) {
+        *self.slot(&k) = v;
+    }
+
+    pub fn remove(&mut self, k: &Value) -> Option<Value> {
+        let i = self.index.remove(&key_of(k))?;
+        self.keys.remove(i);
+        let v = self.vals.remove(i);
+        for (j, key) in self.keys.iter().enumerate().skip(i) {
+            self.index.insert(key_of(key), j);
+        }
+        Some(v)
+    }
+}
+
+/// Maps are equal when they have the same keys with equal values (in any order).
+impl PartialEq for MapVal {
+    fn eq(&self, o: &Self) -> bool {
+        self.len() == o.len() && self.keys.iter().zip(&self.vals).all(|(k, v)| o.get(k) == Some(v))
     }
 }

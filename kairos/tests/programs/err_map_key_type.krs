@@ -1,0 +1,2 @@
+// Map keys are `i64` or `str`.
+let m = [1.5: "x"]        // error: E0101

@@ -1,0 +1,4 @@
+// Reading a key that is not in the map stops the program (`get` gives a default instead).
+let m = ["a": 1]
+print(get(m, "b", 0))     // out: 0
+print(m["b"])             // error: R0012

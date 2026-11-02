@@ -120,8 +120,9 @@ fn fast_sum(x: List[f64]) -> f64 {
 |---|---|
 | escalares (M1) | `i64`, `f64`, `bool`, `str`, `()` |
 | coleções (M1) | `List[T]`, tuplas `(A, B)` |
+| mapas (M9) | `Map[K, V]`, com chaves `i64` ou `str` (§4.7) |
 | definidos pelo usuário (M1) | `struct`, `enum` (com dados), funções `fn(A) -> B` |
-| depois | `f32`/`i32`…, `date`, `Money` (ponto fixo), `Option[T]`/`Result[T, E]`, `Tensor[eixos; T]`, `Simd[T; N]`, `trait` |
+| depois | `f32`/`i32`…, `date`, `Money` (ponto fixo), `Option[T]`/`Result[T, E]`, `Simd[T; N]`, `trait` |
 
 - **Inferência:** só os parâmetros de função exigem tipo; o retorno é anotado com `->` (sem anotação, é `()`).
 - **Literal inteiro se adapta:** `let x: f64 = 1` e `x * 2` funcionam (o `2` vira `f64`).
@@ -184,6 +185,24 @@ Para coletar dados e escrever relatórios em Kairós, sem passar por outra lingu
 - **Erros de arquivo** (não existe, sem permissão…) param o programa com R0011 e a mensagem do sistema.
 - **Tempo:** o que vem de um arquivo não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo não decide pesos (E0301), a menos que se declare quando cada linha fica conhecida, com `observed`. `args()`, `env()` e `today()` são conhecidos antes de tudo.
 - **A cerca do holdout** (§7) vale para o módulo `b3`. Ler os arquivos de mercado diretamente fica fora dela, mas aparece no código.
+
+### 4.7 Mapas (M9)
+
+```krs
+var px = ["PETR4": 38.5, "VALE3": 61.25]     // Map[str, f64]
+px["ITUB4"] = 33.0                           // chave nova: entra no fim
+px["PETR4"] += 1.0
+var count: Map[str, i64] = [:]               // o mapa vazio
+for w in split("a b a", " ") { count[w] = get(count, w, 0) + 1 }
+for (t, p) in items(px) { print(t, p) }      // na ordem de inserção
+```
+
+- **Chaves:** `i64` ou `str`. Outro tipo de chave é E0101.
+- **Ordem:** a de inserção, como nos dicionários do Python. Escrever numa chave que já existe mantém o lugar dela, e o resultado é o mesmo em qualquer sistema.
+- **Leitura:** `m[k]` de uma chave ausente é R0012. `get(m, k, padrão)` não falha.
+- **Funções:** `len(m)`, `contains(m, k)`, `keys(m)`, `values(m)`, `items(m)` (lista de pares) e `remove(inout m, k)`.
+- **Semântica de valor:** como as listas, `let b = a` copia (sob escrita), e mapas dentro de structs mudam por `inout`.
+- **Igualdade:** dois mapas são iguais quando têm as mesmas chaves com os mesmos valores, em qualquer ordem.
 
 ## 5. Eixos nomeados (M2)
 

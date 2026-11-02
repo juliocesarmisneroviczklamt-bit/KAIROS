@@ -48,7 +48,7 @@ fn simulated(s: Simulation) -> List[i64] {
     }
     mi
 }
-fn values(x: Tensor[month; f64], mi: List[i64]) -> List[f64] {
+fn values_at(x: Tensor[month; f64], mi: List[i64]) -> List[f64] {
     var out = []
     for m in mi { out.push(x[month: m]) }
     out
@@ -63,11 +63,11 @@ for st in [("vencedores", plain), ("vencedores c/ controle de vol", managed)] {
     for ex in [("custo fixo 25 bps, no fechamento", false, 0), ("custo real, no fechamento", true, 0), ("custo real, 1 pregão de atraso", true, 1)] {
         let o = b3.simulate(st.1, cost_bps: 25.0, real_costs: ex.1, lag: ex.2, capital: c300)
         let mi = simulated(o)
-        let r = values(o.ret, mi)
-        let c = values(cdi_all, mi)
+        let r = values_at(o.ret, mi)
+        let c = values_at(cdi_all, mi)
         var exc = []
         for i in 0..len(r) { exc.push(r[i] - c[i]) }
-        print(left(st.0, 31) + " " + left(ex.0, 34) + " " + right(pct(cagr(r, 12.0)), 8) + " " + right(fixed(avg(exc) / sd(exc) * sqrt(12.0), 2), 8) + " " + right(pct(max_dd(r)), 8) + " " + right(fixed(o.cost_bps, 0), 9) + " bps " + right(fixed(100.0 * avg(values(o.turnover, mi)), 0), 6) + "%")
+        print(left(st.0, 31) + " " + left(ex.0, 34) + " " + right(pct(cagr(r, 12.0)), 8) + " " + right(fixed(avg(exc) / sd(exc) * sqrt(12.0), 2), 8) + " " + right(pct(max_dd(r)), 8) + " " + right(fixed(o.cost_bps, 0), 9) + " bps " + right(fixed(100.0 * avg(values_at(o.turnover, mi)), 0), 6) + "%")
     }
 }
 

@@ -80,6 +80,15 @@ pub enum Builtin {
     Args,
     /// `today()`: today's date (UTC) as YYYYMMDD
     Today,
+    // ---- M9: maps
+    /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
+    Keys,
+    Values,
+    Items,
+    /// `get(m, k, default)`
+    Get,
+    /// `remove(inout m, k)`: removes the key if it is there
+    Remove,
     Assert,
     // ---- M2: reductions (lists and tensors)
     Mean,
@@ -176,6 +185,11 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("env", Builtin::Env),
     ("args", Builtin::Args),
     ("today", Builtin::Today),
+    ("keys", Builtin::Keys),
+    ("values", Builtin::Values),
+    ("items", Builtin::Items),
+    ("get", Builtin::Get),
+    ("remove", Builtin::Remove),
     ("nan_quantile", Builtin::NanQuantile),
     ("merge_days", Builtin::MergeDays),
     ("assert", Builtin::Assert),
@@ -286,6 +300,8 @@ pub enum HExpr {
     Local(u32),
     FnRef(u32),
     List(Vec<HExpr>),
+    /// map literal: keys and values interleaved (`k0, v0, k1, v1, ...`)
+    MapLit(Vec<HExpr>),
     Tuple(Vec<HExpr>),
     Struct(u32, Vec<HExpr>),
     Variant(u32, u32, Vec<HExpr>),
