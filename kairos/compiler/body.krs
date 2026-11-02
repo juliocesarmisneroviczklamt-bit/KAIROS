@@ -61,7 +61,7 @@ fn unsupported(inout ck: Checker, e: Node, what: str) -> Ex {
 fn mismatch(inout ck: Checker, got: str, want: str, lo: i64, hi: i64, hint: str) {
     let mixed = (got == "i64" and want == "f64") or (got == "f64" and want == "i64")
     let h = if hint != "" { hint } else if mixed { mix_hint() } else { "" }
-    ck_fail(inout ck, if mixed { "E0107" } else { "E0101" }, lo, hi, "mismatched types: expected `" + want + "`, found `" + got + "`", h)
+    ck_fail_l(inout ck, if mixed { "E0107" } else { "E0101" }, lo, hi, "mismatched types: expected `" + want + "`, found `" + got + "`", "expected `" + want + "`", h)
 }
 
 fn expect_ty(inout ck: Checker, got: Ty, want: Ty, lo: i64, hi: i64) {
@@ -1089,7 +1089,7 @@ fn consume(inout ck: Checker, n: str, l: Local, e: Node) {
         return
     }
     if contains(ck.ctxs[k].consumed, l.slot) {
-        let _ = fail_at(inout ck, "E0501", e, "holdout `" + n + "` was already used", hint)
+        ck_fail_l(inout ck, "E0501", e.lo, e.hi, "holdout `" + n + "` was already used", "a holdout can be opened (or handed over) only once", hint)
         return
     }
     ck.ctxs[k].consumed[l.slot] = true
@@ -1625,6 +1625,7 @@ fn fixed_sig(name: str) -> (bool, List[Ty], Ty) {
     if name == "file_size" or name == "file_date" { return (true, [s], i) }
     if contains(["is_alphabetic", "is_alphanumeric", "is_whitespace", "is_uppercase"], name) { return (true, [i], b) }
     if name == "to_bits" { return (true, [Ty.TFloat], i) }
+    if name == "exit" { return (true, [i], u) }
     if name == "from_bits" { return (true, [i], Ty.TFloat) }
     if name == "http_get_all" { return (true, [ls, i], Ty.TList(Ty.TTuple([b, s]))) }
     if name == "download" { return (true, [s, s], i) }
@@ -1682,7 +1683,7 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
         if ck.failed { return bad() }
         return typed(bcall(name, hs, e), fs.2)
     }
-    if name == "print" {
+    if name == "print" or name == "eprint" {
         var hs: List[H] = []
         for x in all {
             let r = expr0(inout ck, x.0)
@@ -1951,7 +1952,7 @@ fn tensor_sels(inout ck: Checker, axes: List[i64], t: Ty, idx: List[Node]) -> (L
         let an = it.kids[0]
         let ie = it.kids[1]
         if an.kind == "-" {
-            let _ = fail_at(inout ck, "E0202", ie, "tensor indices must name their axis", "write `x[" + ck.axes[axes[0]].name + ": i]`: axes have names, not positions")
+            ck_fail_l(inout ck, "E0202", ie.lo, ie.hi, "tensor indices must name their axis", "`" + show(ck, t) + "` has axes " + axes_str(ck, axes), "write `x[" + ck.axes[axes[0]].name + ": i]`: axes have names, not positions")
             return (sels, kept)
         }
         let id = axis_id(inout ck, an.text, an.lo, an.hi)
@@ -1997,7 +1998,17 @@ fn frame_axes(inout ck: Checker, ops: List[(Ty, Node)], what: str, e: Node) -> L
             if not contains(parts[bi].1, x) { inside = false }
         }
         if not inside {
-            let _ = fail_at(inout ck, "E0201", e, "incompatible axes in " + what, "element-wise operations need one side's axes to contain the other's: reduce with `sum(x, over: ...)`, select with `x[axis: i]` or use `contract(x, w, over: ...)`")
+            // the two sides in the order they were written
+            let p = if parts[k].0 < parts[bi].0 { k } else { bi }
+            let q = if parts[k].0 < parts[bi].0 { bi } else { k }
+            let xn = ops[parts[p].0].1
+            let yn = ops[parts[q].0].1
+            let label = if xn.kind == "name" and yn.kind == "name" and xn.text != yn.text {
+                "`" + xn.text + "` has axes " + axes_str(ck, parts[p].1) + ", `" + yn.text + "` has " + axes_str(ck, parts[q].1)
+            } else {
+                "one side has axes " + axes_str(ck, parts[p].1) + ", the other has " + axes_str(ck, parts[q].1)
+            }
+            ck_fail_l(inout ck, "E0201", e.lo, e.hi, "incompatible axes in " + what, label, "element-wise operations need one side's axes to contain the other's: reduce with `sum(x, over: ...)`, select with `x[axis: i]` or use `contract(x, w, over: ...)`")
             return []
         }
     }

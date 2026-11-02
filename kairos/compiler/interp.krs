@@ -1,0 +1,1103 @@
+// The interpreter written in Kairós (M15). It runs the HIR the front end in Kairós makes
+// (front.krs), as the interpreter written in Rust (src/interp.rs) runs its own: the same output,
+// the same runtime errors with the same messages, the same numbers.
+//
+// A value is a struct, not an enum: a list, a map or a struct in a variable then changes in place
+// (`f[s].xs[i] = v`, an `inout` argument moves it), copied first only when another value shares
+// it, which is the language's own value semantics.
+import "front.krs"
+import "rt.krs"
+
+// A value of the program. `k`: 0 (), 1 i64 (n), 2 f64 (x), 3 bool (n: 1 true), 4 str (s), 5 a list
+// (xs), 6 a tuple (xs), 7 a struct (n: which, xs: its fields), 8 an enum (n: which, m: the variant,
+// xs: what it holds), 9 a function (n: 0 named, 1 a lambda, 2 grad, 3 value_and_grad; m: the
+// function, the lambda, or the argument differentiated; xs: what a lambda captured, or grad's
+// function; x: its identity), 10 a map (m: 1 when its keys are i64; e.mp: the values by the text of
+// their keys, in order), 11 Bytes (e.by), 12 a tensor (e.t), 13 a holdout (n: the protocol), 14 a
+// node of grad's tape (n)
+struct KV {
+    k: i64,
+    n: i64,
+    m: i64,
+    x: f64,
+    s: str,
+    xs: List[KV],
+    e: KE,
+}
+
+// what few values have (the others share one empty)
+struct KE {
+    mp: Map[str, KV],
+    by: Bytes,
+    t: RtT,
+}
+
+// A step from a variable to a place: 0 a field (i), 1 an index of a list or a key of a map (key).
+struct KStep {
+    k: i64,
+    i: i64,
+    key: KV,
+    at: H,
+}
+
+// The interpreter: the checked program, where the program is (ctl: 0 on, 1 returning, 2 breaking,
+// 3 continuing, 4 stopped by a runtime error, which is code, msg, hint and the place), how deep.
+struct KSt {
+    ck: Checker,
+    srcs: List[str],
+    args: List[str],
+    ctl: i64,
+    ret: KV,
+    code: str,
+    msg: str,
+    hint: str,
+    lo: i64,
+    hi: i64,
+    file: i64,
+    depth: i64,
+    uid: i64,
+    e0: KE,
+    no: List[KV],
+    unit: KV,
+}
+
+fn ki_new(ck: Checker, srcs: List[str], prog_args: List[str]) -> KSt {
+    let e0 = KE { mp: [:], by: bytes(), t: RtT { axes: [], shape: [], data: [], boolean: false } }
+    let no: List[KV] = []
+    let unit = KV { k: 0, n: 0, m: 0, x: 0.0, s: "", xs: no, e: e0 }
+    KSt { ck: ck, srcs: srcs, args: prog_args, ctl: 0, ret: unit, code: "", msg: "", hint: "", lo: 0, hi: 0, file: 0,
+        depth: 0, uid: 0, e0: e0, no: no, unit: unit }
+}
+
+// ------------------------------------------------------------------ values
+
+fn kv_i(st: KSt, n: i64) -> KV {
+    KV { k: 1, n: n, m: 0, x: 0.0, s: "", xs: st.no, e: st.e0 }
+}
+
+fn kv_f(st: KSt, x: f64) -> KV {
+    KV { k: 2, n: 0, m: 0, x: x, s: "", xs: st.no, e: st.e0 }
+}
+
+fn kv_b(st: KSt, b: bool) -> KV {
+    KV { k: 3, n: if b { 1 } else { 0 }, m: 0, x: 0.0, s: "", xs: st.no, e: st.e0 }
+}
+
+fn kv_s(st: KSt, s: str) -> KV {
+    KV { k: 4, n: 0, m: 0, x: 0.0, s: s, xs: st.no, e: st.e0 }
+}
+
+// a list (5), a tuple (6)
+fn kv_l(st: KSt, k: i64, xs: List[KV]) -> KV {
+    KV { k: k, n: 0, m: 0, x: 0.0, s: "", xs: xs, e: st.e0 }
+}
+
+fn kv_str_list(st: KSt, ss: List[str]) -> KV {
+    var xs: List[KV] = []
+    for s in ss { xs.push(kv_s(st, s)) }
+    kv_l(st, 5, xs)
+}
+
+fn kv_fn(inout st: KSt, kind: i64, id: i64, caps: List[KV]) -> KV {
+    st.uid += 1
+    KV { k: 9, n: kind, m: id, x: float(st.uid), s: "", xs: caps, e: st.e0 }
+}
+
+fn kv_map(st: KSt, int_keys: bool) -> KV {
+    let mp: Map[str, KV] = [:]
+    KV { k: 10, n: 0, m: if int_keys { 1 } else { 0 }, x: 0.0, s: "", xs: st.no, e: KE { mp: mp, by: st.e0.by, t: st.e0.t } }
+}
+
+// the text a map keeps a key by
+fn ki_key(v: KV) -> str {
+    if v.k == 1 { str(v.n) } else { v.s }
+}
+
+// a key of a map back from its text
+fn ki_unkey(st: KSt, m: KV, key: str) -> KV {
+    if m.m == 1 { kv_i(st, parse_int(key)) } else { kv_s(st, key) }
+}
+
+// A frame of n variables, each ().
+fn ki_frame(st: KSt, n: i64) -> List[KV] {
+    var f: List[KV] = []
+    for i in 0..n { f.push(st.unit) }
+    f
+}
+
+// ------------------------------------------------------------------ errors
+
+// The program stops with a runtime error at `at` (the first one stays).
+fn ki_fail(inout st: KSt, at: H, code: str, msg: str, hint: str) -> KV {
+    if st.ctl != 4 {
+        st.ctl = 4
+        st.code = code
+        st.msg = msg
+        st.hint = hint
+        st.lo = at.lo
+        st.hi = at.hi
+        st.file = at.f
+    }
+    st.unit
+}
+
+fn ki_overflow(inout st: KSt, at: H) -> KV {
+    ki_fail(inout st, at, "R0006", "integer overflow", "i64 arithmetic is checked; use f64 for very large values")
+}
+
+// The error as `kairos` writes it.
+fn ki_render(st: KSt) -> str {
+    let f = if st.file >= 0 and st.file < len(st.srcs) { st.file } else { 0 }
+    render_diag(st.code, st.msg, st.hint, st.srcs[f], st.ck.files[f], st.lo, st.hi)
+}
+
+// ------------------------------------------------------------------ text
+
+// a string as Rust's {:?} writes it
+fn ki_debug_str(s: str) -> str {
+    let d = str([s])
+    substr(d, 1, len(d) - 2)
+}
+
+fn ki_show_key(v: KV) -> str {
+    if v.k == 4 { ki_debug_str(v.s) } else { str(v.n) }
+}
+
+// The text of a value, as the interpreter's `display`: texts quoted when they are inside another
+// value (`top` false).
+fn ki_show(st: KSt, v: KV, top: bool) -> str {
+    let k = v.k
+    if k == 1 { return str(v.n) }
+    if k == 2 { return str(v.x) }
+    if k == 4 { return if top { v.s } else { ki_debug_str(v.s) } }
+    if k == 3 { return if v.n == 1 { "true" } else { "false" } }
+    if k == 0 { return "()" }
+    if k == 5 { return "[" + ki_show_all(st, v.xs) + "]" }
+    if k == 6 { return if len(v.xs) == 1 { "(" + ki_show_all(st, v.xs) + ",)" } else { "(" + ki_show_all(st, v.xs) + ")" } }
+    if k == 7 {
+        let def = st.ck.structs[v.n]
+        var parts: List[str] = []
+        for i in 0..len(def.fields) { parts.push(def.fields[i].0 + ": " + ki_show(st, v.xs[i], false)) }
+        return def.name + " { " + join(parts, ", ") + " }"
+    }
+    if k == 8 {
+        let name = st.ck.enums[v.n].variants[v.m].0
+        return if len(v.xs) == 0 { name } else { name + "(" + ki_show_all(st, v.xs) + ")" }
+    }
+    if k == 10 {
+        if len(v.e.mp) == 0 { return "[:]" }
+        var parts: List[str] = []
+        for key in keys(v.e.mp) { parts.push(ki_show(st, ki_unkey(st, v, key), false) + ": " + ki_show(st, v.e.mp[key], false)) }
+        return "[" + join(parts, ", ") + "]"
+    }
+    if k == 9 {
+        if v.n == 0 { return "<fn " + st.ck.sigs[v.m].name + ">" }
+        if v.n == 1 { return "<closure>" }
+        return if v.n == 3 { "<value_and_grad>" } else { "<grad>" }
+    }
+    if k == 11 { return "<" + str(len(v.e.by)) + " bytes>" }
+    if k == 13 { return "<holdout of protocol " + ki_debug_str(st.ck.protocols[v.n].name) + ">" }
+    "<value>"
+}
+
+fn ki_show_all(st: KSt, xs: List[KV]) -> str {
+    var parts: List[str] = []
+    for x in xs { parts.push(ki_show(st, x, false)) }
+    join(parts, ", ")
+}
+
+// ------------------------------------------------------------------ equality and order
+
+fn ki_eq(a: KV, b: KV) -> bool {
+    if a.k != b.k { return false }
+    let k = a.k
+    if k == 1 or k == 3 or k == 13 or k == 14 { return a.n == b.n }
+    if k == 2 { return a.x == b.x }
+    if k == 4 { return a.s == b.s }
+    if k == 0 { return true }
+    if k == 5 or k == 6 or k == 7 or k == 8 {
+        if a.n != b.n or a.m != b.m or len(a.xs) != len(b.xs) { return false }
+        for i in 0..len(a.xs) {
+            if not ki_eq(a.xs[i], b.xs[i]) { return false }
+        }
+        return true
+    }
+    if k == 9 { return a.x == b.x }
+    if k == 10 {
+        if len(a.e.mp) != len(b.e.mp) { return false }
+        for key in keys(a.e.mp) {
+            if not contains(b.e.mp, key) { return false }
+            if not ki_eq(a.e.mp[key], b.e.mp[key]) { return false }
+        }
+        return true
+    }
+    if k == 11 { return a.e.by == b.e.by }
+    false
+}
+
+// f64::total_cmp: the bits as a signed integer, the negative ones turned around
+fn ki_total_bits(x: f64) -> i64 {
+    let b = to_bits(x)
+    if b < 0 { bit_xor(b, 9223372036854775807) } else { b }
+}
+
+// The order of `sort` (src/value.rs total_cmp): -1, 0 or 1.
+fn ki_cmp(a: KV, b: KV) -> i64 {
+    if a.k == 1 and b.k == 1 { return if a.n < b.n { -1 } else if a.n > b.n { 1 } else { 0 } }
+    if a.k == 2 and b.k == 2 {
+        let x = ki_total_bits(a.x)
+        let y = ki_total_bits(b.x)
+        return if x < y { -1 } else if x > y { 1 } else { 0 }
+    }
+    if a.k == 3 and b.k == 3 { return if a.n < b.n { -1 } else if a.n > b.n { 1 } else { 0 } }
+    if a.k == 4 and b.k == 4 { return if a.s < b.s { -1 } else if a.s > b.s { 1 } else { 0 } }
+    if (a.k == 5 and b.k == 5) or (a.k == 6 and b.k == 6) {
+        let n = min(len(a.xs), len(b.xs))
+        for i in 0..n {
+            let c = ki_cmp(a.xs[i], b.xs[i])
+            if c != 0 { return c }
+        }
+        return if len(a.xs) < len(b.xs) { -1 } else if len(a.xs) > len(b.xs) { 1 } else { 0 }
+    }
+    0
+}
+
+// A stable sort (merge sort): the order Rust's sort_by gives.
+fn ki_sort(xs: List[KV]) -> List[KV] {
+    let n = len(xs)
+    if n < 2 { return xs }
+    var a = xs
+    var b = xs
+    var w = 1
+    while w < n {
+        var i = 0
+        while i < n {
+            let mid = min(i + w, n)
+            let hi = min(i + 2 * w, n)
+            var p = i
+            var q = mid
+            var o = i
+            while p < mid and q < hi {
+                if ki_cmp(a[q], a[p]) < 0 {
+                    b[o] = a[q]
+                    q += 1
+                } else {
+                    b[o] = a[p]
+                    p += 1
+                }
+                o += 1
+            }
+            while p < mid {
+                b[o] = a[p]
+                p += 1
+                o += 1
+            }
+            while q < hi {
+                b[o] = a[q]
+                q += 1
+                o += 1
+            }
+            i += 2 * w
+        }
+        let t = a
+        a = b
+        b = t
+        w *= 2
+    }
+    a
+}
+
+// ------------------------------------------------------------------ integers, checked
+
+fn ki_add_ok(a: i64, b: i64) -> bool {
+    let r = wrapping_add(a, b)
+    bit_and(bit_xor(a, r), bit_xor(b, r)) >= 0
+}
+
+fn ki_sub_ok(a: i64, b: i64) -> bool {
+    let r = wrapping_add(a, wrapping_mul(b, -1))
+    bit_and(bit_xor(a, b), bit_xor(a, r)) >= 0
+}
+
+fn ki_mul_ok(a: i64, b: i64) -> bool {
+    if a == 0 or b == 0 { return true }
+    if a == -1 { return b != -9223372036854775807 - 1 }
+    if b == -1 { return a != -9223372036854775807 - 1 }
+    wrapping_mul(a, b) / a == b
+}
+
+// i64::checked_pow (its loop, so it overflows where Rust's does): (fits, value)
+fn ki_pow(x: i64, e: i64) -> (bool, i64) {
+    if e == 0 { return (true, 1) }
+    var base = x
+    var acc = 1
+    var ex = e
+    while true {
+        if ex % 2 == 1 {
+            if not ki_mul_ok(acc, base) { return (false, 0) }
+            acc = acc * base
+            if ex == 1 { return (true, acc) }
+        }
+        ex = ex / 2
+        if not ki_mul_ok(base, base) { return (false, 0) }
+        base = base * base
+    }
+    (true, acc)
+}
+
+// ------------------------------------------------------------------ operators
+
+fn ki_bin(inout st: KSt, op: str, a: KV, b: KV, at: H) -> KV {
+    if a.k == 1 and b.k == 1 {
+        let x = a.n
+        let y = b.n
+        if op == "+" {
+            if not ki_add_ok(x, y) { return ki_overflow(inout st, at) }
+            return kv_i(st, x + y)
+        }
+        if op == "-" {
+            if not ki_sub_ok(x, y) { return ki_overflow(inout st, at) }
+            return kv_i(st, x - y)
+        }
+        if op == "*" {
+            if not ki_mul_ok(x, y) { return ki_overflow(inout st, at) }
+            return kv_i(st, x * y)
+        }
+        if op == "/" or op == "%" {
+            if y == 0 { return ki_fail(inout st, at, "R0002", "division by zero", "") }
+            if y == -1 and x == -9223372036854775807 - 1 { return ki_overflow(inout st, at) }
+            return kv_i(st, if op == "/" { x / y } else { x % y })
+        }
+        if op == "^" {
+            if y < 0 { return ki_fail(inout st, at, "R0007", "negative exponent in integer power", "use floats: `float(x) ^ float(y)`") }
+            if y > 4294967295 { return ki_overflow(inout st, at) }
+            let r = ki_pow(x, y)
+            if not r.0 { return ki_overflow(inout st, at) }
+            return kv_i(st, r.1)
+        }
+        if op == "==" { return kv_b(st, x == y) }
+        if op == "!=" { return kv_b(st, x != y) }
+        if op == "<" { return kv_b(st, x < y) }
+        if op == ">" { return kv_b(st, x > y) }
+        if op == "<=" { return kv_b(st, x <= y) }
+        if op == ">=" { return kv_b(st, x >= y) }
+    }
+    if a.k == 2 and b.k == 2 {
+        let x = a.x
+        let y = b.x
+        if op == "+" { return kv_f(st, x + y) }
+        if op == "-" { return kv_f(st, x - y) }
+        if op == "*" { return kv_f(st, x * y) }
+        if op == "/" { return kv_f(st, x / y) }
+        if op == "%" { return kv_f(st, x % y) }
+        if op == "^" { return kv_f(st, x ^ y) }
+        if op == "==" { return kv_b(st, x == y) }
+        if op == "!=" { return kv_b(st, x != y) }
+        if op == "<" { return kv_b(st, x < y) }
+        if op == ">" { return kv_b(st, x > y) }
+        if op == "<=" { return kv_b(st, x <= y) }
+        if op == ">=" { return kv_b(st, x >= y) }
+    }
+    if a.k == 4 and b.k == 4 {
+        if op == "+" { return kv_s(st, a.s + b.s) }
+        if op == "<" { return kv_b(st, a.s < b.s) }
+        if op == ">" { return kv_b(st, a.s > b.s) }
+        if op == "<=" { return kv_b(st, a.s <= b.s) }
+        if op == ">=" { return kv_b(st, a.s >= b.s) }
+    }
+    if op == "==" { return kv_b(st, ki_eq(a, b)) }
+    if op == "!=" { return kv_b(st, not ki_eq(a, b)) }
+    ki_fail(inout st, at, "K0001", "`" + op + "` on these values is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ places
+
+// The variable a place starts at; its steps (the indexes and keys evaluated now, in order) go to
+// `steps`.
+fn ki_place(inout st: KSt, inout f: List[KV], p: H, inout steps: List[KStep]) -> i64 {
+    if p.kind == "plocal" { return p.n }
+    let root = ki_place(inout st, inout f, p.kids[0], inout steps)
+    if st.ctl != 0 { return root }
+    if p.kind == "pfield" {
+        steps.push(KStep { k: 0, i: p.n, key: st.unit, at: p })
+        return root
+    }
+    let iv = ki_ev(inout st, inout f, p.kids[1])
+    if st.ctl != 0 { return root }
+    steps.push(KStep { k: 1, i: iv.n, key: iv, at: p })
+    root
+}
+
+// Walks a place's steps from `v` and does `op` with what is there: 0 puts `arg` (an assignment: a
+// missing key of a map at the end is added), 1 reads it, 2 takes it out (() is left), 3 pushes
+// `arg`, 4 pops, 5 sorts, 6 reverses, 7 removes the key `arg` of a map, 8 puts `arg` back quietly
+// (after an `inout` call: no error).
+fn ki_at(inout st: KSt, inout v: KV, steps: List[KStep], k: i64, op: i64, arg: KV, at: H) -> KV {
+    if k < len(steps) {
+        let s = steps[k]
+        if s.k == 0 { return ki_at(inout st, inout v.xs[s.i], steps, k + 1, op, arg, at) }
+        if v.k == 10 {
+            let key = ki_key(s.key)
+            if not contains(v.e.mp, key) {
+                if op == 8 { return st.unit }
+                if op != 0 or k != len(steps) - 1 { return ki_fail(inout st, s.at, "R0012", "no key " + ki_show_key(s.key) + " in the map", "") }
+                if len(v.e.mp) == 0 and s.key.k == 1 { v.m = 1 }
+                v.e.mp[key] = st.unit
+            }
+            return ki_at(inout st, inout v.e.mp[key], steps, k + 1, op, arg, at)
+        }
+        let i = s.key.n
+        let n = len(v.xs)
+        if i < 0 or i >= n {
+            if op == 8 { return st.unit }
+            return ki_fail(inout st, s.at, "R0001", "index " + str(i) + " out of bounds for a list of length " + str(n), "")
+        }
+        return ki_at(inout st, inout v.xs[i], steps, k + 1, op, arg, at)
+    }
+    if op == 0 or op == 8 {
+        v = arg
+        return st.unit
+    }
+    if op == 1 { return v }
+    if op == 2 {
+        let old = v
+        v = st.unit
+        return old
+    }
+    if op == 3 {
+        v.xs.push(arg)
+        return st.unit
+    }
+    if op == 4 {
+        if len(v.xs) == 0 { return ki_fail(inout st, at, "R0004", "`pop` from an empty list", "") }
+        return v.xs.pop()
+    }
+    if op == 5 {
+        v.xs = ki_sort(v.xs)
+        return st.unit
+    }
+    if op == 6 {
+        var r: List[KV] = []
+        var i = len(v.xs) - 1
+        while i >= 0 {
+            r.push(v.xs[i])
+            i -= 1
+        }
+        v.xs = r
+        return st.unit
+    }
+    if op == 7 {
+        remove(inout v.e.mp, ki_key(arg))
+        return st.unit
+    }
+    st.unit
+}
+
+// ------------------------------------------------------------------ patterns
+
+// A literal of the HIR as a value.
+fn ki_lit(st: KSt, t: str) -> KV {
+    if starts_with(t, "i64 ") { return kv_i(st, parse_int(substr(t, 4, len(t)))) }
+    if starts_with(t, "f64 ") { return kv_f(st, parse_float(substr(t, 4, len(t)))) }
+    if t == "bool true" { return kv_b(st, true) }
+    if t == "bool false" { return kv_b(st, false) }
+    if starts_with(t, "str ") { return kv_s(st, unhex(substr(t, 4, len(t)))) }
+    st.unit
+}
+
+// Does v match the pattern? What it binds goes to the frame (as the interpreter's matches_pat).
+fn ki_pat(st: KSt, inout f: List[KV], p: H, v: KV) -> bool {
+    let k = p.kind
+    if k == "pbind" {
+        f[p.n] = v
+        return true
+    }
+    if k == "pwild" { return true }
+    if k == "ptuple" {
+        if v.k != 6 { return false }
+        for i in 0..len(p.kids) {
+            if i >= len(v.xs) { return true }
+            if not ki_pat(st, inout f, p.kids[i], v.xs[i]) { return false }
+        }
+        return true
+    }
+    if k == "pvariant" {
+        if v.k != 8 or v.m != p.m { return false }
+        for i in 0..len(p.kids) {
+            if i >= len(v.xs) { return true }
+            if not ki_pat(st, inout f, p.kids[i], v.xs[i]) { return false }
+        }
+        return true
+    }
+    if k == "plit" { return ki_eq(ki_lit(st, p.text), v) }
+    false
+}
+
+// ------------------------------------------------------------------ calls
+
+fn ki_enter(inout st: KSt, inout fr: List[KV], body: H, at: H) -> KV {
+    if st.depth >= 20000 { return ki_fail(inout st, at, "R0005", "stack overflow: too many nested calls", "") }
+    st.depth += 1
+    var r = ki_ev(inout st, inout fr, body)
+    st.depth -= 1
+    if st.ctl == 1 {
+        st.ctl = 0
+        r = st.ret
+    }
+    r
+}
+
+// f(a, inout b): the values first (they may read a variable passed as `inout`), then the `inout`
+// places moved into the call, and back after it.
+fn ki_call(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    let id = e.n
+    var fr = ki_frame(st, len(st.ck.bodies[id]))
+    for i in 0..len(e.kids) {
+        let a = e.kids[i]
+        if a.kind == "val" {
+            fr[i] = ki_ev(inout st, inout f, a.kids[0])
+            if st.ctl != 0 { return st.unit }
+        }
+    }
+    var backs: List[(i64, i64, List[KStep])] = []
+    for i in 0..len(e.kids) {
+        let a = e.kids[i]
+        if a.kind == "inout" {
+            var steps: List[KStep] = []
+            let root = ki_place(inout st, inout f, a.kids[0], inout steps)
+            if st.ctl == 0 {
+                let v = ki_at(inout st, inout f[root], steps, 0, 2, st.unit, e)
+                if st.ctl == 0 {
+                    fr[i] = v
+                    backs.push((i, root, steps))
+                }
+            }
+            if st.ctl != 0 {
+                for bk in backs { let _ = ki_at(inout st, inout f[bk.1], bk.2, 0, 8, fr[bk.0], e) }
+                return st.unit
+            }
+        }
+    }
+    let r = ki_enter(inout st, inout fr, st.ck.fn_hir[id], e)
+    for bk in backs { let _ = ki_at(inout st, inout f[bk.1], bk.2, 0, 8, fr[bk.0], e) }
+    r
+}
+
+fn ki_call_value(inout st: KSt, fv: KV, vs: List[KV], at: H) -> KV {
+    if fv.n == 0 {
+        var fr = ki_frame(st, len(st.ck.bodies[fv.m]))
+        for i in 0..len(vs) { fr[i] = vs[i] }
+        return ki_enter(inout st, inout fr, st.ck.fn_hir[fv.m], at)
+    }
+    if fv.n == 1 {
+        let lb = st.ck.lambdas[fv.m]
+        var fr = ki_frame(st, lb.n_slots)
+        for i in 0..len(vs) { fr[i] = vs[i] }
+        for j in 0..len(lb.caps) { fr[lb.caps[j]] = fv.xs[j] }
+        return ki_enter(inout st, inout fr, lb.body, at)
+    }
+    ki_fail(inout st, at, "K0001", "`grad` is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ the evaluator
+
+// The loop's body ran: false to leave the loop (break, return, an error).
+fn ki_loop_on(inout st: KSt) -> bool {
+    if st.ctl == 0 { return true }
+    if st.ctl == 3 {
+        st.ctl = 0
+        return true
+    }
+    if st.ctl == 2 { st.ctl = 0 }
+    false
+}
+
+fn ki_ev(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    let k = e.kind
+    if k == "local" { return f[e.n] }
+    if k == "lit" { return ki_lit(st, e.text) }
+    if k == "binary" {
+        let a = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        let b = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        return ki_bin(inout st, e.text, a, b, e)
+    }
+    if k == "call" { return ki_call(inout st, inout f, e) }
+    if k == "builtin" { return ki_builtin(inout st, inout f, e) }
+    if k == "block" {
+        let n = len(e.kids)
+        for i in 0..n - 1 {
+            let _ = ki_ev(inout st, inout f, e.kids[i])
+            if st.ctl != 0 { return st.unit }
+        }
+        if e.kids[n - 1].kind == "-" { return st.unit }
+        return ki_ev(inout st, inout f, e.kids[n - 1])
+    }
+    if k == "if" {
+        let c = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        if c.n == 1 { return ki_ev(inout st, inout f, e.kids[1]) }
+        if e.kids[2].kind == "-" { return st.unit }
+        return ki_ev(inout st, inout f, e.kids[2])
+    }
+    if k == "field" {
+        let v = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        return v.xs[e.n]
+    }
+    if k == "index" {
+        let o = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        let iv = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        if o.k == 10 {
+            let key = ki_key(iv)
+            if not contains(o.e.mp, key) { return ki_fail(inout st, e, "R0012", "no key " + ki_show_key(iv) + " in the map", "") }
+            return o.e.mp[key]
+        }
+        let i = iv.n
+        if i < 0 or i >= len(o.xs) { return ki_fail(inout st, e, "R0001", "index " + str(i) + " out of bounds for a list of length " + str(len(o.xs)), "") }
+        return o.xs[i]
+    }
+    if k == "assign" {
+        let v = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        let p = e.kids[0]
+        if p.kind == "plocal" {
+            f[p.n] = v
+            return st.unit
+        }
+        var steps: List[KStep] = []
+        let root = ki_place(inout st, inout f, p, inout steps)
+        if st.ctl != 0 { return st.unit }
+        return ki_at(inout st, inout f[root], steps, 0, 0, v, e)
+    }
+    if k == "opassign" {
+        let rhs = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        var steps: List[KStep] = []
+        let root = ki_place(inout st, inout f, e.kids[0], inout steps)
+        if st.ctl != 0 { return st.unit }
+        let cur = ki_at(inout st, inout f[root], steps, 0, 1, st.unit, e)
+        if st.ctl != 0 { return st.unit }
+        let nv = ki_bin(inout st, e.text, cur, rhs, e)
+        if st.ctl != 0 { return st.unit }
+        return ki_at(inout st, inout f[root], steps, 0, 0, nv, e)
+    }
+    if k == "let" {
+        let v = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        let _ = ki_pat(st, inout f, e.kids[0], v)
+        return st.unit
+    }
+    if k == "and" or k == "or" {
+        let a = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        if (a.n == 1) == (k == "or") { return a }
+        return ki_ev(inout st, inout f, e.kids[1])
+    }
+    if k == "unary" {
+        let x = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        if e.text == "not" { return kv_b(st, x.n != 1) }
+        if x.k == 1 {
+            if x.n == -9223372036854775807 - 1 { return ki_overflow(inout st, e) }
+            return kv_i(st, -x.n)
+        }
+        if x.k == 2 { return kv_f(st, -x.x) }
+        return ki_fail(inout st, e, "K0001", "`-` on this value is not in the interpreter written in Kairós yet", "")
+    }
+    if k == "while" {
+        while true {
+            let c = ki_ev(inout st, inout f, e.kids[0])
+            if st.ctl != 0 { return st.unit }
+            if c.n != 1 { break }
+            let _ = ki_ev(inout st, inout f, e.kids[1])
+            if not ki_loop_on(inout st) { break }
+        }
+        return st.unit
+    }
+    if k == "forrange" {
+        let lo = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        let hi = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        var i = lo.n
+        let top = hi.n
+        while (e.m == 1 and i <= top) or (e.m != 1 and i < top) {
+            f[e.n] = kv_i(st, i)
+            let _ = ki_ev(inout st, inout f, e.kids[2])
+            if not ki_loop_on(inout st) { break }
+            if i == 9223372036854775807 { break }
+            i += 1
+        }
+        return st.unit
+    }
+    if k == "forlist" {
+        let xs = ki_ev(inout st, inout f, e.kids[1])
+        if st.ctl != 0 { return st.unit }
+        for x in xs.xs {
+            let _ = ki_pat(st, inout f, e.kids[0], x)
+            let _ = ki_ev(inout st, inout f, e.kids[2])
+            if not ki_loop_on(inout st) { break }
+        }
+        return st.unit
+    }
+    if k == "match" {
+        let v = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        for i in 1..len(e.kids) {
+            let arm = e.kids[i]
+            if ki_pat(st, inout f, arm.kids[0], v) { return ki_ev(inout st, inout f, arm.kids[1]) }
+        }
+        return ki_fail(inout st, e, "R0008", "no match arm matched", "")
+    }
+    if k == "return" {
+        var v = st.unit
+        if e.kids[0].kind != "-" {
+            v = ki_ev(inout st, inout f, e.kids[0])
+            if st.ctl != 0 { return st.unit }
+        }
+        st.ret = v
+        st.ctl = 1
+        return st.unit
+    }
+    if k == "break" {
+        st.ctl = 2
+        return st.unit
+    }
+    if k == "continue" {
+        st.ctl = 3
+        return st.unit
+    }
+    if k == "list" or k == "tuple" {
+        var xs: List[KV] = []
+        for x in e.kids {
+            xs.push(ki_ev(inout st, inout f, x))
+            if st.ctl != 0 { return st.unit }
+        }
+        return kv_l(st, if k == "list" { 5 } else { 6 }, xs)
+    }
+    if k == "struct" or k == "variant" {
+        var xs: List[KV] = []
+        for x in e.kids {
+            xs.push(ki_ev(inout st, inout f, x))
+            if st.ctl != 0 { return st.unit }
+        }
+        var v = kv_l(st, if k == "struct" { 7 } else { 8 }, xs)
+        v.n = e.n
+        if k == "variant" { v.m = e.m }
+        return v
+    }
+    if k == "map" {
+        var int_keys = false
+        match e.t {
+            TMap(kt, vt) => { int_keys = kt == Ty.TInt },
+            _ => {},
+        }
+        var m = kv_map(st, int_keys)
+        var i = 0
+        while i + 1 < len(e.kids) {
+            let kv = ki_ev(inout st, inout f, e.kids[i])
+            if st.ctl != 0 { return st.unit }
+            let vv = ki_ev(inout st, inout f, e.kids[i + 1])
+            if st.ctl != 0 { return st.unit }
+            if kv.k == 1 { m.m = 1 }
+            m.e.mp[ki_key(kv)] = vv
+            i += 2
+        }
+        return m
+    }
+    if k == "fnref" { return kv_fn(inout st, 0, e.n, st.no) }
+    if k == "lambda" {
+        var caps: List[KV] = []
+        if e.text != "" {
+            for s in split(e.text, " ") { caps.push(f[parse_int(s)]) }
+        }
+        return kv_fn(inout st, 1, e.n, caps)
+    }
+    if k == "callv" {
+        let fv = ki_ev(inout st, inout f, e.kids[0])
+        if st.ctl != 0 { return st.unit }
+        var vs: List[KV] = []
+        for i in 1..len(e.kids) {
+            vs.push(ki_ev(inout st, inout f, e.kids[i]))
+            if st.ctl != 0 { return st.unit }
+        }
+        return ki_call_value(inout st, fv, vs, e)
+    }
+    if k == "-" { return st.unit }
+    ki_fail(inout st, e, "K0001", "`" + k + "` is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ builtins
+
+fn ki_float(v: KV) -> f64 {
+    if v.k == 1 { float(v.n) } else { v.x }
+}
+
+// "s".parse::<i64>() after trim: an optional sign, digits, and within i64
+fn ki_int_text_ok(t: str) -> bool {
+    let cs = codes(t)
+    let n = len(cs)
+    if n == 0 { return false }
+    var i = 0
+    var neg = false
+    if cs[0] == 43 or cs[0] == 45 {
+        neg = cs[0] == 45
+        i = 1
+    }
+    if i == n { return false }
+    var digits: List[i64] = []
+    for j in i..n {
+        if cs[j] < 48 or cs[j] > 57 { return false }
+        digits.push(cs[j] - 48)
+    }
+    // without leading zeros, compared with the largest
+    var s = 0
+    while s < len(digits) - 1 and digits[s] == 0 { s += 1 }
+    let m = len(digits) - s
+    if m < 19 { return true }
+    if m > 19 { return false }
+    let lim = codes(if neg { "9223372036854775808" } else { "9223372036854775807" })
+    for j in 0..19 {
+        let d = digits[s + j]
+        let l = lim[j] - 48
+        if d < l { return true }
+        if d > l { return false }
+    }
+    true
+}
+
+fn ki_code_ok(n: i64) -> bool {
+    n >= 0 and n <= 1114111 and (n < 55296 or n > 57343)
+}
+
+// min/max of two values (the interpreter's: a NaN wins, else the order of `<`)
+fn ki_min_max(inout st: KSt, b: str, x: KV, y: KV, at: H) -> KV {
+    if x.k == 2 and y.k == 2 and (is_nan(x.x) or is_nan(y.x)) { return kv_f(st, nan) }
+    let lt = ki_bin(inout st, "<", x, y, at)
+    if st.ctl != 0 { return st.unit }
+    let first = if b == "min" { lt.n == 1 } else { lt.n != 1 }
+    if first { x } else { y }
+}
+
+fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    let b = e.text
+    // the ones that change a place: the value first, then the place
+    if b == "push" or b == "pop" or b == "sort" or b == "reverse" or b == "remove" {
+        var arg = st.unit
+        if len(e.kids) > 1 {
+            arg = ki_ev(inout st, inout f, e.kids[1].kids[0])
+            if st.ctl != 0 { return st.unit }
+        }
+        var steps: List[KStep] = []
+        let root = ki_place(inout st, inout f, e.kids[0].kids[0], inout steps)
+        if st.ctl != 0 { return st.unit }
+        let op = if b == "push" { 3 } else if b == "pop" { 4 } else if b == "sort" { 5 } else if b == "reverse" { 6 } else { 7 }
+        return ki_at(inout st, inout f[root], steps, 0, op, arg, e)
+    }
+    var vs: List[KV] = []
+    for a in e.kids {
+        vs.push(ki_ev(inout st, inout f, a.kids[0]))
+        if st.ctl != 0 { return st.unit }
+    }
+    if b == "print" or b == "eprint" {
+        var parts: List[str] = []
+        for v in vs { parts.push(ki_show(st, v, true)) }
+        if b == "print" { print(join(parts, " ")) } else { eprint(join(parts, " ")) }
+        return st.unit
+    }
+    if b == "len" {
+        let v = vs[0]
+        if v.k == 4 { return kv_i(st, len(v.s)) }
+        if v.k == 10 { return kv_i(st, len(v.e.mp)) }
+        if v.k == 11 { return kv_i(st, len(v.e.by)) }
+        return kv_i(st, len(v.xs))
+    }
+    if b == "str" { return kv_s(st, ki_show(st, vs[0], true)) }
+    if b == "float" { return kv_f(st, ki_float(vs[0])) }
+    if b == "int" {
+        let v = vs[0]
+        if v.k == 1 { return v }
+        if is_nan(v.x) or abs(v.x) >= 9.2e18 { return ki_fail(inout st, e, "R0009", "cannot convert " + str(v.x) + " to i64", "") }
+        return kv_i(st, int(v.x))
+    }
+    if b == "contains" {
+        let o = vs[0]
+        if o.k == 4 { return kv_b(st, contains(o.s, vs[1].s)) }
+        if o.k == 10 { return kv_b(st, contains(o.e.mp, ki_key(vs[1]))) }
+        for x in o.xs {
+            if ki_eq(x, vs[1]) { return kv_b(st, true) }
+        }
+        return kv_b(st, false)
+    }
+    if b == "keys" or b == "values" or b == "items" {
+        let m = vs[0]
+        var xs: List[KV] = []
+        for key in keys(m.e.mp) {
+            let kv = ki_unkey(st, m, key)
+            if b == "keys" {
+                xs.push(kv)
+            } else if b == "values" {
+                xs.push(m.e.mp[key])
+            } else {
+                xs.push(kv_l(st, 6, [kv, m.e.mp[key]]))
+            }
+        }
+        return kv_l(st, 5, xs)
+    }
+    if b == "get" {
+        let key = ki_key(vs[1])
+        return if contains(vs[0].e.mp, key) { vs[0].e.mp[key] } else { vs[2] }
+    }
+    if b == "map" or b == "filter" {
+        var out: List[KV] = []
+        for x in vs[0].xs {
+            let r = ki_call_value(inout st, vs[1], [x], e)
+            if st.ctl != 0 { return st.unit }
+            if b == "map" {
+                out.push(r)
+            } else if r.n == 1 {
+                out.push(x)
+            }
+        }
+        return kv_l(st, 5, out)
+    }
+    if b == "sum" and vs[0].k == 5 {
+        var acc = vs[1]
+        for x in vs[0].xs {
+            acc = ki_bin(inout st, "+", acc, x, e)
+            if st.ctl != 0 { return st.unit }
+        }
+        return acc
+    }
+    if (b == "mean" or b == "prod") and vs[0].k == 5 {
+        let xs = vs[0].xs
+        if b == "mean" {
+            if len(xs) == 0 { return ki_fail(inout st, e, "R0004", "`mean` of an empty list", "") }
+            var acc = 0.0
+            for x in xs { acc = acc + x.x }
+            return kv_f(st, acc / float(len(xs)))
+        }
+        var acc = 1.0
+        for x in xs { acc = acc * x.x }
+        return kv_f(st, acc)
+    }
+    if (b == "min" or b == "max") and len(vs) == 2 and vs[0].k != 12 and vs[1].k != 12 { return ki_min_max(inout st, b, vs[0], vs[1], e) }
+    if b == "minimum" or b == "maximum" {
+        let xs = vs[0].xs
+        if len(xs) == 0 { return ki_fail(inout st, e, "R0004", "`" + b + "` of an empty list", "") }
+        var best = xs[0]
+        for i in 1..len(xs) {
+            let better = if b == "minimum" { ki_bin(inout st, "<", xs[i], best, e) } else { ki_bin(inout st, "<", best, xs[i], e) }
+            if st.ctl != 0 { return st.unit }
+            if better.n == 1 { best = xs[i] }
+        }
+        return best
+    }
+    if b == "abs" and vs[0].k == 1 {
+        if vs[0].n == -9223372036854775807 - 1 { return ki_overflow(inout st, e) }
+        return kv_i(st, abs(vs[0].n))
+    }
+    if len(vs) == 1 and vs[0].k == 2 {
+        let x = vs[0].x
+        if b == "abs" { return kv_f(st, abs(x)) }
+        if b == "sqrt" { return kv_f(st, sqrt(x)) }
+        if b == "exp" { return kv_f(st, exp(x)) }
+        if b == "ln" { return kv_f(st, ln(x)) }
+        if b == "floor" { return kv_f(st, floor(x)) }
+        if b == "ceil" { return kv_f(st, ceil(x)) }
+        if b == "round" { return kv_f(st, round(x)) }
+        if b == "tanh" { return kv_f(st, tanh(x)) }
+        if b == "sigmoid" { return kv_f(st, sigmoid(x)) }
+        if b == "relu" { return kv_f(st, relu(x)) }
+        if b == "softplus" { return kv_f(st, softplus(x)) }
+        if b == "is_nan" { return kv_b(st, is_nan(x)) }
+        if b == "to_bits" { return kv_i(st, to_bits(x)) }
+    }
+    if b == "format_fixed" { return kv_s(st, format_fixed(vs[0].x, vs[1].n)) }
+    if b == "substr" { return kv_s(st, substr(vs[0].s, vs[1].n, vs[2].n)) }
+    if b == "split" {
+        if vs[1].s == "" { return ki_fail(inout st, e, "R0010", "`split` needs a separator that is not empty", "") }
+        return kv_str_list(st, split(vs[0].s, vs[1].s))
+    }
+    if b == "lines" { return kv_str_list(st, lines(vs[0].s)) }
+    if b == "trim" { return kv_s(st, trim(vs[0].s)) }
+    if b == "upper" { return kv_s(st, upper(vs[0].s)) }
+    if b == "lower" { return kv_s(st, lower(vs[0].s)) }
+    if b == "starts_with" { return kv_b(st, starts_with(vs[0].s, vs[1].s)) }
+    if b == "ends_with" { return kv_b(st, ends_with(vs[0].s, vs[1].s)) }
+    if b == "find" { return kv_i(st, find(vs[0].s, vs[1].s)) }
+    if b == "replace" { return kv_s(st, replace(vs[0].s, vs[1].s, vs[2].s)) }
+    if b == "parse_int" {
+        let t = trim(vs[0].s)
+        if not ki_int_text_ok(t) { return ki_fail(inout st, e, "R0010", "not an integer: " + ki_debug_str(vs[0].s), "") }
+        return kv_i(st, parse_int(t))
+    }
+    if b == "parse_float" { return kv_f(st, parse_float(vs[0].s)) }
+    if b == "join" {
+        var ss: List[str] = []
+        for x in vs[0].xs { ss.push(x.s) }
+        return kv_s(st, join(ss, vs[1].s))
+    }
+    if b == "codes" {
+        var xs: List[KV] = []
+        for c in codes(vs[0].s) { xs.push(kv_i(st, c)) }
+        return kv_l(st, 5, xs)
+    }
+    if b == "from_codes" {
+        var cs: List[i64] = []
+        for x in vs[0].xs {
+            if not ki_code_ok(x.n) { return ki_fail(inout st, e, "R0010", str(x.n) + " is not a Unicode code point", "") }
+            cs.push(x.n)
+        }
+        return kv_s(st, from_codes(cs))
+    }
+    if b == "utf8_len" { return kv_i(st, utf8_len(vs[0].s)) }
+    if b == "assert" {
+        if vs[0].n == 1 { return st.unit }
+        return ki_fail(inout st, e, "R0003", if len(vs) > 1 { vs[1].s } else { "assertion failed" }, "")
+    }
+    if b == "exit" {
+        exit(vs[0].n)
+        return st.unit
+    }
+    if b == "args" { return kv_str_list(st, st.args) }
+    if b == "env" { return kv_s(st, env(vs[0].s)) }
+    if b == "today" { return kv_i(st, today()) }
+    if b == "bit_and" { return kv_i(st, bit_and(vs[0].n, vs[1].n)) }
+    if b == "bit_or" { return kv_i(st, bit_or(vs[0].n, vs[1].n)) }
+    if b == "bit_xor" { return kv_i(st, bit_xor(vs[0].n, vs[1].n)) }
+    if b == "wrapping_add" { return kv_i(st, wrapping_add(vs[0].n, vs[1].n)) }
+    if b == "wrapping_mul" { return kv_i(st, wrapping_mul(vs[0].n, vs[1].n)) }
+    if b == "shl" or b == "shr" {
+        let n = vs[1].n
+        if n < 0 or n > 63 { return ki_fail(inout st, e, "R0014", "shift by " + str(n) + ": it must be from 0 to 63", "") }
+        return kv_i(st, if b == "shl" { shl(vs[0].n, n) } else { shr(vs[0].n, n) })
+    }
+    if b == "to_hex" { return kv_s(st, to_hex(vs[0].n, vs[1].n)) }
+    if b == "is_alphabetic" { return kv_b(st, is_alphabetic(vs[0].n)) }
+    if b == "is_alphanumeric" { return kv_b(st, is_alphanumeric(vs[0].n)) }
+    if b == "is_whitespace" { return kv_b(st, is_whitespace(vs[0].n)) }
+    if b == "is_uppercase" { return kv_b(st, is_uppercase(vs[0].n)) }
+    if b == "from_bits" { return kv_f(st, from_bits(vs[0].n)) }
+    if b == "file_exists" { return kv_b(st, file_exists(vs[0].s)) }
+    if b == "file_size" { return kv_i(st, file_size(vs[0].s)) }
+    if b == "file_date" { return kv_i(st, file_date(vs[0].s)) }
+    ki_fail(inout st, e, "K0001", "`" + b + "` is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ a program
+
+// Runs the program's top-level statements in order: true when it ends without an error.
+fn ki_run(inout st: KSt) -> bool {
+    var f = ki_frame(st, len(st.ck.main.slot_tys))
+    for t in st.ck.all_tops {
+        let _ = ki_ev(inout st, inout f, t)
+        if st.ctl == 4 { return false }
+        st.ctl = 0
+    }
+    true
+}

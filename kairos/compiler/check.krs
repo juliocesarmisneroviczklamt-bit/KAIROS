@@ -270,13 +270,15 @@ struct Checker {
     // batch, in the order they run: what an image of the program holds
     files: List[str],
     all_tops: List[H],
-    // the first error
+    // the first error, and the file it is in (its index in `files`)
     failed: bool,
     code: str,
     elo: i64,
     ehi: i64,
     msg: str,
     hint: str,
+    label: str,
+    efile: i64,
 }
 
 fn new_checker(std_dir: str) -> Checker {
@@ -291,7 +293,7 @@ fn new_checker(std_dir: str) -> Checker {
         builtins: b, imported: [:], std_dir: std_dir,
         ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [],
         fn_hir: [], fn_at: [], lambdas: [], tops: [], tmain: [], tlog: [], files: [], all_tops: [],
-        failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
+        failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "", label: "", efile: -1,
     }
 }
 
@@ -303,6 +305,21 @@ fn ck_fail(inout ck: Checker, code: str, lo: i64, hi: i64, msg: str, hint: str) 
     ck.ehi = hi
     ck.msg = msg
     ck.hint = hint
+    ck.label = ""
+}
+
+// The same with a label (what the carets point at, as the Rust checker's Diag::label).
+fn ck_fail_l(inout ck: Checker, code: str, lo: i64, hi: i64, msg: str, label: str, hint: str) {
+    if ck.failed { return }
+    ck_fail(inout ck, code, lo, hi, msg, hint)
+    ck.label = label
+}
+
+// "[month, asset]"
+fn axes_str(ck: Checker, axes: List[i64]) -> str {
+    var names: List[str] = []
+    for a in axes { names.push(ck.axes[a].name) }
+    "[" + join(names, ", ") + "]"
 }
 
 // ------------------------------------------------------------------ type variables

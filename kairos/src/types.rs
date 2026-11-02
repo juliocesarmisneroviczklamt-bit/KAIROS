@@ -1880,7 +1880,7 @@ impl Checker {
             }
         };
         let (hargs, ty): (Vec<HArg>, Ty) = match b {
-            Builtin::Print => {
+            Builtin::Print | Builtin::Eprint => {
                 let mut hs = Vec::new();
                 for (e, _) in &all {
                     let (h, t) = self.expr(e, None)?;
@@ -2013,6 +2013,7 @@ impl Checker {
             Builtin::FileSize | Builtin::FileDate => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
             Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace | Builtin::IsUppercase => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Bool),
             Builtin::ToBits => (self.fixed_args(&all, &[Ty::Float], sp, name)?, Ty::Int),
+            Builtin::Exit => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Unit),
             Builtin::FromBits => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Float),
             Builtin::HttpGetAll => (
                 self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Int], sp, name)?,

@@ -112,6 +112,12 @@ fn check_items(inout ck: Checker, items: List[Node], file: i64) {
 fn check_file(inout ck: Checker, name: str, src: str) {
     let file = len(ck.files)
     ck.files.push(name)
+    check_file_in(inout ck, name, src, file)
+    // the innermost file that failed is the first to see it
+    if ck.failed and ck.efile < 0 { ck.efile = file }
+}
+
+fn check_file_in(inout ck: Checker, name: str, src: str, file: i64) {
     let r = parse_program(src)
     if not r.0 {
         ck_fail(inout ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
@@ -131,4 +137,51 @@ fn check_file(inout ck: Checker, name: str, src: str) {
         }
     }
     check_items(inout ck, items, file)
+}
+
+// A diagnostic as `kairos` prints it (src/diag.rs `render`).
+fn render_diag(code: str, msg: str, hint: str, src: str, file: str, lo0: i64, hi0: i64) -> str {
+    render_diag_l(code, msg, "", hint, src, file, lo0, hi0)
+}
+
+// The same with a label after the carets.
+fn render_diag_l(code: str, msg: str, label: str, hint: str, src: str, file: str, lo0: i64, hi0: i64) -> str {
+    let cs = codes(src)
+    var boff = [0]
+    for k in 0..len(cs) { boff.push(boff[k] + lx_utf8_len(cs[k])) }
+    let nb = boff[len(cs)]
+    let lo = min(max(lo0, 0), nb)
+    let hi = min(max(hi0, lo), nb)
+    // the characters at those bytes
+    var ci = 0
+    while ci < len(cs) and boff[ci] < lo { ci += 1 }
+    var cj = ci
+    while cj < len(cs) and boff[cj] < hi { cj += 1 }
+    var start = ci
+    while start > 0 and cs[start - 1] != 10 { start -= 1 }
+    var stop = ci
+    while stop < len(cs) and cs[stop] != 10 { stop += 1 }
+    var line_no = 1
+    for k in 0..ci {
+        if cs[k] == 10 { line_no += 1 }
+    }
+    let col = ci - start + 1
+    var text_end = stop
+    while text_end > start and cs[text_end - 1] == 13 { text_end -= 1 }
+    var text = []
+    for k in start..text_end { text.push(cs[k]) }
+    let width = max(min(cj, stop) - ci, 1)
+    var pad = []
+    for k in 0..len(str(line_no)) { pad.push(" ") }
+    let p = join(pad, "")
+    var sp = []
+    for k in 0..col - 1 { sp.push(" ") }
+    var carets = []
+    for k in 0..width { carets.push("^") }
+    let nl = from_codes([10])
+    let kind = if starts_with(code, "R") { "runtime error" } else if starts_with(code, "W") { "warning" } else { "error" }
+    var s = kind + "[" + code + "]: " + msg + nl + p + "--> " + file + ":" + str(line_no) + ":" + str(col) + nl
+    s = s + p + " |" + nl + str(line_no) + " | " + from_codes(text) + nl + p + " | " + join(sp, "") + join(carets, "") + (if label != "" { " " + label } else { "" }) + nl
+    if hint != "" { s = s + p + " = hint: " + hint + nl }
+    s
 }

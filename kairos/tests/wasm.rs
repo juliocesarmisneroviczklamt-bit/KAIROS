@@ -140,6 +140,8 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
     // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
     let mut config = Config::default();
     config.set_max_recursion_depth(100_000);
+    // and a deep value stack: an interpreter running as WebAssembly recurses as deep as its programs
+    config.set_max_stack_height(1 << 30);
     let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
@@ -544,5 +546,56 @@ fn the_compiler_in_webassembly_compiles_itself() {
             println!("{name}.wasm: {} bytes, the same from the interpreter and from kw.wasm", a.len());
         }
         let _ = std::fs::remove_dir_all(&first);
+    })
+}
+
+/// M15: the interpreter written in Kairós (compiler/ki.krs), compiled to WebAssembly by the
+/// compiler written in Kairós, runs the test programs as the Rust interpreter does: the same
+/// output, the same errors (of the checker too) and the same exit code. What it does not run yet
+/// stops with K0001 and is counted apart.
+#[test]
+fn the_interpreter_written_in_kairos_runs_like_the_rust_one() {
+    if cfg!(target_family = "wasm") {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(std::env::current_dir().unwrap().canonicalize().unwrap(), root.canonicalize().unwrap(), "run from the crate's folder");
+        let out = std::env::temp_dir().join(format!("kairos-ki-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let report = run_compiler("kw.krs", vec!["std".to_string(), out.to_string_lossy().into_owned(), "compiler/ki.krs".to_string()]);
+        assert_eq!(report, "", "the interpreter compiles to WebAssembly");
+        let ki = std::fs::read(out.join("ki.wasm")).unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(root.join("tests/wasm/tmp")).unwrap();
+        let mut files: Vec<String> = Vec::new();
+        for dir in ["tests/wasm", "tests/programs", "tests/temporal"] {
+            let mut fs: Vec<String> = std::fs::read_dir(root.join(dir))
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                .filter(|n| n.ends_with(".krs"))
+                .map(|n| format!("{dir}/{n}"))
+                .collect();
+            fs.sort();
+            files.extend(fs);
+        }
+        let (mut same, mut later) = (0, 0);
+        for path in &files {
+            let src = std::fs::read_to_string(root.join(path)).unwrap();
+            // what reads the lab's data or the network is left to the other tests
+            if src.contains("b3.") || src.contains("http_get") || src.contains("download(") {
+                continue;
+            }
+            let k = run_wasm_with(&ki, vec!["ki.wasm".to_string(), "std".to_string(), path.clone()]);
+            if k.1.contains("[K0001]") {
+                later += 1;
+                continue;
+            }
+            let r = run_interp(path, &src);
+            assert_eq!(k, r, "{path}: the interpreter written in Kairós and the Rust one differ");
+            same += 1;
+        }
+        assert!(same >= 80, "{same} programs run the same, {later} not yet");
+        println!("{same} programs run the same in the interpreter written in Kairós; {later} use what it does not run yet");
     })
 }

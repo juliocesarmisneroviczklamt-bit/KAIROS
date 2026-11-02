@@ -893,3 +893,22 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 - **a internet** (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
 
 Um programa que os usa é recusado com W0001, no ponto exato.
+
+## 16. O interpretador escrito em Kairós (M15, em andamento)
+
+[`compiler/interp.krs`](../compiler/interp.krs) roda o HIR que o front-end em Kairós produz, como o interpretador Rust (`src/interp.rs`) roda o seu. A saída, os erros de execução com as mesmas mensagens, os números e o código de saída são os mesmos. [`compiler/ki.krs`](../compiler/ki.krs) é o equivalente de `kairos run`:
+
+```
+kairos run kairos/compiler/ki.krs kairos/std programa.krs [argumentos...]
+```
+
+- **Os valores são uma struct, não um enum.** Assim uma lista, um mapa ou uma struct dentro de uma variável muda no lugar (`f[s].xs[i] = v`), copiada antes só quando outro valor a compartilha: a semântica de valor da própria linguagem. Um argumento `inout` é movido para dentro da chamada e de volta, como no interpretador Rust.
+- **O controle de fluxo** (`return`, `break`, `continue` e os erros de execução) é um estado do interpretador, conferido depois de cada expressão.
+- **Os erros de compilação** saem como os do `kairos run`, inclusive o rótulo depois dos `^^^^`. Para isso o verificador em Kairós passou a guardar o rótulo (os 11 casos do verificador e da análise temporal em Rust) e o arquivo do erro.
+- **Sem Rust:** compilado para WebAssembly pelo compilador em Kairós (`kw.krs`), o `ki.wasm` roda programas Kairós em qualquer runtime WASI. O hospedeiro precisa de uma pilha funda, porque o interpretador recursa tão fundo quanto o programa que roda: no node, uma worker com `resourceLimits.stackSizeMb`; no wasmi, `set_max_stack_height`.
+- **Builtins novos na linguagem**, que o interpretador usa para reportar o erro de um programa:
+  - `eprint(...)`: escreve como `print`, no stderr, depois do que já foi escrito no stdout;
+  - `exit(código)`: termina o programa com esse código de saída.
+- **Conferido:** `cargo test --release -p kairos --test wasm the_interpreter_written` compila o interpretador para WebAssembly e roda cada programa de `tests/wasm`, `tests/programs` e `tests/temporal` pelos dois interpretadores. Exige a mesma saída, os mesmos erros e o mesmo código de saída.
+
+**Ainda não roda** (para com K0001, no ponto exato): tensores, `grad`, a ponte `b3`, os protocolos e holdouts, `Bytes` e os arquivos.

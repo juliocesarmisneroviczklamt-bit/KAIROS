@@ -3,7 +3,7 @@
 
 fn builtin_names() -> List[str] {
     [
-    "print", "len", "push", "pop", "sort", "reverse", "contains", "map", "filter", "sum", "min", "max",
+    "print", "eprint", "exit", "len", "push", "pop", "sort", "reverse", "contains", "map", "filter", "sum", "min", "max",
     "minimum", "maximum", "abs", "sqrt", "exp", "ln", "floor", "ceil", "round", "float", "int", "str",
     "format_fixed", "substr", "split", "lines", "trim", "starts_with", "ends_with", "find", "replace",
     "upper", "lower", "parse_int", "parse_float", "join", "codes", "from_codes", "read_text", "write_text",

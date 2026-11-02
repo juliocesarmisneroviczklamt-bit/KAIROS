@@ -138,6 +138,10 @@ pub enum Builtin {
     /// `f64::to_bits` and `f64::from_bits`
     ToBits,
     FromBits,
+    /// M15: `eprint(...)` writes as `print` does, to the standard error; `exit(code)` ends the
+    /// program with that exit code (the standard output written first)
+    Eprint,
+    Exit,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -195,6 +199,8 @@ pub enum Builtin {
 
 pub const BUILTINS: &[(&str, Builtin)] = &[
     ("print", Builtin::Print),
+    ("eprint", Builtin::Eprint),
+    ("exit", Builtin::Exit),
     ("len", Builtin::Len),
     ("push", Builtin::Push),
     ("pop", Builtin::Pop),

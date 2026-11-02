@@ -1,0 +1,49 @@
+// ki: the interpreter written in Kairós (M15), as `kairos run` does it: the program is checked by
+// the front end written in Kairós, then its top-level statements run. An error (of the program
+// or while it runs) goes to the standard error, written as `kairos` writes it, with exit code 1.
+//
+//   kairos run kairos/compiler/ki.krs <std folder> program.krs [arguments...]
+//
+// Compiled to WebAssembly (`kw.krs`), it runs Kairós programs with no Rust at all.
+import "interp.krs"
+
+// The source of each file the checker read (the standard library from its folder).
+fn ki_sources(ck: Checker, std_dir: str) -> List[str] {
+    var out: List[str] = []
+    for f in ck.files {
+        if f == "<prelude>" {
+            out.push(read_text(std_dir + "/prelude.krs"))
+        } else if starts_with(f, "<std/") {
+            out.push(read_text(std_dir + "/" + substr(f, 5, len(f) - 6)))
+        } else {
+            out.push(read_text(f))
+        }
+    }
+    out
+}
+
+// the text without its last line break (eprint adds one)
+fn ki_chomp(s: str) -> str {
+    if ends_with(s, from_codes([10])) { substr(s, 0, len(s) - 1) } else { s }
+}
+
+let std_dir = args()[0]
+let path = args()[1]
+var prog_args: List[str] = []
+for i in 2..len(args()) { prog_args.push(args()[i]) }
+var ck = new_checker(std_dir)
+check_file(inout ck, "<prelude>", read_text(std_dir + "/prelude.krs"))
+assert(not ck.failed, "the prelude does not check: " + ck.code + " " + ck.msg)
+ck.imported[norm_path(path)] = true
+check_file(inout ck, path, read_text(path))
+let srcs = ki_sources(ck, std_dir)
+if ck.failed {
+    let fi = if ck.efile >= 0 and ck.efile < len(srcs) { ck.efile } else { len(srcs) - 1 }
+    eprint(ki_chomp(render_diag_l(ck.code, ck.msg, ck.label, ck.hint, srcs[fi], ck.files[fi], ck.elo, ck.ehi)))
+    exit(1)
+}
+var st = ki_new(ck, srcs, prog_args)
+if not ki_run(inout st) {
+    eprint(ki_chomp(ki_render(st)))
+    exit(1)
+}

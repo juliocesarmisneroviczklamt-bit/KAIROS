@@ -679,6 +679,18 @@ impl<'a> Interp<'a> {
                 let _ = writeln!(self.out, "{s}");
                 Ok(Value::Unit)
             }
+            Builtin::Eprint => {
+                let s = v.iter().map(|x| self.display(x, true)).collect::<Vec<_>>().join(" ");
+                // what was printed before comes first
+                let _ = self.out.flush();
+                eprintln!("{s}");
+                Ok(Value::Unit)
+            }
+            Builtin::Exit => {
+                let _ = self.out.flush();
+                let code = as_int(v[0].clone());
+                std::process::exit(i32::try_from(code).unwrap_or(1))
+            }
             Builtin::Len => Ok(Value::Int(match &v[0] {
                 Value::List(xs) => xs.len() as i64,
                 Value::Bytes(b) => b.len() as i64,

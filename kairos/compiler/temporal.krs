@@ -390,11 +390,12 @@ struct An {
     ehi: i64,
     msg: str,
     hint: str,
+    label: str,
 }
 
 fn an_new() -> An {
     An { names: [], done: [:], busy: [:], pc: time_always(), has_ret: false, ret: tv_always(), in_ctx: [], bounds: [:],
-         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "" }
+         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "", label: "" }
 }
 
 fn an_fail(inout an: An, code: str, lo: i64, hi: i64, msg: str, hint: str) {
@@ -405,6 +406,13 @@ fn an_fail(inout an: An, code: str, lo: i64, hi: i64, msg: str, hint: str) {
     an.ehi = hi
     an.msg = msg
     an.hint = hint
+    an.label = ""
+}
+
+fn an_fail_l(inout an: An, code: str, lo: i64, hi: i64, msg: str, label: str, hint: str) {
+    if an.failed { return }
+    an_fail(inout an, code, lo, hi, msg, hint)
+    an.label = label
 }
 
 fn new_sym(inout an: An, name: str) -> i64 {
@@ -598,12 +606,12 @@ fn check_bound(inout an: An, result: TV, bound: Lin, fname: str, lo: i64, hi: i6
             slo = result.rows.lo
             shi = result.rows.hi
         }
-        an_fail(inout an, "E0301", slo, shi, "use of future information", "`" + fname + "` promises (`@ end(" + show_lin(an, bound) + ")`) to use only what is known by then")
+        an_fail_l(inout an, "E0301", slo, shi, "use of future information", "known " + show_at(an, at) + ", but `" + fname + "` decides at end(" + show_lin(an, bound) + ")", "`" + fname + "` promises (`@ end(" + show_lin(an, bound) + ")`) to use only what is known by then")
         return
     }
     let slo = if result.time.lo >= 0 { result.time.lo } else { lo }
     let shi = if result.time.lo >= 0 { result.time.hi } else { hi }
-    an_fail(inout an, "E0302", slo, shi, "cannot prove that this is known in time", "index temporal axes with a parameter or the loop variable plus a constant, e.g. `r[month: m - 1]`")
+    an_fail_l(inout an, "E0302", slo, shi, "cannot prove that this is known in time", "known " + show_at(an, at) + "; `" + fname + "` decides at end(" + show_lin(an, bound) + ")", "index temporal axes with a parameter or the loop variable plus a constant, e.g. `r[month: m - 1]`")
 }
 
 fn call_fn(inout an: An, ck: Checker, id: i64, call_args: List[H], inout f: List[TV]) -> TV {
@@ -649,7 +657,8 @@ fn call_fn(inout an: An, ck: Checker, id: i64, call_args: List[H], inout f: List
                 lo = a.0
                 hi = a.1
             }
-            an_fail(inout an, "E0303", lo, hi, "this data is known later than the function assumes", "pass data whose row t is known at the end of t, or shift the decision time")
+            let when = if r.has_lag { "at end(t + " + str(r.lag) + ")" } else { "at a time the compiler cannot determine" }
+            an_fail_l(inout an, "E0303", lo, hi, "this data is known later than the function assumes", "row t of this tensor is known " + when + ", but `" + sig.name + "` reads parameter `" + sig.params[i].0 + "` as known at end(t)", "pass data whose row t is known at the end of t, or shift the decision time")
             return tv_always()
         }
     }
@@ -961,7 +970,7 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
     }
     if b == "pop" { return tv_no_int(load_place(inout an, ck, args[0].kids[0], inout f)) }
     if b == "sort" or b == "reverse" { return tv_always() }
-    if b == "print" or b == "assert" or b == "zeros" or b == "ones" or b == "zeros_like" {
+    if b == "print" or b == "eprint" or b == "exit" or b == "assert" or b == "zeros" or b == "ones" or b == "zeros_like" {
         for a in args {
             let _ = val(inout an, ck, a, inout f)
             if an.failed { return tv_always() }
@@ -1087,14 +1096,14 @@ fn check_weights(inout an: An, w: TV, lo: i64, hi: i64) {
         AAlways => {},
         AEnd(l) => {
             if l == Lin.LUnknown {
-                an_fail(inout an, "E0302", wlo, whi, "cannot prove that the weights use only past information", index_hint)
+                an_fail_l(inout an, "E0302", wlo, whi, "cannot prove that the weights use only past information", "this reaches every month of the weights, at a time the compiler cannot determine", index_hint)
             } else {
-                an_fail(inout an, "E0301", wlo, whi, "use of future information", hint)
+                an_fail_l(inout an, "E0301", wlo, whi, "use of future information", "known " + show_at(an, w.time.at) + ", but the weights of each month are decided at the end of the previous one", hint)
             }
             return
         },
         ALate => {
-            an_fail(inout an, "E0301", wlo, whi, "use of future information", hint)
+            an_fail_l(inout an, "E0301", wlo, whi, "use of future information", "known " + show_at(an, w.time.at) + ", but the weights of each month are decided at the end of the previous one", hint)
             return
         },
     }
@@ -1107,10 +1116,17 @@ fn check_weights(inout an: An, w: TV, lo: i64, hi: i64) {
         return
     }
     if not r.has_lag {
-        an_fail(inout an, "E0302", slo, shi, "cannot prove that the weights use only past information", index_hint)
+        an_fail_l(inout an, "E0302", slo, shi, "cannot prove that the weights use only past information", "the month of this data cannot be related to the month of the weights", index_hint)
         return
     }
-    if r.lag > -1 { an_fail(inout an, "E0301", slo, shi, "use of future information", hint) }
+    if r.lag > -1 {
+        let label = if r.has_store {
+            "known " + show_at(an, r.store_at) + ", but the portfolio of month " + show_lin(an, r.store_row) + " is decided at end(" + show_lin(an, lin_addk(r.store_row, -1)) + ")"
+        } else {
+            "row t of this data is known at end(t" + (if r.lag == 0 { "" } else { " + " + str(r.lag) }) + "), but the portfolio of month t is decided at end(t - 1)"
+        }
+        an_fail_l(inout an, "E0301", slo, shi, "use of future information", label, hint)
+    }
 }
 
 // ------------------------------------------------------------------ loops
@@ -1494,5 +1510,5 @@ fn temporal_check(inout ck: Checker, new_fns: List[i64], tops: List[H]) {
         }
         ck.tmain = frame
     }
-    if an.failed { ck_fail(inout ck, an.code, an.elo, an.ehi, an.msg, an.hint) }
+    if an.failed { ck_fail_l(inout ck, an.code, an.elo, an.ehi, an.msg, an.label, an.hint) }
 }

@@ -290,48 +290,6 @@ fn lit_text(t: str) -> str {
     unhex(substr(t, 4, len(t)))
 }
 
-// A diagnostic as `kairos` prints it (src/diag.rs `render`).
-fn render_diag(code: str, msg: str, hint: str, src: str, file: str, lo0: i64, hi0: i64) -> str {
-    let cs = codes(src)
-    var boff = [0]
-    for k in 0..len(cs) { boff.push(boff[k] + lx_utf8_len(cs[k])) }
-    let nb = boff[len(cs)]
-    let lo = min(max(lo0, 0), nb)
-    let hi = min(max(hi0, lo), nb)
-    // the characters at those bytes
-    var ci = 0
-    while ci < len(cs) and boff[ci] < lo { ci += 1 }
-    var cj = ci
-    while cj < len(cs) and boff[cj] < hi { cj += 1 }
-    var start = ci
-    while start > 0 and cs[start - 1] != 10 { start -= 1 }
-    var stop = ci
-    while stop < len(cs) and cs[stop] != 10 { stop += 1 }
-    var line_no = 1
-    for k in 0..ci {
-        if cs[k] == 10 { line_no += 1 }
-    }
-    let col = ci - start + 1
-    var text_end = stop
-    while text_end > start and cs[text_end - 1] == 13 { text_end -= 1 }
-    var text = []
-    for k in start..text_end { text.push(cs[k]) }
-    let width = max(min(cj, stop) - ci, 1)
-    var pad = []
-    for k in 0..len(str(line_no)) { pad.push(" ") }
-    let p = join(pad, "")
-    var sp = []
-    for k in 0..col - 1 { sp.push(" ") }
-    var carets = []
-    for k in 0..width { carets.push("^") }
-    let nl = from_codes([10])
-    let kind = if starts_with(code, "R") { "runtime error" } else if starts_with(code, "W") { "warning" } else { "error" }
-    var s = kind + "[" + code + "]: " + msg + nl + p + "--> " + file + ":" + str(line_no) + ":" + str(col) + nl
-    s = s + p + " |" + nl + str(line_no) + " | " + from_codes(text) + nl + p + " | " + join(sp, "") + join(carets, "") + nl
-    if hint != "" { s = s + p + " = hint: " + hint + nl }
-    s
-}
-
 // Stops the program with a runtime error at `e`, as the interpreter would.
 fn fail_at_rt(inout g: WGen, e: H, code: str, msg: str, hint: str) {
     let f = if e.f >= 0 and e.f < len(g.srcs) { e.f } else { 0 }
@@ -1323,6 +1281,32 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "sort" or b == "reverse" { return sort_w(inout g, e) }
     for a in args {
         if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
+    }
+    if b == "eprint" {
+        // as print, to the standard error: the text of each value (str), in order, then written
+        var parts: List[i64] = []
+        for i in 0..len(args) {
+            let x = args[i].kids[0]
+            gen(inout g, hbi("str", [x], Ty.TStr, x))
+            if g.failed { return }
+            let l = new_local(inout g, wt_i32())
+            lset(inout g, l)
+            parts.push(l)
+        }
+        for i in 0..len(parts) {
+            if i > 0 { emit_text(inout g, 2, " ") }
+            write_obj(inout g, 2, parts[i])
+        }
+        emit_text(inout g, 2, from_codes([10]))
+        for l in parts { drop_tmp(inout g, l, Ty.TStr) }
+        return
+    }
+    if b == "exit" {
+        // the standard output is written as it goes: nothing to flush
+        gen(inout g, args[0].kids[0])
+        op(inout g, 167)
+        call_f(inout g, f_proc_exit())
+        return
     }
     if b == "print" {
         // every value first (as the interpreter), then their texts

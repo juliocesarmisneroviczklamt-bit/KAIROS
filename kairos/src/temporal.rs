@@ -989,7 +989,7 @@ impl<'a> An<'a> {
                 Ok(self.load_place(p, f)?.no_int())
             }
             B::Sort | B::Reverse => Ok(TV::ALWAYS),
-            B::Print | B::Assert => {
+            B::Print | B::Assert | B::Eprint | B::Exit => {
                 for a in args {
                     self.val(a, f)?;
                 }
