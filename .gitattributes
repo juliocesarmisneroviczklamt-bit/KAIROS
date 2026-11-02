@@ -1,1 +1,2 @@
 * text=auto eol=lf
+kairos/tests/lexer/crlf.krs -text
