@@ -1,0 +1,9 @@
+// M9: dates as YYYYMMDD, written in Kairós (std/dates.krs).
+import "std/dates.krs"
+
+print(date_days(19700101), date_days(20261103), date_days(16000301))     // out: 0 20760 -135080
+print(days_date(20760), days_date(-1), days_date(-135080))               // out: 20261103 19691231 16000301
+print(weekday(20261103), is_weekend(20261107), add_days(20261231, 1))    // out: 1 true 20270101
+print(days_between(20240101, 20250101), month_end(20240215), month_end(20261215))   // out: 366 20240229 20261231
+print(date_iso(20261103), date_from_iso("2026-11-03T22:30:00"), date_from_br("03/11/2026"))   // out: 2026-11-03 20261103 20261103
+print(date_ym(20261103), date_year(20261103), date_month(20261103), date_day(20261103))      // out: 202611 2026 11 3

@@ -292,7 +292,9 @@ impl Interp<'_> {
             }
             _ => {}
         }
-        if !v.iter().any(has_node) {
+        // outside `grad` nothing is tracked: no need to look inside the arguments (a list would be
+        // walked at every call)
+        if !self.tracking() || !v.iter().any(has_node) {
             return Ok(None);
         }
         // tracked values reaching a builtin

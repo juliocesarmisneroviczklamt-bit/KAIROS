@@ -204,6 +204,20 @@ for (t, p) in items(px) { print(t, p) }      // na ordem de inserção
 - **Semântica de valor:** como as listas, `let b = a` copia (sob escrita), e mapas dentro de structs mudam por `inout`.
 - **Igualdade:** dois mapas são iguais quando têm as mesmas chaves com os mesmos valores, em qualquer ordem.
 
+### 4.8 Biblioteca padrão em Kairós (M9)
+
+Módulos escritos em Kairós e embutidos no executável. Para usar, `import "std/json.krs"`:
+
+| módulo | o que tem |
+|---|---|
+| `std/json.krs` | `enum Json`; `json_parse` (RFC 8259, com pares substitutos `📈`), `json_text`, `json_pretty`; leitura com `json_get`, `json_at`, `json_num`, `json_str`, `json_bool`, `json_list`, `json_keys` |
+| `std/csv.krs` | `csv_parse(texto, sep)`, `csv_records` (por nome de coluna), `csv_line` (RFC 4180: aspas, separador e quebra de linha dentro do campo) |
+| `std/dates.krs` | datas AAAAMMDD: `date_days`/`days_date` (dias desde 1970), `add_days`, `days_between`, `weekday`, `is_weekend`, `month_end`, `date_iso`, `date_from_iso`, `date_from_br` |
+
+- **JSON malformado** para o programa com R0003 e a posição do problema.
+- **Números inteiros** são escritos sem casas decimais (`202611`), para que outros programas leiam `inicio_mes` como inteiro.
+- **Desempenho:** 300 KB de JSON da B3 são lidos em 0,2 s pelo interpretador.
+
 ## 5. Eixos nomeados (M2)
 
 ```krs

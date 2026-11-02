@@ -1,0 +1,10 @@
+// M9: CSV written in Kairós (std/csv.krs).
+import "std/csv.krs"
+
+let t = "ticker;nome;preco\nPETR4;\"Petrobras; PN\";38,50\nVALE3;\"Vale \"\"ON\"\"\";61,25\n"
+let rows = csv_parse(t, ";")
+print(len(rows), rows[1][1], rows[2][1])       // out: 3 Petrobras; PN Vale "ON"
+let recs = csv_records(t, ";")
+print(recs[0]["preco"], recs[1]["ticker"])     // out: 38,50 VALE3
+print(csv_line(["a", "b;c", "d\"e"], ";"))      // out: a;"b;c";"d""e"
+print(csv_parse("x,y\r\n1,2\n\n3,4", ","))      // out: [["x", "y"], ["1", "2"], ["3", "4"]]

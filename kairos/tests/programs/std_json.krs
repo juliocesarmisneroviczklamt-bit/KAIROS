@@ -1,0 +1,28 @@
+// M9: JSON written in Kairós (std/json.krs).
+import "std/json.krs"
+
+let cfg = json_parse("{\"inicio_mes\": 202611, \"capital\": 100000.0, \"estrategias\": [\"MOM\", \"BAIXA_VOL\"], \"ok\": true, \"nada\": null}")
+print(json_num(json_get(cfg, "inicio_mes")), json_str(json_at(json_get(cfg, "estrategias"), 1)))   // out: 202611.0 BAIXA_VOL
+print(json_bool(json_get(cfg, "ok")), json_get(cfg, "nada"), json_get(cfg, "missing"))   // out: true Null Null
+print(json_keys(cfg))       // out: ["inicio_mes", "capital", "estrategias", "ok", "nada"]
+print(json_text(cfg))       // out: {"inicio_mes":202611,"capital":100000,"estrategias":["MOM","BAIXA_VOL"],"ok":true,"nada":null}
+print(json_parse(json_text(cfg)) == cfg, json_text(json_parse("[-1.5e3, 0, 1e-7, 0.25]")))   // out: true [-1500,0,1e-7,0.25]
+
+// escapes, including a code point above U+FFFF written as a surrogate pair (built with
+// from_codes: 92 is the backslash, 34 the quote)
+let bs = from_codes([92])
+let q = from_codes([34])
+let raw = q + "a" + bs + q + "b" + bs + bs + "c" + bs + "n" + bs + "u00e9" + bs + "ud83d" + bs + "udcc8" + q
+let s = json_parse(raw)
+print(json_str(s) == "a" + q + "b" + bs + "c" + from_codes([10]) + "é📈")                       // out: true
+print(json_text(s) == q + "a" + bs + q + "b" + bs + bs + "c" + bs + "n" + "é📈" + q)            // out: true
+
+print(json_pretty(json_parse("{\"a\": [1, 2.5], \"b\": {}, \"c\": []}")))
+// out: {
+// out:   "a": [
+// out:     1,
+// out:     2.5
+// out:   ],
+// out:   "b": {},
+// out:   "c": []
+// out: }

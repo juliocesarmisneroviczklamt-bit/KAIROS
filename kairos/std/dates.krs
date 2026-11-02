@@ -1,0 +1,91 @@
+// Dates as YYYYMMDD integers (20261103), in the Gregorian calendar: `import "std/dates.krs"`.
+//
+//   date_days(d), days_date(n)     days since 1970-01-01, and back
+//   add_days(d, n), days_between(a, b)
+//   weekday(d)                     0 = Monday ... 6 = Sunday; is_weekend(d)
+//   date_year(d), date_month(d), date_day(d), date_ym(d) (YYYYMM), month_end(d)
+//   date_iso(d) "2026-11-03"; date_from_iso("2026-11-03"); date_from_br("03/11/2026")
+//
+// The arithmetic is the civil-from-days algorithm (H. Hinnant), exact for any year.
+
+fn date_days(d: i64) -> i64 {
+    let m = (d / 100) % 100
+    let dd = d % 100
+    let y = if m <= 2 { d / 10000 - 1 } else { d / 10000 }
+    let era = (if y >= 0 { y } else { y - 399 }) / 400
+    let yoe = y - era * 400
+    let mp = if m > 2 { m - 3 } else { m + 9 }
+    let doy = (153 * mp + 2) / 5 + dd - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+fn days_date(n: i64) -> i64 {
+    let z = n + 719468
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    let y = yoe + era * 400 + (if m <= 2 { 1 } else { 0 })
+    y * 10000 + m * 100 + d
+}
+
+fn add_days(d: i64, n: i64) -> i64 {
+    days_date(date_days(d) + n)
+}
+
+fn days_between(a: i64, b: i64) -> i64 {
+    date_days(b) - date_days(a)
+}
+
+// 1970-01-01 was a Thursday
+fn weekday(d: i64) -> i64 {
+    ((date_days(d) + 3) % 7 + 7) % 7
+}
+
+fn is_weekend(d: i64) -> bool {
+    weekday(d) >= 5
+}
+
+fn date_year(d: i64) -> i64 {
+    d / 10000
+}
+
+fn date_month(d: i64) -> i64 {
+    (d / 100) % 100
+}
+
+fn date_day(d: i64) -> i64 {
+    d % 100
+}
+
+fn date_ym(d: i64) -> i64 {
+    d / 100
+}
+
+// the last day of d's month
+fn month_end(d: i64) -> i64 {
+    let first_next = if date_month(d) == 12 { (date_year(d) + 1) * 10000 + 101 } else { d / 100 * 100 + 101 }
+    add_days(first_next, -1)
+}
+
+fn date_two(n: i64) -> str {
+    if n < 10 { "0" + str(n) } else { str(n) }
+}
+
+fn date_iso(d: i64) -> str {
+    str(date_year(d)) + "-" + date_two(date_month(d)) + "-" + date_two(date_day(d))
+}
+
+fn date_from_iso(s: str) -> i64 {
+    let p = split(substr(trim(s), 0, 10), "-")
+    parse_int(p[0]) * 10000 + parse_int(p[1]) * 100 + parse_int(p[2])
+}
+
+fn date_from_br(s: str) -> i64 {
+    let p = split(trim(s), "/")
+    parse_int(substr(p[2], 0, 4)) * 10000 + parse_int(p[1]) * 100 + parse_int(p[0])
+}

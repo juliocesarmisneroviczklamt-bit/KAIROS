@@ -1,0 +1,87 @@
+// CSV (RFC 4180), written in Kairós: `import "std/csv.krs"`.
+//
+//   csv_parse(text, sep) -> List[List[str]]       the rows (empty lines are skipped)
+//   csv_records(text, sep) -> List[Map[str, str]] by column name (the first row names them)
+//   csv_line(fields, sep) -> str                  one row, quoting what needs quotes
+//
+// A field in quotes may hold the separator, line breaks and quotes (written "").
+
+fn csv_parse(text: str, sep: str) -> List[List[str]] {
+    var rows = []
+    // no quotes: lines and separators
+    if not contains(text, "\"") {
+        for l in lines(text) {
+            if l != "" { rows.push(split(l, sep)) }
+        }
+        return rows
+    }
+    let c = codes(text)
+    let s = codes(sep)[0]
+    let n = len(c)
+    var row = []
+    var field = []
+    var quoted = false
+    var i = 0
+    while i < n {
+        let ch = c[i]
+        if quoted {
+            if ch == 34 {
+                if i + 1 < n and c[i + 1] == 34 {
+                    field.push(34)
+                    i += 1
+                } else {
+                    quoted = false
+                }
+            } else {
+                field.push(ch)
+            }
+        } else if ch == 34 {
+            quoted = true
+        } else if ch == s {
+            row.push(from_codes(field))
+            field = []
+        } else if ch == 10 or ch == 13 {
+            if ch == 13 and i + 1 < n and c[i + 1] == 10 { i += 1 }
+            row.push(from_codes(field))
+            field = []
+            if not (len(row) == 1 and row[0] == "") { rows.push(row) }
+            row = []
+        } else {
+            field.push(ch)
+        }
+        i += 1
+    }
+    if len(field) > 0 or len(row) > 0 {
+        row.push(from_codes(field))
+        rows.push(row)
+    }
+    rows
+}
+
+fn csv_records(text: str, sep: str) -> List[Map[str, str]] {
+    let rows = csv_parse(text, sep)
+    var out = []
+    if len(rows) == 0 { return out }
+    let head = rows[0]
+    for r in 1..len(rows) {
+        var m: Map[str, str] = [:]
+        for j in 0..len(head) {
+            m[head[j]] = if j < len(rows[r]) { rows[r][j] } else { "" }
+        }
+        out.push(m)
+    }
+    out
+}
+
+fn csv_field(f: str, sep: str) -> str {
+    if contains(f, sep) or contains(f, "\"") or contains(f, "\n") or contains(f, "\r") {
+        return "\"" + replace(f, "\"", "\"\"") + "\""
+    }
+    f
+}
+
+fn csv_line(fields: List[str], sep: str) -> str {
+    var out = []
+    for f in fields { out.push(csv_field(f, sep)) }
+    join(out, sep)
+}

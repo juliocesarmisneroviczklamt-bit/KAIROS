@@ -1,0 +1,3 @@
+// A malformed JSON text stops the program, saying where.
+import "std/json.krs"
+let v = json_parse("{\"a\": }")   // error: R0003

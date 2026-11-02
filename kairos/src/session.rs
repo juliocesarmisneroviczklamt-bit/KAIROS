@@ -16,6 +16,13 @@ use std::path::{Path, PathBuf};
 /// Standard library written in Kairós itself, loaded into every session.
 pub const PRELUDE: &str = include_str!("../std/prelude.krs");
 
+/// The standard library's modules, built into the executable (`import "std/json.krs"`).
+pub const STD: &[(&str, &str)] = &[
+    ("std/json.krs", include_str!("../std/json.krs")),
+    ("std/csv.krs", include_str!("../std/csv.krs")),
+    ("std/dates.krs", include_str!("../std/dates.krs")),
+];
+
 pub struct Session {
     checker: Checker,
     frame: Vec<Value>,
@@ -91,6 +98,18 @@ impl Session {
     }
 
     fn import(&mut self, from: &str, path: &str, sp: crate::diag::Span, run: bool) -> Result<(), Diag> {
+        if let Some((name, src)) = STD.iter().find(|(n, _)| *n == path || n.strip_suffix(".krs") == Some(path)) {
+            if !self.imported.insert(PathBuf::from(format!("<{name}>"))) {
+                return Ok(());
+            }
+            let label = format!("<{name}>");
+            return if run { self.run(&label, src).map(|_| ()) } else { self.check(&label, src) };
+        }
+        if path.starts_with("std/") {
+            let names: Vec<&str> = STD.iter().map(|(n, _)| *n).collect();
+            return Err(Diag::new("E0100", sp, format!("there is no `{path}` in the standard library"))
+                .hint(format!("the standard library has {}", names.join(", "))));
+        }
         let Some(found) = resolve_import(from, path) else {
             return Err(Diag::new("E0100", sp, format!("cannot find `{path}` to import"))
                 .hint("the path is relative to the importing file (or to a folder of KAIROS_PATH)"));
