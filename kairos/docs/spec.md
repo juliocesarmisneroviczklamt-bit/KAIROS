@@ -827,13 +827,15 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 - **Closures** (lambdas com capturas, funções como valores) e **tensores com eixos nomeados** compilam. O runtime dos tensores é escrito em Kairós ([`rt_tensor.krs`](../compiler/rt_tensor.krs)), operação por operação como o `src/tensor.rs` do interpretador, e dá os mesmos bits.
 - **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](../compiler/rt_b3.krs), sobre [`kairos/lab`](../lab)) faz o que a ponte em Rust faz:
-  - lê os dados do laboratório (`processed/panel.bin`, o CDI, os fatores NEFIN);
+  - lê os dados do laboratório (`processed/panel.bin`, o CDI, o IPCA, os fatores NEFIN mensais e diários);
   - aplica a cerca do livro-razão de holdouts e registra o que o programa viu;
-  - avalia os pesos no simulador e grava o teste no registro, com o DSR.
-- `kw.krs` só inclui esse runtime nos programas que chegam a `b3`. O estado (os dados lidos, os meses visíveis) fica num endereço fixo da memória e é lido uma vez por execução.
-- `examples/momentum.krs` compilado para WebAssembly imprime os mesmos números. Também grava a mesma linha no registro de testes e no livro-razão que o interpretador grava. A cerca de um protocolo pendente corta os mesmos meses, com a mesma nota. Os erros da ponte saem com as mesmas mensagens e dicas. Quem confere: `cargo test --release -p kairos --test wasm b3`, com os dados.
-- Por enquanto, de `b3`: `monthly_returns`, `eligible`, `cdi`, `nefin`, `month_index` e `evaluate`.
+  - avalia e simula os pesos no simulador, e grava o teste no registro, com o DSR;
+  - grava e desconta testes do registro (`record_trial`, `deflate_trial`) e dá o SHA-256 dos arquivos de resultados.
+- `kw.krs` só inclui esse runtime nos programas que chegam a `b3`. O estado (os dados lidos, os meses visíveis) fica num endereço fixo da memória. Os dados são lidos uma vez por execução; os meses visíveis são calculados na primeira função que precisa deles (`tickers`, como na ponte em Rust, não toca no livro-razão).
+- `examples/momentum.krs` compilado para WebAssembly imprime os mesmos números. Também grava a mesma linha no registro de testes e no livro-razão que o interpretador grava. A cerca de um protocolo pendente corta os mesmos meses, com a mesma nota. Os erros da ponte saem com as mesmas mensagens e dicas. Quem confere: `cargo test --release -p kairos --test wasm b3`, com os dados (`tests/wasm_b3`: os tensores diários, a simulação mês a mês e o registro também).
+- De `b3`, compila tudo menos `holdout` e `open_once`.
 - Programas que declaram protocolos e usam `b3` são recusados com W0001, para não enfraquecer as garantias do M5.
+- O DSR do registro em Rust passou a usar o `exp` e o `ln` da `libm`: o do sistema muda no último bit de plataforma para plataforma, e o WebAssembly dava outro DSR no último bit.
 - Os nomes do runtime e os do programa dividem um espaço só. Um programa que usa `b3` e define um nome do laboratório (`Bar`, `load`…) é recusado com W0001.
 - **Builtins novos no runtime:**
   - `format_fixed`: o valor exato do float, arredondado para o par, como o `{:.N}` do Rust, com inteiros grandes em Kairós;
@@ -844,8 +846,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 **Ainda não compila:**
 - `grad`;
-- protocolos e holdouts (`open_once`);
-- `b3.simulate`, `b3.record_trial`, `deflate_trial`, `results_sha256` e os tensores diários;
+- protocolos e holdouts (`b3.holdout`, `open_once`);
 - `upper` e `lower`;
 - a internet.
 

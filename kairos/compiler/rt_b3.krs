@@ -5,19 +5,30 @@
 //
 // The data folder: KAIROS_DATA, else `data` or `../data` (relative to the folder the WASI runtime
 // opens: `wasmtime --dir=. program.wasm`); the results: KAIROS_RESULTS, else `results` next to
-// the data. The data is read once: the state lives in the module's memory (wasm_b3_*).
+// the data (without either, the registry of trials stays in memory). The state lives in the
+// module's memory (wasm_b3_*): the data is read once, and the months the program sees are
+// worked out once, when a function first needs them.
+//
+// Each `rt_b3_*` function the back end calls gives (an error's code or "", its message, the
+// value); the back end stops the program on an error, as the interpreter does (rt_b3_fail).
 import "../lab/bridge.krs"
 import "../lab/ledger.krs"
 
 struct B3State {
+    results: str,               // the results folder ("": the registry in memory)
+    loaded: bool,               // the data was read
     d: LabData,
     cdi_d: List[f64],
     cdi_m: List[f64],
     nef: Map[i64, List[f64]],
     nef_vw: Map[i64, List[f64]],
-    n: i64,                     // the months the program sees
-    results: str,
+    n: i64,                     // the months the program sees (-1: not worked out yet)
     seen: List[str],            // the strategies evaluated in this run
+    trials: List[Trial],        // the registry, when there is no results folder
+    ipca: Map[i64, f64],        // the monthly IPCA (read when first asked for)
+    ipca_read: bool,
+    nefd: List[Map[i64, List[f64]]],    // the daily NEFIN factors by date: equally, value weighted
+    nefd_state: List[i64],              // of each: 0 not read, 1 read, -1 not to be had
 }
 
 // the state, kept at a fixed place of the module's memory (instructions of the back end)
@@ -26,7 +37,7 @@ fn wasm_b3_has() -> bool {
 }
 
 fn wasm_b3_get() -> B3State {
-    rt_b3_empty()
+    rt_b3_new("")
 }
 
 fn wasm_b3_set(s: B3State) {
@@ -44,8 +55,27 @@ fn wasm_eprint(s: str) {
 fn wasm_fail(s: str) {
 }
 
+// a float rounded to 32 bits (as Rust's `as f32`), back as a float
+fn wasm_f32(x: f64) -> f64 {
+    x
+}
+
+// a tensor of the runtime (rt_tensor.krs) as a tensor of the program: the same object
+fn wasm_t_msa(t: RtT) -> Tensor[month, session, asset; f64] {
+    zeros(month: 0, session: 0, asset: 0)
+}
+
+fn wasm_t_ms(t: RtT) -> Tensor[month, session; f64] {
+    zeros(month: 0, session: 0)
+}
+
+fn wasm_t_ms_bool(t: RtT) -> Tensor[month, session; bool] {
+    zeros(month: 0, session: 0) > 0.0
+}
+
 // The hint the interpreter gives with an error of the bridge.
 fn rt_b3_hint(code: str, msg: str) -> str {
+    if msg == "the daily NEFIN factors are not available" { return "they are read from the data folder's raw/nefin (`quant-b3 fetch-macro`)" }
     if code == "R0100" { return "set KAIROS_DATA to the quant-b3 `data` folder (the one with processed/panel.bin), or run from the quant-b3 folder" }
     if code == "R0101" { return "e.g. `b3.month_index(200101)`" }
     if code == "R0500" { return "the ledger is a CSV file: fix or restore it (Kairós will not run evaluations without it)" }
@@ -66,9 +96,10 @@ fn rt_b3_fail(code: str, msg: str, loc: str, pad: str) {
     wasm_fail(s)
 }
 
-fn rt_b3_empty() -> B3State {
+fn rt_b3_new(results: str) -> B3State {
     let cal = Cal { months: [], mfrom: [], mto: [], date_month: [] }
-    B3State { d: LabData { dates: [], tks: [], cal: cal, mret: [], traded: [] }, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: 0, results: "", seen: [] }
+    let d = LabData { dates: [], tks: [], cal: cal, mret: [], traded: [] }
+    B3State { results: results, loaded: false, d: d, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: -1, seen: [], trials: [], ipca: [:], ipca_read: false, nefd: [[:], [:]], nefd_state: [0, 0] }
 }
 
 // The data folder (the first with processed/panel.bin), or "".
@@ -84,10 +115,8 @@ fn rt_b3_dir() -> str {
     ""
 }
 
-// KAIROS_RESULTS, else `results` in the folder that holds the data's
+// `results` in the folder that holds the data's
 fn rt_b3_results(dir: str) -> str {
-    let e = env("KAIROS_RESULTS")
-    if e != "" { return e }
     var p = replace(dir, from_codes([92]), "/")
     while len(p) > 1 and ends_with(p, "/") { p = substr(p, 0, len(p) - 1) }
     var last = -1
@@ -97,82 +126,394 @@ fn rt_b3_results(dir: str) -> str {
     if last < 0 { "results" } else { substr(p, 0, last + 1) + "results" }
 }
 
-// The state: the data read (once), the months the program sees under the ledger's fence, and the
-// record that it saw them. (code, message, state): the code of an error, or "".
-fn rt_b3_state() -> (str, str, B3State) {
-    if wasm_b3_has() { return ("", "", wasm_b3_get()) }
+// The state (made at the first call: its results folder).
+fn rt_b3_get() -> B3State {
+    if wasm_b3_has() { return wasm_b3_get() }
+    var results = env("KAIROS_RESULTS")
+    if results == "" {
+        let dir = rt_b3_dir()
+        if dir != "" { results = rt_b3_results(dir) }
+    }
+    let s = rt_b3_new(results)
+    wasm_b3_set(s)
+    s
+}
+
+// The state with the data read (once).
+fn rt_b3_data() -> (str, str, B3State) {
+    var s = rt_b3_get()
+    if s.loaded { return ("", "", s) }
     let dir = rt_b3_dir()
-    if dir == "" { return ("R0100", "B3 data not found", rt_b3_empty()) }
-    let d = load_lab_data(dir)
-    let cdi_d = cdi_days(d.dates, load_cdi(dir))
-    let results = rt_b3_results(dir)
-    let lo = open_ledger(results, 201901)
-    if lo.0 != "" { return ("R0500", lo.0, rt_b3_empty()) }
-    var rows = lo.1
-    let nm = len(d.cal.months)
-    let f = fence(rows)
-    let n = if f.0 > 0 { cal_idx_from(d.cal, next_ym(f.0)) } else { nm }
-    if n > 0 { ledger_saw(results, inout rows, d.cal.months[n - 1], "program " + wasm_program()) }
-    if n < nm {
-        let last = if n > 0 { fmt_ym(d.cal.months[n - 1]) } else { "before the first month" }
-        let q = from_codes([34])
-        let why = "the months from " + ledger_ym(f.1.holdout_from) + " are the holdout of protocol " + q + f.1.proto + q + " (registered on " + ledger_date(f.1.date) + "), which opens only through `open_once`"
-        wasm_eprint("note: this program sees the data up to " + last + ": " + why + from_codes([10]))
-    }
-    let s = B3State {
-        d: d, cdi_d: cdi_d, cdi_m: cdi_months(d.cal, cdi_d),
-        nef: load_factors(dir + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv"),
-        nef_vw: load_factors(dir + "/raw/nefin/nefin_factors_monthly.csv"),
-        n: n, results: results, seen: [],
-    }
+    if dir == "" { return ("R0100", "B3 data not found", s) }
+    s.d = load_lab_data(dir)
+    s.cdi_d = cdi_days(s.d.dates, load_cdi(dir))
+    s.cdi_m = cdi_months(s.d.cal, s.cdi_d)
+    s.nef = load_factors(dir + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv")
+    s.nef_vw = load_factors(dir + "/raw/nefin/nefin_factors_monthly.csv")
+    s.loaded = true
     wasm_b3_set(s)
     ("", "", s)
 }
 
+// The state with the months the program sees: all of them, but those a pending protocol reserves
+// as its holdout (the ledger's fence, with a note when it cuts); the ledger records that the
+// program saw them.
+fn rt_b3_visible() -> (str, str, B3State) {
+    let r = rt_b3_data()
+    if r.0 != "" or r.2.n >= 0 { return r }
+    var s = r.2
+    var rows: List[LRow] = []
+    if s.results != "" {
+        let lo = open_ledger(s.results, 201901)
+        if lo.0 != "" { return ("R0500", lo.0, s) }
+        rows = lo.1
+    }
+    let nm = len(s.d.cal.months)
+    let f = fence(rows)
+    let n = if f.0 > 0 { cal_idx_from(s.d.cal, next_ym(f.0)) } else { nm }
+    if n > 0 and s.results != "" { ledger_saw(s.results, inout rows, s.d.cal.months[n - 1], "program " + wasm_program()) }
+    if n < nm {
+        let last = if n > 0 { fmt_ym(s.d.cal.months[n - 1]) } else { "before the first month" }
+        let q = from_codes([34])
+        let why = "the months from " + ledger_ym(f.1.holdout_from) + " are the holdout of protocol " + q + f.1.proto + q + " (registered on " + ledger_date(f.1.date) + "), which opens only through `open_once`"
+        wasm_eprint("note: this program sees the data up to " + last + ": " + why + from_codes([10]))
+    }
+    s.n = n
+    wasm_b3_set(s)
+    ("", "", s)
+}
+
+// ------------------------------------------------------------------ data
+
 fn rt_b3_monthly_returns() -> (str, str, Tensor[month, asset; f64]) {
-    let s = rt_b3_state()
+    let s = rt_b3_visible()
     if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0)) }
     ("", "", data_monthly_returns(s.2.d)[month: 0 .. s.2.n])
 }
 
 fn rt_b3_eligible() -> (str, str, Tensor[month, asset; bool]) {
-    let s = rt_b3_state()
+    let s = rt_b3_visible()
     if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0) > 0.0) }
     ("", "", data_eligible(s.2.d)[month: 0 .. s.2.n])
 }
 
 fn rt_b3_cdi() -> (str, str, Tensor[month; f64]) {
-    let s = rt_b3_state()
+    let s = rt_b3_visible()
     if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
     ("", "", tensor(s.2.cdi_m, month)[month: 0 .. s.2.n])
 }
 
 fn rt_b3_nefin(k: i64, vw: bool) -> (str, str, Tensor[month; f64]) {
-    let s = rt_b3_state()
+    let s = rt_b3_visible()
     if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
     ("", "", data_nefin(s.2.d.cal, if vw { s.2.nef_vw } else { s.2.nef }, k)[month: 0 .. s.2.n])
 }
 
+fn rt_b3_months() -> (str, str, List[i64]) {
+    let s = rt_b3_visible()
+    var out: List[i64] = []
+    if s.0 != "" { return (s.0, s.1, out) }
+    for i in 0..s.2.n { out.push(s.2.d.cal.months[i]) }
+    ("", "", out)
+}
+
 fn rt_b3_month_index(ym: i64) -> (str, str, i64) {
     if ym < 100001 or ym > 999912 or ym % 100 < 1 or ym % 100 > 12 { return ("R0101", "`" + str(ym) + "` is not a month in YYYYMM form", 0) }
-    let s = rt_b3_state()
+    let s = rt_b3_visible()
     if s.0 != "" { return (s.0, s.1, 0) }
     ("", "", min(cal_idx_from(s.2.d.cal, ym), s.2.n))
 }
 
-// b3.evaluate: the simulation of the weights and its statistics, a trial in the registry
-fn rt_b3_evaluate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
-    let none = Evaluation { months: 0, cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan, trials: 0, dsr: nan }
-    let s0 = rt_b3_state()
-    if s0.0 != "" { return (s0.0, s0.1, none) }
+// the assets' tickers, companies (issuers) or classes: all of them (the data, not the months)
+fn rt_b3_names(what: i64) -> (str, str, List[str]) {
+    let s = rt_b3_data()
+    var out: List[str] = []
+    if s.0 != "" { return (s.0, s.1, out) }
+    for tk in s.2.d.tks { out.push(if what == 0 { tk.ticker } else if what == 1 { tk.issuer } else { tk.class }) }
+    ("", "", out)
+}
+
+fn rt_b3_tickers() -> (str, str, List[str]) {
+    rt_b3_names(0)
+}
+
+fn rt_b3_issuers() -> (str, str, List[str]) {
+    rt_b3_names(1)
+}
+
+fn rt_b3_classes() -> (str, str, List[str]) {
+    rt_b3_names(2)
+}
+
+// The IPCA of each month the program sees (NaN where it is not published yet).
+fn rt_b3_ipca() -> (str, str, Tensor[month; f64]) {
+    let r = rt_b3_visible()
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0)) }
+    var s = r.2
+    if not s.ipca_read {
+        // raw/bcb/ipca.csv: AAAAMM, the month's inflation in percent
+        let path = rt_b3_dir() + "/raw/bcb/ipca.csv"
+        if file_exists(path) {
+            let ls = text_lines(read_text(path))
+            for i in 1..len(ls) {
+                let p = split(ls[i], ",")
+                if len(p) < 2 { continue }
+                let ym = digits_of(p[0])
+                let v = parse_float(p[1])
+                if ym >= 0 and not is_nan(v) and trim(p[1]) == p[1] { s.ipca[ym] = v / 100.0 }
+            }
+        }
+        s.ipca_read = true
+        wasm_b3_set(s)
+    }
+    var v: List[f64] = []
+    for i in 0..s.n {
+        let m = s.d.cal.months[i]
+        v.push(if contains(s.ipca, m) { s.ipca[m] } else { nan })
+    }
+    ("", "", tensor(v, month))
+}
+
+// ------------------------------------------------------------------ the daily tensors
+//
+// One row per month, one column per session of the month (the width: the most sessions a month
+// has), NaN where the asset did not trade and in the sessions a month does not have.
+
+fn rt_b3_width(d: LabData) -> i64 {
+    var s = 1
+    for k in 0..len(d.cal.months) { s = max(s, d.cal.mto[k] - d.cal.mfrom[k]) }
+    s
+}
+
+// field: 0 the return since the previous trade, 1 the volume in R$, 2 the close price, 3 the
+// dividends and interest on capital (added in 32 bits, as the lab does)
+fn rt_b3_daily(field: i64) -> (str, str, Tensor[month, session, asset; f64]) {
+    let r = rt_b3_visible()
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0, asset: 0)) }
+    let d = r.2.d
+    let n = r.2.n
+    let s = rt_b3_width(d)
+    let nt = len(d.tks)
+    let end = if n < len(d.cal.months) { d.cal.mfrom[n] } else { len(d.dates) }
+    var v: List[f64] = []
+    for i in 0..n * s * nt { v.push(nan) }
+    for t in 0..nt {
+        for day in d.tks[t].days {
+            if day.di >= end { break }
+            let m = d.cal.date_month[day.di]
+            let x = if field == 0 { day.r } else if field == 1 { day.vol } else if field == 2 { day.px } else { wasm_f32(day.div + day.jcp) }
+            v[(m * s + day.di - d.cal.mfrom[m]) * nt + t] = x
+        }
+    }
+    ("", "", wasm_t_msa(RtT { axes: [0, 3, 2], shape: [n, s, nt], data: v, boolean: false }))
+}
+
+fn rt_b3_sessions() -> (str, str, Tensor[month, session; bool]) {
+    let r = rt_b3_visible()
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0) > 0.0) }
+    let d = r.2.d
+    let s = rt_b3_width(d)
+    var v: List[f64] = []
+    for m in 0..r.2.n {
+        for j in 0..s { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { 1.0 } else { 0.0 }) }
+    }
+    ("", "", wasm_t_ms_bool(RtT { axes: [0, 3], shape: [r.2.n, s], data: v, boolean: true }))
+}
+
+// the date of each session (YYYYMMDD)
+fn rt_b3_session_dates() -> (str, str, Tensor[month, session; f64]) {
+    let r = rt_b3_visible()
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0)) }
+    let d = r.2.d
+    let s = rt_b3_width(d)
+    var v: List[f64] = []
+    for m in 0..r.2.n {
+        for j in 0..s { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { float(d.dates[d.cal.mfrom[m] + j]) } else { nan }) }
+    }
+    ("", "", wasm_t_ms(RtT { axes: [0, 3], shape: [r.2.n, s], data: v, boolean: false }))
+}
+
+// A natural number as Rust's u32 reads it (an optional +), or -1.
+fn rt_b3_u32(s: str) -> i64 {
+    let v = digits_of(if starts_with(s, "+") { substr(s, 1, len(s) - 1) } else { s })
+    if v > 4294967295 { -1 } else { v }
+}
+
+// "2001-01-02" (spaces and quotes around it, anything after the day) as 20010102, or -1 (as the
+// lab's util::parse_iso)
+fn rt_b3_iso(s0: str) -> i64 {
+    let q = from_codes([34])
+    var s = trim(s0)
+    while starts_with(s, q) { s = substr(s, 1, len(s) - 1) }
+    while ends_with(s, q) { s = substr(s, 0, len(s) - 1) }
+    let p = split(s, "-")
+    if len(p) < 3 or len(p[2]) < 2 { return -1 }
+    let y = rt_b3_u32(p[0])
+    let m = rt_b3_u32(p[1])
+    let d = rt_b3_u32(substr(p[2], 0, 2))
+    if y < 0 or m < 0 or d < 0 { -1 } else { y * 10000 + m * 100 + d }
+}
+
+// A CSV of daily NEFIN factors: date -> [Rm_minus_Rf, SMB, HML, WML, IML, Risk_Free]; false when
+// it cannot be read.
+fn rt_b3_daily_factors(path: str) -> (bool, Map[i64, List[f64]]) {
+    var out: Map[i64, List[f64]] = [:]
+    if not file_exists(path) { return (false, out) }
+    let ls = text_lines(read_text(path))
+    if len(ls) == 0 { return (false, out) }
+    let q = from_codes([34])
+    var h: List[str] = []
+    for c in split(ls[0], ",") { h.push(replace(c, q, "")) }
+    var col: List[i64] = []
+    for nm in ["Date", "Rm_minus_Rf", "SMB", "HML", "WML", "IML", "Risk_Free"] {
+        var k = -1
+        for i in 0..len(h) {
+            if h[i] == nm and k < 0 { k = i }
+        }
+        if k < 0 { return (false, out) }
+        col.push(k)
+    }
+    for i in 1..len(ls) {
+        let r = split(ls[i], ",")
+        if col[0] >= len(r) { continue }
+        let date = rt_b3_iso(r[col[0]])
+        if date < 0 { continue }
+        var f: List[f64] = []
+        for k in 1..7 { f.push(if col[k] < len(r) { parse_float(trim(r[col[k]])) } else { nan }) }
+        out[date] = f
+    }
+    (true, out)
+}
+
+// a daily NEFIN factor (equally weighted, or value weighted), NaN on the days NEFIN does not have
+fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]) {
+    let r = rt_b3_visible()
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0)) }
+    var st = r.2
+    let w = if vw { 1 } else { 0 }
+    if st.nefd_state[w] == 0 {
+        let file = if vw { "nefin_factors.csv" } else { "nefin_factors_equally_weighted.csv" }
+        let t = rt_b3_daily_factors(rt_b3_dir() + "/raw/nefin/" + file)
+        st.nefd[w] = t.1
+        st.nefd_state[w] = if t.0 { 1 } else { -1 }
+        wasm_b3_set(st)
+    }
+    if st.nefd_state[w] < 0 { return ("R0100", "the daily NEFIN factors are not available", zeros(month: 0, session: 0)) }
+    let table = st.nefd[w]
+    let d = st.d
+    let s = rt_b3_width(d)
+    var v: List[f64] = []
+    for m in 0..st.n {
+        let a = d.cal.mfrom[m]
+        for j in 0..s {
+            var x = nan
+            if j < d.cal.mto[m] - a {
+                if contains(table, d.dates[a + j]) { x = table[d.dates[a + j]][k] }
+            }
+            v.push(x)
+        }
+    }
+    ("", "", wasm_t_ms(RtT { axes: [0, 3], shape: [st.n, s], data: v, boolean: false }))
+}
+
+// ------------------------------------------------------------------ evaluation
+
+// The simulation of the weights over the months the program sees, its statistics, and its trial
+// in the registry (trials, DSR).
+fn rt_b3_run(w: Tensor[month, asset; f64], cfg: SimCfg, trial: bool) -> (str, str, SimRun, SimEval, (i64, f64), i64) {
+    let none = SimRun { mi: [], ret: [], turnover: [], exposure: [], cost_paid: 0.0, traded: 0.0, tax_paid: 0.0, jcp_withheld: 0.0, final_value: 0.0, liq_value: 0.0, exempt_months: 0, taxed_months: 0, capped_frac: 0.0 }
+    let zero = SimEval { cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan }
+    let s0 = rt_b3_visible()
+    if s0.0 != "" { return (s0.0, s0.1, none, zero, (0, nan), 0) }
     var s = s0.2
-    let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
     let r = kairos_evaluate(s.d, s.cdi_d, w, s.n, cfg)
-    if r.0 != "" { return ("R0102", r.0, none) }
+    if r.0 != "" { return ("R0102", r.0, none, zero, (0, nan), 0) }
     let sha = weights_sha(w, s.n)
     let t = evaluation_trial(s.d, s.cdi_m, r.1, sha, cfg, wasm_program())
     let rec = record_evaluation(s.results, t, sha, inout s.seen, trial)
     wasm_b3_set(s)
-    let e = r.2
-    ("", "", Evaluation { months: len(r.1.ret), cagr: e.cagr, vol: e.vol, sharpe: e.sharpe, max_dd: e.max_dd, beta: e.beta, alpha: e.alpha, t_alpha: e.t_alpha, turnover: e.turnover, cost_bps: e.cost_bps, trials: rec.0, dsr: rec.1 })
+    ("", "", r.1, r.2, rec, s.n)
+}
+
+fn rt_b3_evaluate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
+    let r = rt_b3_run(w, cfg, trial)
+    let e = r.3
+    let rec = r.4
+    let ev = Evaluation { months: len(r.2.ret), cagr: e.cagr, vol: e.vol, sharpe: e.sharpe, max_dd: e.max_dd, beta: e.beta, alpha: e.alpha, t_alpha: e.t_alpha, turnover: e.turnover, cost_bps: e.cost_bps, trials: rec.0, dsr: rec.1 }
+    (r.0, r.1, ev)
+}
+
+// b3.simulate: the evaluation month by month (NaN in the months it did not simulate)
+fn rt_b3_simulate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Simulation) {
+    let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
+    let r = rt_b3_run(w, cfg, trial)
+    let run = r.2
+    let rec = r.4
+    var ret: List[f64] = []
+    var exposure: List[f64] = []
+    var turnover: List[f64] = []
+    for m in 0..r.5 {
+        ret.push(nan)
+        exposure.push(nan)
+        turnover.push(nan)
+    }
+    for k in 0..len(run.mi) {
+        ret[run.mi[k]] = run.ret[k]
+        exposure[run.mi[k]] = run.exposure[k]
+        turnover[run.mi[k]] = run.turnover[k]
+    }
+    let sim = Simulation {
+        ret: tensor(ret, month), exposure: tensor(exposure, month), turnover: tensor(turnover, month),
+        cost_bps: r.3.cost_bps, tax_paid: run.tax_paid, final_value: run.final_value, liq_value: run.liq_value, capped: run.capped_frac,
+        exempt_months: run.exempt_months, taxed_months: run.taxed_months, trials: rec.0, dsr: rec.1,
+    }
+    (r.0, r.1, sim)
+}
+
+// ------------------------------------------------------------------ the registry of trials
+
+fn rt_b3_registry(s: B3State) -> List[Trial] {
+    if s.results != "" { load(s.results + "/registro_testes.csv") } else { s.trials }
+}
+
+// b3.deflate_trial(excess): [the trials in the registry, the Sharpe the best of them gives by
+// chance (a year), the DSR], against the registry as it is (nothing recorded)
+fn rt_b3_deflate_trial(excess: List[f64]) -> (str, str, List[f64]) {
+    let s = rt_b3_get()
+    let t = new_trial("kairos", "deflate", "", "", excess)
+    let all = rt_b3_registry(s)
+    let df = if len(all) == 0 { deflate(t, [t]) } else { deflate(t, all) }
+    ("", "", [float(max(len(all), 1)), df.0, df.1])
+}
+
+// b3.record_trial(study, name, params, period, excess): a trial in the registry (the same study,
+// name, params and period replaced), and the lab's line about it
+fn rt_b3_record_trial(study: str, name: str, params: str, period: str, excess: List[f64]) -> (str, str, str) {
+    var s = rt_b3_get()
+    let t = new_trial(study, name, params, period, excess)
+    var all: List[Trial] = []
+    if s.results != "" {
+        make_dir(s.results)
+        all = upsert(s.results + "/registro_testes.csv", t)
+    } else {
+        for x in s.trials {
+            if trial_key(x) != trial_key(t) { all.push(x) }
+        }
+        all.push(t)
+        s.trials = all
+        wasm_b3_set(s)
+    }
+    let df = deflate(t, all)
+    let line = t.name + ": Sharpe " + format_fixed(t.sr_m * sqrt(12.0), 2) + " a.a. | " + str(max(len(all), 1)) + " testes no registro; o melhor deles daria ~" + format_fixed(df.0, 2) + " por acaso | DSR " + format_fixed(100.0 * df.1, 0) + "%"
+    ("", "", line)
+}
+
+// b3.results_sha256(name): the SHA-256 of a file of the results folder ("" without it)
+fn rt_b3_results_sha256(name: str) -> (str, str, str) {
+    let s = rt_b3_get()
+    if s.results == "" { return ("", "", "") }
+    let p = s.results + "/" + name
+    if not file_exists(p) { return ("", "", "") }
+    ("", "", sha256_hex(read_bytes(p)))
 }

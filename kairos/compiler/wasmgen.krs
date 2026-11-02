@@ -1821,6 +1821,13 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
         return store_at(inout g, wt_i32(), 0)
     }
     if name == "wasm_program" { return i32c(inout g, intern_obj(inout g, g.prog)) }
+    // f64 -> f32 -> f64 (demote, promote)
+    if name == "wasm_f32" {
+        op(inout g, 182)
+        return op(inout g, 187)
+    }
+    // a tensor of the runtime (RtT) as the program's tensor: the same object, one more reference
+    if starts_with(name, "wasm_t_") { return call_f(inout g, f_incref()) }
     // a text to the standard error; a text to the standard error, then exit code 1
     if name == "wasm_eprint" or name == "wasm_fail" {
         let p = new_local(inout g, wt_i32())
@@ -1845,7 +1852,8 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
 fn host_w(inout g: WGen, e: H) {
     let parts = split(e.text, " ")
     let what = parts[0]
-    let known = ["monthly_returns", "eligible", "cdi", "month_index", "nefin", "evaluate"]
+    let known = ["monthly_returns", "eligible", "cdi", "ipca", "month_index", "nefin", "months", "tickers", "issuers", "classes", "daily", "sessions",
+        "session_dates", "nefin_daily", "evaluate", "simulate", "record_trial", "deflate_trial", "results_sha256"]
     if not contains(known, what) { return wg_fail(inout g, e, "`b3." + what + "`") }
     if len(g.ck.protocols) > 0 { return wg_fail(inout g, e, "`b3` in a program with protocols") }
     let name = "rt_b3_" + what
@@ -1858,8 +1866,8 @@ fn host_w(inout g: WGen, e: H) {
         return
     }
     let id = g.ck.fn_ids[name]
-    // the arguments, borrowed (nefin: the factor first)
-    if what == "nefin" { i64c(inout g, parse_int(parts[1])) }
+    // the arguments, borrowed (nefin, nefin_daily, daily: the factor or the field first)
+    if what == "nefin" or what == "nefin_daily" or what == "daily" { i64c(inout g, parse_int(parts[1])) }
     var tmps: List[(i64, Ty)] = []
     for i in 0..len(e.kids) {
         var safe = true

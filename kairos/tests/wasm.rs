@@ -400,7 +400,14 @@ fn b3_programs_compiled_to_webassembly_run_like_the_interpreter() {
         // relative to the crate's folder, where the module's paths start (as `wasmtime --dir=.`)
         let tmp = "tests/wasm/tmp/b3";
         let _ = std::fs::remove_dir_all(root.join(tmp));
-        let progs = ["examples/momentum.krs", "tests/wasm_b3/data.krs", "tests/wasm_b3/err_month.krs", "tests/wasm_b3/err_weights.krs"];
+        let progs = [
+            "examples/momentum.krs",
+            "tests/wasm_b3/data.krs",
+            "tests/wasm_b3/more.krs",
+            "tests/wasm_b3/daily.krs",
+            "tests/wasm_b3/err_month.krs",
+            "tests/wasm_b3/err_weights.krs",
+        ];
         let paths: Vec<String> = progs.iter().map(|p| root.join(p).to_string_lossy().into_owned()).collect();
         let out = root.join(tmp).join("modules");
         let mut args = vec![root.join("std").to_string_lossy().into_owned(), out.to_string_lossy().into_owned()];

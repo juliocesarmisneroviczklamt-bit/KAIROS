@@ -98,17 +98,18 @@ pub fn upsert(path: &Path, t: &Trial) -> Result<Vec<Trial>> {
     Ok(all)
 }
 
+// exp and ln from libm: the same bits on every system (the system's own differ in the last bit
+// from one system to another), and the same as the Kairós runtime's (lab/trials.krs)
 fn erfc(x: f64) -> f64 {
     let z = x.abs();
     let t = 1.0 / (1.0 + 0.5 * z);
-    let r = t * (-z * z - 1.265_512_23
+    let r = t * libm::exp(-z * z - 1.265_512_23
         + t * (1.000_023_68
             + t * (0.374_091_96
                 + t * (0.096_784_18
                     + t * (-0.186_288_06
                         + t * (0.278_868_07
-                            + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
-        .exp();
+                            + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77)))))))));
     if x >= 0.0 { r } else { 2.0 - r }
 }
 
@@ -150,7 +151,7 @@ pub fn norm_inv(p: f64) -> f64 {
     }
     let pl = 0.02425;
     if p < pl {
-        let q = (-2.0 * p.ln()).sqrt();
+        let q = (-2.0 * libm::log(p)).sqrt();
         (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     } else if p <= 1.0 - pl {
@@ -159,7 +160,7 @@ pub fn norm_inv(p: f64) -> f64 {
         (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
             / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
     } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        let q = (-2.0 * libm::log(1.0 - p)).sqrt();
         -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     }

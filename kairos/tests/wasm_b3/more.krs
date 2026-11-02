@@ -1,0 +1,30 @@
+// The rest of b3 compiled to WebAssembly (M14): the months and the assets' names, a simulation
+// month by month, and the registry of trials (in the test's own results folder)
+let months = b3.months()
+print("months", len(months), months[0], months[len(months) - 1])
+let tk = b3.tickers()
+let is = b3.issuers()
+let cl = b3.classes()
+print("assets", len(tk), tk[0], is[0], cl[0], tk[len(tk) - 1])
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var w = zeros_like(ret)
+let m0 = b3.month_index(201001)
+for m in m0..m0 + 24 {
+    let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+    w[month: m] = where(alive, 1.0 / count(alive), 0.0)
+}
+let s = b3.simulate(w, cost_bps: 10.0, lag: 1, tax: true)
+print("simulated", nan_count(s.ret), nan_sum(s.ret))
+print("exposure", nan_sum(s.exposure), "turnover", nan_sum(s.turnover))
+print("costs", s.cost_bps, "tax", s.tax_paid, "final", s.final_value, "liquidated", s.liq_value)
+print("capped", s.capped, "exempt", s.exempt_months, "taxed", s.taxed_months, "trials", s.trials, "dsr", s.dsr)
+let ev = b3.evaluate(w, cost_bps: 10.0, lag: 1, tax: true)
+print("the same strategy is one trial:", ev.trials, ev.dsr == s.dsr, ev.months)
+var ex: List[f64] = []
+for x in to_list(s.ret) {
+    if not is_nan(x) { ex.push(x - 0.005) }
+}
+print(b3.record_trial("kairos-test", "equal weight", "24 months", "2010-01..2011-12", ex))
+print(b3.deflate_trial(ex))
+print(b3.results_sha256("registro_testes.csv"), b3.results_sha256("no such file"))
