@@ -1,0 +1,54 @@
+// The heap (M17): large blocks (lists, Bytes and texts of more than 32 KiB) that grow together, are
+// freed, joined and taken again, and small objects cut from slabs among them
+fn build(n: i64, k: i64) -> (List[i64], List[f64], List[str]) {
+    var a: List[i64] = []
+    var b: List[f64] = []
+    var c: List[str] = []
+    for i in 0..n {
+        a.push(i * k)
+        b.push(float(i) / float(k))
+        if i % 1000 == 0 { c.push(str(i)) }
+    }
+    (a, b, c)
+}
+
+fn total(xs: List[i64]) -> i64 {
+    var s = 0
+    for x in xs { s += x }
+    s
+}
+
+// three lists growing in lockstep, past 32 KiB, many times
+var sums: List[i64] = []
+for round in 1..6 {
+    let r = build(20000 * round, round)
+    sums.push(total(r.0) + len(r.1) + len(r.2))
+}
+print(sums)   // out: [200010020, 1600000040, 5399970060, 12799920080, 24999850100]
+
+// a list that grows alone (at the heap's end, where it is) and one copied while it is shared
+var big: List[i64] = []
+for i in 0..300000 { big.push(i) }
+var copy = big
+copy.push(-1)
+print(len(big), len(copy), total(big), copy[300000])   // out: 300000 300001 44999850000 -1
+
+// Bytes and texts of more than 32 KiB
+var by = bytes()
+for i in 0..100000 { put_u8(inout by, i % 251) }
+var t = ""
+for i in 0..5000 { t = t + "abcdefghij" }
+print(len(by), get_u8(by, 99999), len(t), substr(t, 49990, 10))   // out: 100000 101 50000 abcdefghij
+
+// freed and taken again: the same results
+var again: List[i64] = []
+for round in 1..6 {
+    let r = build(20000 * round, round)
+    again.push(total(r.0) + len(r.1) + len(r.2))
+}
+print(again == sums)   // out: true
+
+// maps that grow past 32 KiB
+var m: Map[i64, i64] = [:]
+for i in 0..5000 { m[i] = i * i }
+print(len(m), m[4999])   // out: 5000 24990001

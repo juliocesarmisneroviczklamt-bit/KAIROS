@@ -50,8 +50,16 @@ fn wasm_str_at(addr: i64) -> str {
 
 // ------------------------------------------------------------------ the heap
 //
-// Memory is given in blocks of 2^k bytes (16 at least). A freed block goes to the list of its
-// size: the address of its first block is at 64 + 4k, and each block holds the next one.
+// Small objects (32 KiB at most) come in blocks of 2^k bytes (16 at least). A freed block goes to
+// the list of its size: the address of its first block is at 64 + 4k, and each block holds the
+// next one. A list with no block left takes a slab of 64 KiB from the large blocks and cuts it.
+//
+// Large blocks (more than 32 KiB, and the slabs) have the size asked for, rounded up to 8. The
+// free ones form one list in address order (its first at 128; each holds its size, then the next
+// one), and two free blocks that touch become one. A request takes the end of the first free
+// block that is big enough (so the list keeps its order), else new memory at the heap's end (at
+// 132, as far as the large blocks know it), into which a free block that ends there grows. A
+// large object that grows (a list, Bytes) grows where it is when the memory after it is free.
 
 fn rt_class(n: i64) -> i64 {
     var k = 4
@@ -60,19 +68,150 @@ fn rt_class(n: i64) -> i64 {
 }
 
 fn rt_alloc(n: i64) -> i64 {
+    if n > 32768 { return rt_big_alloc(bit_and(n + 7, -8)) }
     let k = rt_class(n)
     let head = 64 + 4 * k
-    let p = wasm_load32(head)
-    if p == 0 { return wasm_alloc(shl(1, k)) }
+    var p = wasm_load32(head)
+    if p == 0 {
+        // a new slab, cut into blocks of 2^k chained in address order
+        let size = shl(1, k)
+        let s = rt_big_alloc(65536)
+        var next = 0
+        var at = s + 65536 - size
+        while at >= s {
+            wasm_store32(at, next)
+            next = at
+            at -= size
+        }
+        p = s
+    }
     wasm_store32(head, wasm_load32(p))
     p
 }
 
 // the block of an object of n bytes, now free
 fn rt_free(p: i64, n: i64) {
+    if n > 32768 { return rt_big_free(p, bit_and(n + 7, -8)) }
     let head = 64 + 4 * rt_class(n)
     wasm_store32(p, wasm_load32(head))
     wasm_store32(head, p)
+}
+
+// the free block b leaves the list (prev: the one before it, 0 when it is the first)
+fn rt_big_unlink(prev: i64, b: i64) {
+    if prev == 0 { wasm_store32(128, wasm_load32(b + 4)) } else { wasm_store32(prev + 4, wasm_load32(b + 4)) }
+}
+
+// new memory at the heap's end
+fn rt_big_new(n: i64) -> i64 {
+    let q = wasm_alloc(n)
+    wasm_store32(132, q + n)
+    q
+}
+
+// n bytes (a multiple of 8) from the large blocks
+fn rt_big_alloc(n: i64) -> i64 {
+    var pp = 0
+    var prev = 0
+    var b = wasm_load32(128)
+    while b != 0 {
+        let size = wasm_load32(b)
+        if size >= n {
+            if size - n >= 16 {
+                wasm_store32(b, size - n)
+                return b + size - n
+            }
+            rt_big_unlink(prev, b)
+            return b
+        }
+        pp = prev
+        prev = b
+        b = wasm_load32(b + 4)
+    }
+    // the last free block ends at the heap's end: it grows into new memory
+    let top = wasm_load32(132)
+    if prev != 0 and prev + wasm_load32(prev) == top {
+        let size = wasm_load32(prev)
+        let q = rt_big_new(n - size)
+        if q == top {
+            rt_big_unlink(pp, prev)
+            return prev
+        }
+        rt_big_free(q, n - size)
+    }
+    rt_big_new(n)
+}
+
+// the large block p of n bytes (a multiple of 8), now free: in its place in the list, joined to
+// the free blocks it touches
+fn rt_big_free(p: i64, n: i64) {
+    var prev = 0
+    var b = wasm_load32(128)
+    while b != 0 and b < p {
+        prev = b
+        b = wasm_load32(b + 4)
+    }
+    var size = n
+    if b != 0 and p + size == b {
+        size += wasm_load32(b)
+        b = wasm_load32(b + 4)
+    }
+    if prev != 0 and prev + wasm_load32(prev) == p {
+        wasm_store32(prev, wasm_load32(prev) + size)
+        wasm_store32(prev + 4, b)
+        return
+    }
+    wasm_store32(p, size)
+    wasm_store32(p + 4, b)
+    if prev == 0 { wasm_store32(128, p) } else { wasm_store32(prev + 4, p) }
+}
+
+// The large block at p grows from n to m bytes where it is, when the memory after it is free or
+// is the heap's end: whether it did.
+fn rt_big_grow(p: i64, n0: i64, m0: i64) -> bool {
+    if n0 <= 32768 { return false }
+    let n = bit_and(n0 + 7, -8)
+    let m = bit_and(m0 + 7, -8)
+    let end = p + n
+    let need = m - n
+    let top = wasm_load32(132)
+    if end == top {
+        let q = rt_big_new(need)
+        if q == end { return true }
+        rt_big_free(q, need)
+        return false
+    }
+    var prev = 0
+    var b = wasm_load32(128)
+    while b != 0 and b < end {
+        prev = b
+        b = wasm_load32(b + 4)
+    }
+    if b != end { return false }
+    let size = wasm_load32(b)
+    let next = wasm_load32(b + 4)
+    if size - need >= 16 {
+        // the rest of the free block, after the grown one
+        let r = end + need
+        wasm_store32(r, size - need)
+        wasm_store32(r + 4, next)
+        if prev == 0 { wasm_store32(128, r) } else { wasm_store32(prev + 4, r) }
+        return true
+    }
+    if size == need {
+        rt_big_unlink(prev, b)
+        return true
+    }
+    // the free block ends at the heap's end: it and new memory
+    if size < need and b + size == top {
+        let q = rt_big_new(need - size)
+        if q == top {
+            rt_big_unlink(prev, b)
+            return true
+        }
+        rt_big_free(q, need - size)
+    }
+    false
 }
 
 // ------------------------------------------------------------------ texts
@@ -330,6 +469,10 @@ fn rt_list_room(o: i64) -> i64 {
     let cap = wasm_load32(o + 8)
     if n < cap { return o }
     let c = if cap < 4 { 4 } else { 2 * cap }
+    if rt_big_grow(o, 16 + 8 * cap, 16 + 8 * c) {
+        wasm_store32(o + 8, c)
+        return o
+    }
     let p = rt_alloc(16 + 8 * c)
     wasm_store32(p, 1)
     wasm_store32(p + 4, n)
@@ -667,6 +810,10 @@ fn rt_bytes_room(o: i64, extra: i64) -> i64 {
     if n + extra <= cap { return o }
     var c = if cap < 16 { 16 } else { 2 * cap }
     while c < n + extra { c = 2 * c }
+    if rt_big_grow(o, 16 + cap, 16 + c) {
+        wasm_store32(o + 8, c)
+        return o
+    }
     let p = rt_bytes_new(c)
     for i in 0..n { wasm_store8(p + 16 + i, wasm_load8(o + 16 + i)) }
     wasm_store32(p + 4, n)
@@ -1019,11 +1166,13 @@ fn rt_open(p: str, write: bool) -> (i64, i64) {
 fn rt_read_file(p: str) -> (i64, Bytes) {
     let o = rt_open(p, false)
     if o.0 != 0 { return (o.0, bytes()) }
-    var b = rt_bytes_new(4096)
+    // as big as the file, and a byte more to see its end: read with no copy
+    let size = rt_file_size(p)
+    var b = rt_bytes_new(if size >= 0 { size + 1 } else { 4096 })
     let io = rt_alloc(16)
     var e = 0
     while true {
-        b = rt_bytes_room(b, 4096)
+        if wasm_load32(b + 4) == wasm_load32(b + 8) { b = rt_bytes_room(b, 4096) }
         let n = wasm_load32(b + 4)
         wasm_store32(io, b + 16 + n)
         wasm_store32(io + 4, wasm_load32(b + 8) - n)

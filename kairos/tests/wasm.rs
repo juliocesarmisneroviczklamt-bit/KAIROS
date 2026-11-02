@@ -10,6 +10,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+thread_local! {
+    /// the pages of memory the last module run (in this thread) ended with
+    static LAST_PAGES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 struct Buf(Rc<RefCell<Vec<u8>>>);
 
 impl Write for Buf {
@@ -365,9 +370,10 @@ fn run_wasm_io(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)], input: &
         Ok(()) => 0,
         Err(e) => e.i32_exit_status().unwrap_or_else(|| panic!("the module trapped: {e}")),
     };
+    let pages = instance.get_memory(&store, "memory").expect("the module's memory").size(&store);
+    LAST_PAGES.with(|p| p.set(pages));
     if std::env::var("KAIROS_WASM_PAGES").is_ok() {
-        let mem = instance.get_memory(&store, "memory").expect("the module's memory");
-        eprintln!("memory: {} pages", mem.size(&store));
+        eprintln!("memory: {pages} pages");
     }
     let w = store.data();
     (String::from_utf8(w.out.clone()).unwrap(), String::from_utf8(w.err.clone()).unwrap(), code)
@@ -508,7 +514,13 @@ protocol,teste,0123abcd,2020-01,,2026-01-01,a protocol of the tests
                 let b = std::fs::read(root.join(&idir).join(f)).ok();
                 assert!(a == b, "{path}: {f} differs between WebAssembly and the interpreter");
             }
-            println!("{name}: the same in WebAssembly ({:.1} s in wasmi)", t.elapsed().as_secs_f64());
+            let pages = LAST_PAGES.with(|p| p.get());
+            // M17: the allocator joins the free blocks that touch and reuses them for any size
+            // (momentum took 25,043 pages before, about 8,700 since)
+            if name == "momentum" {
+                assert!(pages < 12_000, "momentum.wasm ended with {pages} pages of memory");
+            }
+            println!("{name}: the same in WebAssembly ({:.1} s in wasmi, {} MB)", t.elapsed().as_secs_f64(), pages / 16);
         }
         let _ = std::fs::remove_dir_all(root.join(tmp));
     })
