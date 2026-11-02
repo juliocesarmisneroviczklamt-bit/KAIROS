@@ -2,6 +2,39 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.13.0 — M13: o back-end WebAssembly escrito em Kairós
+
+**O compilador da Kairós, escrito em Kairós, agora gera WebAssembly e compila a si mesmo.** [`compiler/wasmgen.krs`](kairos/compiler/wasmgen.krs) transforma o HIR de um programa num módulo WASI (`kairos run kairos/compiler/kw.krs kairos/std saida programa.krs` grava `saida/programa.wasm`), que roda em wasmtime, num navegador ou em qualquer runtime WASI, sem Rust.
+
+- **A mesma semântica do interpretador:**
+  - os 32 programas de `tests/wasm` dão a mesma saída, os mesmos erros de execução com as mesmas mensagens (inclusive as que mostram valores, como `index -1 out of bounds for a list of length 3`) e o mesmo código de saída;
+  - o teste roda cada módulo no wasmi, com um WASI mínimo (argumentos, ambiente e arquivos).
+- **O que compila:**
+  - inteiros com aritmética verificada, floats, booleanos e textos;
+  - tuplas, structs, listas, mapas (na ordem de inserção), enums com dados e recursivos, padrões;
+  - parâmetros `inout`, pelos retornos múltiplos do WebAssembly;
+  - `Bytes` e arquivos via WASI;
+  - os builtins que o compilador usa.
+  - Ainda não compila: closures, tensores, `grad`, protocolos e holdouts, a ponte `b3` e a internet.
+- **Memória:**
+  - os valores no heap contam suas referências: são copiados antes de mudar quando outros os compartilham (a semântica de valor da linguagem) e liberados na última referência;
+  - blocos livres por tamanho: um milhão de structs e textos criados e descartados ocupam uma página de memória;
+  - cada tipo ganha suas funções de liberar, copiar, escrever e comparar, geradas conforme o programa as usa.
+- **O runtime dos módulos é escrito em Kairós** ([`compiler/rt.krs`](kairos/compiler/rt.krs)):
+  - floats escritos como o `{:?}` do Rust, pelo algoritmo Ryu, com as tabelas calculadas em Kairós com inteiros grandes; conferido em 2 milhões de floats;
+  - floats lidos como o `parse::<f64>` do Rust, com arredondamento correto e subnormais; conferido em 11 mil textos e 300 pontos médios exatos entre floats vizinhos;
+  - a `libm` portada operação por operação (`exp`, `ln`, `^`, `tanh`, `sigmoid`, `softplus`): os mesmos bits do interpretador em 13 milhões de valores;
+  - o `%` exato, o alocador, os mapas com hash, UTF-8, Latin-1 e as classes Unicode (`is_alphabetic`…, com tabelas geradas a partir do próprio Rust).
+- **Auto-hospedagem:**
+  - o compilador inteiro (léxico, parser, verificador, análise temporal, o gerador de imagens e o próprio back-end) vira WebAssembly;
+  - rodando como WebAssembly, ele gera os mesmos módulos que o interpretador, byte a byte, e compila a si mesmo no mesmo `kw.wasm` (987 KB): um ponto fixo;
+  - o front-end compilado imprime os mesmos tokens, árvores, tipos e HIR que o interpretador, e o compilador de imagens compilado grava as mesmas imagens;
+  - `cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere.
+- **Os mesmos bits em todo sistema:**
+  - o `round` do MinGW dava 1,0 para 0,49999999999999994: `round`, `floor` e `ceil` passam a usar a `libm`;
+  - o `relu` deixa de depender do sinal de max(−0,0; 0,0), que muda de plataforma para plataforma.
+- **Novos builtins:** `to_bits(x: f64) -> i64` e `from_bits(b: i64) -> f64`.
+
 ## 0.12.0 — M12: o compilador da Kairós escrito em Kairós
 
 **O compilador da Kairós agora é escrito em Kairós e compila a si mesmo.** [`kairos/compiler/`](kairos/compiler) tem o front-end inteiro: léxico, parser, verificador de tipos, HIR e análise temporal. O compilador grava a imagem de um programa, e `kairos exec` a executa sem o front-end Rust.

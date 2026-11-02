@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.12.0**, com o roteiro M1–M12 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.13.0**, com o roteiro M1–M13 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -14,7 +14,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.12.0**, com 
 - M9: arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós;
 - M10: a base de dados do laboratório montada em Kairós;
 - M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs));
-- M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo.
+- M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo;
+- M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -27,6 +28,9 @@ kairos check arquivo.krs                     # só verifica os tipos
 kairos run kairos/compiler/kc.krs kairos/std saida arquivo.krs
                                              # o compilador escrito em Kairós grava saida/arquivo.kim
 kairos exec saida/arquivo.kim                # executa a imagem, sem o front-end Rust
+kairos run kairos/compiler/kw.krs kairos/std saida arquivo.krs
+                                             # o compilador em Kairós grava saida/arquivo.wasm
+wasmtime --dir=. saida/arquivo.wasm          # roda o módulo em qualquer runtime WASI, sem Rust
 kairos ledger                                # o livro-razão de holdouts
 kairos repl                                  # sessão interativa (ou só `kairos`)
 cargo test -p kairos                         # testes dourados + teste de aceitação com os dados reais
@@ -138,10 +142,16 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **A inicialização:** o compilador compila a si mesmo, e a imagem que sai, executada sem o front-end Rust, compila o compilador de novo na mesma imagem, byte a byte.
 - **`kairos exec`** executa a imagem de um programa compilado pelo compilador em Kairós ([spec §14](docs/spec.md)).
 
+**M13 (o back-end WebAssembly em Kairós)**
+- **[`compiler/wasmgen.krs`](compiler/wasmgen.krs) gera módulos WASI** com a saída, os erros e as mensagens do interpretador: inteiros verificados, floats, textos, tuplas, structs, listas, mapas, enums, `inout`, `Bytes` e arquivos.
+- **Memória com contagem de referências** e cópia na escrita: a semântica de valor da linguagem, sem coletor de lixo.
+- **O runtime dos módulos é escrito em Kairós** ([`compiler/rt.krs`](compiler/rt.krs)): floats escritos (Ryu) e lidos como no Rust, a `libm` bit a bit, Unicode, mapas, arquivos via WASI.
+- **O compilador compila a si mesmo em WebAssembly:** o `kw.wasm` que ele gera, rodando como WebAssembly, gera o mesmo `kw.wasm` byte a byte ([spec §15](docs/spec.md)).
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M13 | o back-end em Kairós: o compilador escrito em Kairós gera WebAssembly em vez de depender do interpretador Rust (em andamento: inteiros, floats, booleanos, textos, funções e controle de fluxo, em [`compiler/wasmgen.krs`](compiler/wasmgen.krs), com o runtime escrito em Kairós em [`compiler/rt.krs`](compiler/rt.krs): a escrita de floats igual à do Rust, pelo algoritmo Ryu, o `%` exato de floats e a `libm` em Kairós em [`compiler/rt_math.krs`](compiler/rt_math.krs): `exp`, `ln`, `^`, `tanh`, `sigmoid` e `softplus` com os mesmos bits do interpretador) |
+| M14 | o back-end WebAssembly completo: closures, tensores e `grad` |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

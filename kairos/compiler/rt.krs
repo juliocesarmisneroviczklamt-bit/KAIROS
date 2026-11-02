@@ -14,6 +14,8 @@
 // A text: the count, its length in bytes, then its UTF-8 bytes. Texts never change once made.
 import "rt_ryu.krs"
 import "rt_math.krs"
+import "rt_unicode.krs"
+import "rt_decimal.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0
@@ -915,6 +917,247 @@ fn rt_str_u64(v: i64) -> str {
 // The text itself (for a message that shows it).
 fn rt_str_same(s: str) -> str {
     s
+}
+
+// ------------------------------------------------------------------ more on texts
+
+// Is c white space for Unicode (Rust's char::is_whitespace)?
+fn rt_ws(c: i64) -> bool {
+    (c >= 9 and c <= 13) or c == 32 or c == 133 or c == 160 or c == 5760 or (c >= 8192 and c <= 8202) or c == 8232 or c == 8233 or c == 8239 or c == 8287 or c == 12288
+}
+
+// The code point at byte i of the text at p, and its length in bytes.
+fn rt_code_at(p: i64, i: i64) -> (i64, i64) {
+    let b = wasm_load8(p + 8 + i)
+    if b < 128 { return (b, 1) }
+    if b < 224 { return (bit_or(shl(bit_and(b, 31), 6), bit_and(wasm_load8(p + 9 + i), 63)), 2) }
+    if b < 240 { return (bit_or(bit_or(shl(bit_and(b, 15), 12), shl(bit_and(wasm_load8(p + 9 + i), 63), 6)), bit_and(wasm_load8(p + 10 + i), 63)), 3) }
+    let c = bit_or(shl(bit_and(b, 7), 18), shl(bit_and(wasm_load8(p + 9 + i), 63), 12))
+    (bit_or(bit_or(c, shl(bit_and(wasm_load8(p + 10 + i), 63), 6)), bit_and(wasm_load8(p + 11 + i), 63)), 4)
+}
+
+// The bytes (from, to) of the text at p without the white space at its ends.
+fn rt_trim_ends(p: i64) -> (i64, i64) {
+    let n = wasm_load32(p + 4)
+    var a = 0
+    while a < n {
+        let c = rt_code_at(p, a)
+        if not rt_ws(c.0) { break }
+        a += c.1
+    }
+    var z = n
+    while z > a {
+        var k = z - 1
+        while k > a and bit_and(wasm_load8(p + 8 + k), 192) == 128 { k -= 1 }
+        if not rt_ws(rt_code_at(p, k).0) { break }
+        z = k
+    }
+    (a, z)
+}
+
+fn rt_trim(s: str) -> str {
+    let p = wasm_str_addr(s)
+    let r = rt_trim_ends(p)
+    rt_bytes_str(p, r.0, r.1)
+}
+
+// parse_int: the text without the white space at its ends, as Rust reads an i64: (it is one,
+// its value)
+fn rt_parse_int(s: str) -> (bool, i64) {
+    let p = wasm_str_addr(s)
+    let r = rt_trim_ends(p)
+    var i = r.0
+    let z = r.1
+    var neg = false
+    if i < z and (wasm_load8(p + 8 + i) == 43 or wasm_load8(p + 8 + i) == 45) {
+        neg = wasm_load8(p + 8 + i) == 45
+        i += 1
+    }
+    if i >= z { return (false, 0) }
+    var v = 0
+    while i < z {
+        let d = wasm_load8(p + 8 + i) - 48
+        if d < 0 or d > 9 { return (false, 0) }
+        // negative numbers are built below 0, so the smallest i64 fits
+        if neg {
+            if v < (-9223372036854775807 - 1 + d) / 10 { return (false, 0) }
+            v = v * 10 - d
+        } else {
+            if v > (9223372036854775807 - d) / 10 { return (false, 0) }
+            v = v * 10 + d
+        }
+        i += 1
+    }
+    (true, v)
+}
+
+// replace(s, a, b): each `a` in s, from the left and without overlaps, becomes `b` (with an empty
+// `a`, b goes before each character and at the end, as in Rust)
+fn rt_replace(s: str, a: str, b: str) -> str {
+    let p = wasm_str_addr(s)
+    let q = wasm_str_addr(a)
+    let n = wasm_load32(p + 4)
+    let m = wasm_load32(q + 4)
+    var parts: List[str] = []
+    if m == 0 {
+        var i = 0
+        while i < n {
+            parts.push(b)
+            let k = rt_code_at(p, i).1
+            parts.push(rt_bytes_str(p, i, i + k))
+            i += k
+        }
+        parts.push(b)
+        return rt_join(parts, "")
+    }
+    var start = 0
+    var i = 0
+    while i + m <= n {
+        if rt_bytes_at(p, i, q) {
+            parts.push(rt_bytes_str(p, start, i))
+            parts.push(b)
+            i += m
+            start = i
+        } else {
+            i += 1
+        }
+    }
+    parts.push(rt_bytes_str(p, start, n))
+    rt_join(parts, "")
+}
+
+// to_hex(x, width): the 64 bits of x in lowercase hexadecimal, with zeros to the width (0 to 64)
+fn rt_to_hex(x: i64, w0: i64) -> str {
+    let w = if w0 < 0 { 0 } else if w0 > 64 { 64 } else { w0 }
+    var digits: List[i64] = []
+    var v = x
+    while true {
+        digits.push(bit_and(v, 15))
+        v = shr(v, 4)
+        if v == 0 { break }
+    }
+    let n = if len(digits) > w { len(digits) } else { w }
+    let q = rt_new_str(n)
+    for i in 0..n {
+        let d = if n - 1 - i < len(digits) { digits[n - 1 - i] } else { 0 }
+        wasm_store8(q + 8 + i, rt_hex_digit(d))
+    }
+    wasm_str_at(q)
+}
+
+// -1, 0 or 1: the texts at two addresses in byte order
+fn rt_addr_cmp(pa: i64, pb: i64) -> i64 {
+    let na = wasm_load32(pa + 4)
+    let nb = wasm_load32(pb + 4)
+    let n = if na < nb { na } else { nb }
+    for i in 0..n {
+        let x = wasm_load8(pa + 8 + i)
+        let y = wasm_load8(pb + 8 + i)
+        if x < y { return -1 }
+        if x > y { return 1 }
+    }
+    if na < nb { -1 } else if na > nb { 1 } else { 0 }
+}
+
+// ------------------------------------------------------------------ sorting
+//
+// sort(inout xs) for numbers, booleans and texts (kind 0 i64, 1 f64, 2 bool, 3 text): stable,
+// in the interpreter's order (floats in their total order, as Rust's total_cmp).
+
+fn rt_slot(base: i64, i: i64, kind: i64) -> i64 {
+    if kind >= 2 { wasm_load32(base + 8 * i) } else { wasm_load64(base + 8 * i) }
+}
+
+fn rt_less(a: i64, b: i64, kind: i64) -> bool {
+    if kind == 3 { return rt_addr_cmp(a, b) < 0 }
+    if kind == 1 {
+        let x = if a < 0 { bit_xor(a, 9223372036854775807) } else { a }
+        let y = if b < 0 { bit_xor(b, 9223372036854775807) } else { b }
+        return x < y
+    }
+    a < b
+}
+
+// merge sort, bottom up, through a buffer of the same size
+fn rt_sort(o: i64, kind: i64) {
+    let n = wasm_load32(o + 4)
+    if n < 2 { return }
+    let tmp = rt_alloc(8 * n)
+    var src = o + 16
+    var dst = tmp
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n }
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n }
+            var i = lo
+            var j = mid
+            for k in lo..hi {
+                // the left one, unless the right one is smaller (so equal ones keep their order)
+                var right = i >= mid
+                if not right and j < hi { right = rt_less(rt_slot(src, j, kind), rt_slot(src, i, kind), kind) }
+                if right {
+                    wasm_store64(dst + 8 * k, wasm_load64(src + 8 * j))
+                    j += 1
+                } else {
+                    wasm_store64(dst + 8 * k, wasm_load64(src + 8 * i))
+                    i += 1
+                }
+            }
+            lo = hi
+        }
+        let t = src
+        src = dst
+        dst = t
+        width = 2 * width
+    }
+    if src != o + 16 { rt_copy(o + 16, src, 8 * n) }
+    rt_free(tmp, 8 * n)
+}
+
+fn rt_reverse(o: i64) {
+    let n = wasm_load32(o + 4)
+    for i in 0..n / 2 {
+        let a = o + 16 + 8 * i
+        let b = o + 16 + 8 * (n - 1 - i)
+        let t = wasm_load64(a)
+        wasm_store64(a, wasm_load64(b))
+        wasm_store64(b, t)
+    }
+}
+
+// ------------------------------------------------------------------ classes of characters
+//
+// The tables of rt_unicode.krs: boundaries in base 64, 4 digits each; c is in the class when an
+// odd number of them are at or below it.
+
+fn rt_b64(ch: i64) -> i64 {
+    if ch >= 97 { return ch - 71 }
+    if ch >= 65 { return ch - 65 }
+    if ch >= 48 { return ch + 4 }
+    if ch == 43 { 62 } else { 63 }
+}
+
+fn rt_uni_at(p: i64, k: i64) -> i64 {
+    var v = 0
+    for i in 0..4 { v = v * 64 + rt_b64(wasm_load8(p + 8 + 4 * k + i)) }
+    v
+}
+
+// which: 0 alphabetic, 1 alphanumeric, 2 uppercase, 3 white space
+fn rt_uni_in(c: i64, which: i64) -> bool {
+    // not a character: negative, a surrogate, beyond U+10FFFF
+    if c < 0 or c > 1114111 or (c >= 55296 and c <= 57343) { return false }
+    let t = if which == 0 { rt_uni_alphabetic() } else if which == 1 { rt_uni_alphanumeric() } else if which == 2 { rt_uni_uppercase() } else { rt_uni_whitespace() }
+    let p = wasm_str_addr(t)
+    var lo = 0
+    var hi = wasm_load32(p + 4) / 4
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if rt_uni_at(p, mid) <= c { lo = mid + 1 } else { hi = mid }
+    }
+    lo % 2 == 1
 }
 
 // ------------------------------------------------------------------ floats as text

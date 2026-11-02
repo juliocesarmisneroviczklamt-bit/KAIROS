@@ -58,6 +58,7 @@ struct Wasi {
     root: PathBuf,
     files: std::collections::HashMap<i32, std::fs::File>,
     next_fd: i32,
+    args: Vec<String>,
 }
 
 /// WASI's code for an error of the file system.
@@ -111,10 +112,6 @@ fn put_c_strings(c: &mut Caller<'_>, list: &[String], ptrs: i32, buf: i32) {
     }
 }
 
-fn wasi_args() -> Vec<String> {
-    vec!["program.wasm".to_string()]
-}
-
 fn wasi_environ() -> Vec<String> {
     std::env::vars().map(|(k, v)| format!("{k}={v}")).collect()
 }
@@ -123,6 +120,11 @@ fn wasi_environ() -> Vec<String> {
 /// name as its only argument, the environment, and the files under the crate's folder (as
 /// `wasmtime --dir=.` gives them). The result: (stdout, stderr, exit code).
 fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
+    run_wasm_with(bytes, vec!["program.wasm".to_string()])
+}
+
+/// The same with the program's arguments (the first one its name).
+fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
     use std::io::{Read, Write};
     use wasmi::{Config, Engine, Linker, Module, Store};
     // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
@@ -131,7 +133,7 @@ fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
     let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, ..Wasi::default() });
+    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, args, ..Wasi::default() });
     let mut linker = <Linker<Wasi>>::new(&engine);
     let w = "wasi_snapshot_preview1";
     linker
@@ -162,7 +164,8 @@ fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
     linker.func_wrap(w, "proc_exit", |_: Caller<'_>, code: i32| -> Result<(), wasmi::Error> { Err(wasmi::Error::i32_exit(code)) }).unwrap();
     linker
         .func_wrap(w, "args_sizes_get", |mut c: Caller<'_>, count: i32, size: i32| -> i32 {
-            let (n, total, _) = c_strings(&wasi_args());
+            let args = c.data().args.clone();
+            let (n, total, _) = c_strings(&args);
             mem_write(&mut c, count, &n.to_le_bytes());
             mem_write(&mut c, size, &total.to_le_bytes());
             0
@@ -170,7 +173,8 @@ fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
         .unwrap();
     linker
         .func_wrap(w, "args_get", |mut c: Caller<'_>, ptrs: i32, buf: i32| -> i32 {
-            put_c_strings(&mut c, &wasi_args(), ptrs, buf);
+            let args = c.data().args.clone();
+            put_c_strings(&mut c, &args, ptrs, buf);
             0
         })
         .unwrap();
@@ -276,6 +280,10 @@ fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
         Ok(()) => 0,
         Err(e) => e.i32_exit_status().unwrap_or_else(|| panic!("the module trapped: {e}")),
     };
+    if std::env::var("KAIROS_WASM_PAGES").is_ok() {
+        let mem = instance.get_memory(&store, "memory").expect("the module's memory");
+        eprintln!("memory: {} pages", mem.size(&store));
+    }
     let w = store.data();
     (String::from_utf8(w.out.clone()).unwrap(), String::from_utf8(w.err.clone()).unwrap(), code)
 }
@@ -335,5 +343,56 @@ fn programs_compiled_to_webassembly_run_like_the_interpreter() {
         let _ = std::fs::remove_dir_all(&out);
         assert!(files.len() >= 10 && errors >= 5, "{} programs, {errors} with errors", files.len());
         println!("{} programs run the same in WebAssembly, {errors} of them stopping with the same runtime error", files.len());
+    })
+}
+
+/// Runs the module named by KAIROS_WASM (with the arguments in KAIROS_WASM_ARGS, separated by
+/// spaces), for looking at a module by hand:
+/// `KAIROS_WASM=m.wasm cargo test --release --test wasm run_a_module -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn run_a_module() {
+    let path = std::env::var("KAIROS_WASM").expect("KAIROS_WASM: the module to run");
+    let mut args = vec![path.clone()];
+    args.extend(std::env::var("KAIROS_WASM_ARGS").unwrap_or_default().split_whitespace().map(String::from));
+    let bytes = std::fs::read(&path).unwrap();
+    let t = std::time::Instant::now();
+    let (out, err, code) = run_wasm_with(&bytes, args);
+    print!("{out}");
+    eprint!("{err}");
+    eprintln!("exit {code} in {:?}", t.elapsed());
+}
+
+/// The compiler written in Kairós, compiled to WebAssembly, compiles itself: kw.krs run by the
+/// interpreter makes kw.wasm; kw.wasm, run in wasmi, makes the same module again, byte for byte
+/// (and the same kc.wasm and types.wasm). Slow in a debug build:
+/// `cargo test --release -p kairos --test wasm -- --ignored the_compiler`
+#[test]
+#[ignore]
+fn the_compiler_in_webassembly_compiles_itself() {
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let progs = ["compiler/kw.krs", "compiler/kc.krs", "compiler/types.krs"];
+        let first = std::env::temp_dir().join(format!("kairos-self-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&first);
+        // the same relative paths both times: the paths are in the messages each module has
+        assert_eq!(std::env::current_dir().unwrap().canonicalize().unwrap(), root.canonicalize().unwrap(), "run from the crate's folder");
+        let mut args = vec!["std".to_string(), first.to_string_lossy().into_owned()];
+        args.extend(progs.iter().map(|p| p.to_string()));
+        assert_eq!(run_compiler("kw.krs", args), "", "the compiler compiles to WebAssembly");
+        // the module of the compiler compiles them again (paths relative to the crate, as WASI has it)
+        let kw = std::fs::read(first.join("kw.wasm")).unwrap();
+        let mut wargs = vec!["kw.wasm".to_string(), "std".to_string(), "tests/wasm/tmp/self".to_string()];
+        wargs.extend(progs.iter().map(|p| p.to_string()));
+        let (out, err, code) = run_wasm_with(&kw, wargs);
+        assert_eq!((out.as_str(), err.as_str(), code), ("", "", 0), "kw.wasm compiles the compiler");
+        for p in progs {
+            let name = Path::new(p).file_stem().unwrap().to_string_lossy().into_owned();
+            let a = std::fs::read(first.join(format!("{name}.wasm"))).unwrap();
+            let b = std::fs::read(root.join("tests/wasm/tmp/self").join(format!("{name}.wasm"))).unwrap();
+            assert!(a == b, "{name}.wasm: the module made by kw.wasm differs from the one made by the interpreter");
+            println!("{name}.wasm: {} bytes, the same from the interpreter and from kw.wasm", a.len());
+        }
+        let _ = std::fs::remove_dir_all(&first);
     })
 }

@@ -754,6 +754,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M10 | a base de dados em Kairós: COTAHIST, eventos da B3, painel (§4.9) | ✅ `bars.bin` (220 MB), cache de eventos, `panel.bin` (80 MB) e diagnósticos iguais aos do Rust, byte a byte |
 | M11 | o simulador em Kairós (custos, impacto, IR) | ✅ `std/sim.krs` dá os mesmos bits do simulador Rust (mercado sintético no CI; os 5 relatórios do laboratório iguais) |
 | M12 | auto-hospedagem: o compilador escrito em Kairós (§14) | ✅ léxico, parser, verificador, HIR e análise temporal iguais ao Rust nó a nó nos 529 arquivos do repositório; o compilador compila a si mesmo e a imagem é um ponto fixo; os programas dourados rodam das imagens com `kairos exec` |
+| M13 | o back-end escrito em Kairós: WebAssembly (§15) | ✅ os programas de `tests/wasm` dão a saída, os erros e as mensagens do interpretador; o runtime dos módulos, escrito em Kairós, dá os bits do Rust e da `libm`; o compilador compila a si mesmo em WebAssembly, num ponto fixo |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -779,3 +780,47 @@ kairos exec saida/programa.kim                                   # o runtime exe
 ```
 
 **A inicialização.** O front-end Rust roda o compilador em Kairós, que compila a si mesmo (estágio 0); a imagem que sai, executada pelo runtime, compila o compilador de novo (estágio 1). As duas imagens são iguais byte a byte: o compilador é um ponto fixo de si mesmo. O runtime (interpretador, tensores, `grad`, código nativo, a ponte com os dados) continua em Rust.
+
+## 15. O back-end WebAssembly escrito em Kairós (M13)
+
+O compilador escrito em Kairós também gera código: [`compiler/wasmgen.krs`](../compiler/wasmgen.krs) transforma o HIR verificado de um programa num módulo WebAssembly para WASI, e [`compiler/kw.krs`](../compiler/kw.krs) é o compilador de linha de comando:
+
+```text
+kairos run kairos/compiler/kw.krs kairos/std saida programa.krs   # grava saida/programa.wasm
+wasmtime --dir=. saida/programa.wasm argumentos...                # qualquer runtime WASI, sem Rust
+```
+
+**A mesma semântica.** Um módulo imprime o que o interpretador imprime e para com os mesmos erros de execução, com as mesmas mensagens (renderizadas na compilação, e com os valores escritos na hora quando a mensagem os mostra) e o mesmo código de saída. A aritmética de inteiros é verificada como no Rust; os floats são os do IEEE 754.
+
+**Memória.** Os valores que vivem no heap (textos, tuplas, structs, listas, mapas, enums, `Bytes`) são objetos que contam suas referências:
+- uma expressão entrega um valor com posse;
+- variáveis liberam o valor antigo quando mudam, e o seu ao fim da função;
+- uma função toma emprestados os seus argumentos;
+- um valor compartilhado é copiado antes de mudar (a semântica de valor da linguagem, como o `Rc::make_mut` do interpretador).
+
+Na última referência, o objeto é liberado e o bloco volta a uma lista de blocos livres do seu tamanho. Cada tipo ganha as suas funções de liberar, copiar, escrever e comparar, geradas conforme o programa as usa.
+
+**`inout`.** O valor sai do seu lugar (uma variável, um campo, um elemento, em qualquer profundidade), entra na chamada e volta junto com o resultado, pelos retornos múltiplos do WebAssembly. É como o interpretador faz: primeiro os valores, depois os lugares.
+
+**O runtime é escrito em Kairós** ([`compiler/rt.krs`](../compiler/rt.krs)). As funções `wasm_*` dele são instruções; as demais são compiladas com o programa, quando ele as usa:
+- o alocador;
+- textos e UTF-8, listas, mapas (na ordem de inserção, com uma tabela de hash), `Bytes`;
+- a escrita de floats igual ao `{:?}` do Rust: Ryu, com tabelas exatas em [`rt_ryu.krs`](../compiler/rt_ryu.krs);
+- a leitura de floats igual ao `parse::<f64>` do Rust ([`rt_decimal.krs`](../compiler/rt_decimal.krs));
+- a `libm` operação por operação ([`rt_math.krs`](../compiler/rt_math.krs));
+- as classes Unicode ([`rt_unicode.krs`](../compiler/rt_unicode.krs), com tabelas geradas a partir do Rust);
+- os arquivos via WASI.
+
+Essas funções usam só a linguagem, por isso rodam também no interpretador. Lá, `tests/rt` as compara com o Rust e a `libm` bit a bit, em todas as plataformas do CI.
+
+**Arquivos.** Os caminhos são relativos à pasta que o runtime WASI abre para o programa (`--dir=.`). Um erro de arquivo é o R0011, com o texto que o Rust dá no Linux.
+
+**Auto-hospedagem.** O compilador inteiro vira WebAssembly: léxico, parser, verificador, análise temporal, o gerador de imagens e o próprio back-end. Rodando como WebAssembly:
+- ele gera os mesmos módulos que gera no interpretador, byte a byte;
+- compilando a si mesmo, gera o mesmo `kw.wasm`: é um ponto fixo;
+- o front-end compilado imprime os mesmos tokens, árvores, tipos e HIR;
+- o gerador de imagens compilado grava as mesmas imagens.
+
+`cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere o ponto fixo no wasmi.
+
+**Ainda não compila:** closures, tensores, `grad`, protocolos e holdouts, a ponte `b3` e a internet. Um programa que os usa é recusado com W0001, no ponto exato.

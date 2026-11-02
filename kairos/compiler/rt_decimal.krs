@@ -1,0 +1,251 @@
+// Reading floats (M13), written in Kairós: `parse_float` as Rust's `str::parse::<f64>` reads a
+// number (the nearest float, ties to even), and NaN for a text that is not one (the interpreter's
+// `parse_float`). It uses only the language (lists, integers, `to_bits`), so it runs in the
+// interpreter too, where kairos/tests/rt checks it against Rust.
+//
+// Few digits and a small exponent take the exact path (Clinger: one correctly rounded operation
+// on exact floats); the others, big integers: the value is digits × 10^exp, divided or
+// multiplied out exactly, then rounded once.
+
+// 10^k for k <= 22, exact as a float
+fn rt_pow10(k: i64) -> f64 {
+    var p = 1.0
+    for i in 0..k { p = p * 10.0 }
+    p
+}
+
+// ------------------------------------------------------------------ big naturals (limbs of 30 bits, the lowest first)
+
+fn rt_big_trim(a: List[i64]) -> List[i64] {
+    var out = a
+    while len(out) > 0 and out[len(out) - 1] == 0 { let _ = out.pop() }
+    out
+}
+
+fn rt_big_mul_add(a: List[i64], m: i64, add: i64) -> List[i64] {
+    var out: List[i64] = []
+    var carry = add
+    for d in a {
+        let v = d * m + carry
+        out.push(bit_and(v, 1073741823))
+        carry = shr(v, 30)
+    }
+    while carry > 0 {
+        out.push(bit_and(carry, 1073741823))
+        carry = shr(carry, 30)
+    }
+    out
+}
+
+fn rt_big_bits(a: List[i64]) -> i64 {
+    let t = rt_big_trim(a)
+    if len(t) == 0 { return 0 }
+    var top = t[len(t) - 1]
+    var b = 0
+    while top > 0 {
+        b += 1
+        top = shr(top, 1)
+    }
+    (len(t) - 1) * 30 + b
+}
+
+// a × 2^k
+fn rt_big_shl(a: List[i64], k: i64) -> List[i64] {
+    var out: List[i64] = []
+    for i in 0..k / 30 { out.push(0) }
+    let s = k % 30
+    var carry = 0
+    for d in a {
+        let v = bit_or(shl(d, s), carry)
+        out.push(bit_and(v, 1073741823))
+        carry = shr(v, 30)
+    }
+    if carry > 0 { out.push(carry) }
+    rt_big_trim(out)
+}
+
+fn rt_big_cmp(a: List[i64], b: List[i64]) -> i64 {
+    let x = rt_big_trim(a)
+    let y = rt_big_trim(b)
+    if len(x) != len(y) { return if len(x) < len(y) { -1 } else { 1 } }
+    var i = len(x) - 1
+    while i >= 0 {
+        if x[i] != y[i] { return if x[i] < y[i] { -1 } else { 1 } }
+        i -= 1
+    }
+    0
+}
+
+// a - b, with a >= b
+fn rt_big_sub(a: List[i64], b: List[i64]) -> List[i64] {
+    var out: List[i64] = []
+    var borrow = 0
+    for i in 0..len(a) {
+        var v = a[i] - borrow - (if i < len(b) { b[i] } else { 0 })
+        if v < 0 {
+            v += 1073741824
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        out.push(v)
+    }
+    rt_big_trim(out)
+}
+
+// (floor(a / b), a mod b), for a quotient below 2^62
+fn rt_big_divmod(a: List[i64], b: List[i64]) -> (i64, List[i64]) {
+    var q = 0
+    var r = a
+    var k = rt_big_bits(a) - rt_big_bits(b)
+    while k >= 0 {
+        let bs = rt_big_shl(b, k)
+        if rt_big_cmp(r, bs) >= 0 {
+            r = rt_big_sub(r, bs)
+            q = bit_or(q, shl(1, k))
+        }
+        k -= 1
+    }
+    (q, r)
+}
+
+fn rt_bitlen(x: i64) -> i64 {
+    var b = 0
+    var v = x
+    while v > 0 {
+        b += 1
+        v = shr(v, 1)
+    }
+    b
+}
+
+// ------------------------------------------------------------------ the text
+
+fn rt_signed(neg: bool, x: f64) -> f64 {
+    if neg { -x } else { x }
+}
+
+// "inf", "infinity" and "nan", in any case
+fn rt_word_is(cs: List[i64], at: i64, w: str) -> bool {
+    let ws = codes(w)
+    if len(cs) - at != len(ws) { return false }
+    for i in 0..len(ws) {
+        var c = cs[at + i]
+        if c >= 65 and c <= 90 { c += 32 }
+        if c != ws[i] { return false }
+    }
+    true
+}
+
+fn rt_parse_float(s: str) -> f64 {
+    let cs = codes(trim(s))
+    let n = len(cs)
+    var i = 0
+    var neg = false
+    if i < n and (cs[i] == 43 or cs[i] == 45) {
+        neg = cs[i] == 45
+        i += 1
+    }
+    if rt_word_is(cs, i, "inf") or rt_word_is(cs, i, "infinity") { return rt_signed(neg, inf) }
+    if rt_word_is(cs, i, "nan") { return rt_signed(neg, nan) }
+    // the digits (without leading zeros; 800 at most, the rest only marks the value as a little
+    // more) and the exponent: the value is digits × 10^exp
+    var digits: List[i64] = []
+    var exp = 0
+    var any = false
+    var more = false
+    while i < n and cs[i] >= 48 and cs[i] <= 57 {
+        any = true
+        if cs[i] != 48 or len(digits) > 0 {
+            if len(digits) < 800 {
+                digits.push(cs[i] - 48)
+            } else {
+                exp += 1
+                if cs[i] != 48 { more = true }
+            }
+        }
+        i += 1
+    }
+    if i < n and cs[i] == 46 {
+        i += 1
+        while i < n and cs[i] >= 48 and cs[i] <= 57 {
+            any = true
+            if cs[i] != 48 or len(digits) > 0 {
+                if len(digits) < 800 {
+                    digits.push(cs[i] - 48)
+                    exp -= 1
+                } else if cs[i] != 48 {
+                    more = true
+                }
+            } else {
+                exp -= 1
+            }
+            i += 1
+        }
+    }
+    if not any { return nan }
+    if i < n and (cs[i] == 101 or cs[i] == 69) {
+        i += 1
+        var eneg = false
+        if i < n and (cs[i] == 43 or cs[i] == 45) {
+            eneg = cs[i] == 45
+            i += 1
+        }
+        if i >= n or cs[i] < 48 or cs[i] > 57 { return nan }
+        var ev = 0
+        while i < n and cs[i] >= 48 and cs[i] <= 57 {
+            if ev < 100000000 { ev = ev * 10 + cs[i] - 48 }
+            i += 1
+        }
+        exp += if eneg { -ev } else { ev }
+    }
+    if i != n { return nan }
+    if len(digits) == 0 { return rt_signed(neg, 0.0) }
+    if more {
+        digits.push(1)
+        exp -= 1
+    }
+    // far beyond the range of floats
+    let k = len(digits) + exp
+    if k > 310 { return rt_signed(neg, inf) }
+    if k < -330 { return rt_signed(neg, 0.0) }
+    // the exact path
+    if len(digits) <= 15 and exp >= -22 and exp <= 22 {
+        var m = 0
+        for d in digits { m = m * 10 + d }
+        let f = float(m)
+        let r = if exp >= 0 { f * rt_pow10(exp) } else { f / rt_pow10(-exp) }
+        return rt_signed(neg, r)
+    }
+    // num / den = the value; scaled by 2^s so the quotient q has 55 or 56 bits
+    var num: List[i64] = []
+    for d in digits { num = rt_big_mul_add(num, 10, d) }
+    var den = [1]
+    if exp >= 0 {
+        for j in 0..exp { num = rt_big_mul_add(num, 10, 0) }
+    } else {
+        for j in 0..-exp { den = rt_big_mul_add(den, 10, 0) }
+    }
+    let s = 55 - (rt_big_bits(num) - rt_big_bits(den))
+    if s > 0 { num = rt_big_shl(num, s) } else if s < 0 { den = rt_big_shl(den, -s) }
+    let qr = rt_big_divmod(num, den)
+    let q = qr.0
+    let sticky = len(rt_big_trim(qr.1)) > 0
+    // the value is q × 2^-s (a little more when sticky): as m × 2^x, m below 2^53, x >= -1074
+    let e = rt_bitlen(q) - 1 - s
+    var x = e - 52
+    if x < -1074 { x = -1074 }
+    let sh = x + s
+    if sh > 60 { return rt_signed(neg, 0.0) }
+    var m = shr(q, sh)
+    let rest = bit_and(q, shl(1, sh) - 1)
+    let half = shl(1, sh - 1)
+    if rest > half or (rest == half and (sticky or bit_and(m, 1) == 1)) { m += 1 }
+    if m == shl(1, 53) {
+        m = shl(1, 52)
+        x += 1
+    }
+    if x > 971 { return rt_signed(neg, inf) }
+    let bits = if m >= shl(1, 52) { bit_or(shl(x + 1075, 52), m - shl(1, 52)) } else { m }
+    rt_signed(neg, from_bits(bits))
+}

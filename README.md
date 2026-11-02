@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.12.0 (M12)
+## Estado: v0.13.0 (M13)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -37,7 +37,7 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M10 | a base de dados montada em Kairós: COTAHIST, eventos da B3, painel | ✅ `bars.bin`, cache de eventos e `panel.bin` iguais aos do Rust, byte a byte |
 | M11 | o simulador (custos, impacto, IR) escrito em Kairós | ✅ `b3.evaluate`/`b3.simulate` rodam [`std/sim.krs`](kairos/std/sim.krs), com os mesmos bits do simulador Rust |
 | M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós | ✅ o front-end inteiro em [`kairos/compiler/`](kairos/compiler), igual ao Rust nó a nó em todos os arquivos; compila a si mesmo (a imagem é um ponto fixo) e seus programas rodam com `kairos exec` |
-| M13 | o back-end em Kairós: o compilador escrito em Kairós gera código (WebAssembly) | em andamento: inteiros, floats, booleanos, textos, funções e controle de fluxo já viram WebAssembly ([`kw.krs`](kairos/compiler/kw.krs)), com a saída e os erros do interpretador; o runtime dos módulos é escrito em Kairós ([`rt.krs`](kairos/compiler/rt.krs)), inclusive a escrita de floats igual à do Rust (Ryu), o `%` exato e a `libm` (`exp`, `ln`, `^`, `tanh`, `sigmoid`, `softplus`), conferidos bit a bit |
+| M13 | o back-end em Kairós: o compilador escrito em Kairós gera código (WebAssembly) | ✅ [`kw.krs`](kairos/compiler/kw.krs) gera módulos WASI com a saída e os erros do interpretador; o compilador inteiro vira WebAssembly e, assim, compila a si mesmo no mesmo módulo, byte a byte; o runtime dos módulos é escrito em Kairós ([`rt.krs`](kairos/compiler/rt.krs)): contagem de referências, floats escritos e lidos como no Rust, a `libm`, Unicode e arquivos |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

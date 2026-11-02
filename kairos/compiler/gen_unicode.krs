@@ -1,0 +1,61 @@
+// Writes compiler/rt_unicode.krs: the classes of characters of Unicode as Rust's `char` knows
+// them (is_alphabetic, is_alphanumeric, is_uppercase, is_whitespace), for the runtime of the
+// WebAssembly modules. Each class is a list of ranges, found by asking the interpreter about every
+// code point.
+//
+//   kairos run kairos/compiler/gen_unicode.krs kairos/compiler/rt_unicode.krs
+//
+// A table is a text of base-64 digits, 4 for each boundary (a code point where the class starts
+// or stops): a code point is in the class when an odd number of boundaries are at or below it.
+
+fn boundaries(which: i64) -> List[i64] {
+    var out: List[i64] = []
+    var inside = false
+    for c in 0..1114112 {
+        let yes = if which == 0 { is_alphabetic(c) } else if which == 1 { is_alphanumeric(c) } else if which == 2 { is_uppercase(c) } else { is_whitespace(c) }
+        if yes != inside {
+            out.push(c)
+            inside = yes
+        }
+    }
+    if inside { out.push(1114112) }
+    out
+}
+
+fn digit(d: i64) -> str {
+    substr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", d, 1)
+}
+
+fn encode(xs: List[i64]) -> str {
+    var parts: List[str] = []
+    for x in xs { parts.push(digit(shr(x, 18)) + digit(bit_and(shr(x, 12), 63)) + digit(bit_and(shr(x, 6), 63)) + digit(bit_and(x, 63))) }
+    join(parts, "")
+}
+
+// a long text in lines of 96 characters, joined with + (at the end of a line: a line that starts
+// with + would end the statement)
+fn literal(s: str) -> str {
+    let nl = from_codes([10])
+    var lines: List[str] = []
+    var i = 0
+    while i < len(s) {
+        lines.push("\"" + substr(s, i, 96) + "\"")
+        i += 96
+    }
+    if len(lines) == 0 { lines.push("\"\"") }
+    join(lines, " +" + nl + "        ")
+}
+
+let nl = from_codes([10])
+let names = ["alphabetic", "alphanumeric", "uppercase", "whitespace"]
+var out = "// The classes of characters of Unicode as Rust's `char` knows them, written by gen_unicode.krs" + nl
+out = out + "// (do not edit): for each class, its boundaries in base 64, 4 digits each (rt.krs reads them)." + nl
+var total = 0
+for k in 0..4 {
+    let b = boundaries(k)
+    total += len(b)
+    out = out + nl + "// is_" + names[k] + ": " + str(len(b) / 2) + " ranges" + nl
+    out = out + "fn rt_uni_" + names[k] + "() -> str {" + nl + "    " + literal(encode(b)) + nl + "}" + nl
+}
+write_text(args()[0], out)
+print("wrote " + args()[0] + ": " + str(total) + " boundaries")

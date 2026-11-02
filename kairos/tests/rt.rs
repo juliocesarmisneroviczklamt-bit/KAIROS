@@ -1,7 +1,8 @@
 //! The runtime of the WebAssembly modules (kairos/compiler/rt.krs) is written in Kairós: the
-//! writing of floats (Ryu), `%` on floats (fmod) and the mathematics of libm (exp, ln, ^, tanh,
-//! sigmoid, softplus). Run in the interpreter, the programs of tests/rt check each one against
-//! Rust and libm, bit for bit, on special values and on random ones, on every platform of CI.
+//! writing of floats (Ryu), their reading (parse_float), `%` on floats (fmod) and the mathematics
+//! of libm (exp, ln, ^, tanh, sigmoid, softplus). Run in the interpreter, the programs of tests/rt
+//! check each one against Rust and libm, bit for bit, on special values and on random ones, on
+//! every platform of CI.
 
 use kairos::session::Session;
 use std::cell::RefCell;
@@ -21,8 +22,24 @@ impl Write for Buf {
     }
 }
 
-/// Runs tests/rt/<program> with `count` random cases: it must find no difference.
-fn check(program: &str, count: usize) {
+/// Runs tests/rt/<program> with `count` random cases, on a thread with a big stack (the
+/// interpreter of a debug build takes a lot of it for each call): it must find no difference.
+fn check(program: &'static str, count: usize) {
+    use kairos::interp::STACK_BYTES;
+    use std::sync::atomic::Ordering;
+    let h = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            STACK_BYTES.store(256 << 20, Ordering::Relaxed);
+            check_here(program, count)
+        })
+        .unwrap();
+    if let Err(p) = h.join() {
+        std::panic::resume_unwind(p);
+    }
+}
+
+fn check_here(program: &str, count: usize) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("rt").join(program);
     let src = std::fs::read_to_string(&path).unwrap();
     let buf = Rc::new(RefCell::new(Vec::new()));
@@ -54,4 +71,9 @@ fn exp_ln_and_powers_are_the_bits_of_libm() {
 #[test]
 fn tanh_sigmoid_and_softplus_are_the_bits_of_libm() {
     check("act.krs", 2000);
+}
+
+#[test]
+fn floats_are_read_as_rust_reads_them() {
+    check("decimal.krs", 300);
 }

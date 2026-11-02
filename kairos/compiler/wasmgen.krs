@@ -38,6 +38,8 @@ struct WGen {
     nparams: i64,
     slot_local: List[i64],          // Kairós slot -> local (-1: no value)
     slot_ty: List[Ty],              // the type of each slot
+    live: List[(i64, i64)],         // the locals in use (type, index), the slots first
+    pool: List[(i64, i64)],         // the locals free for another statement
     inout_slots: List[i64],         // the slots of the `inout` parameters (given back at the end)
     depth: i64,                     // blocks, loops and ifs open
     loops: List[(i64, i64)],        // the levels of a loop's exit and continue blocks
@@ -98,6 +100,13 @@ fn fn_index(inout g: WGen, id: i64) -> i64 {
     g.fidx[id] = i
     g.order.push(id)
     i
+}
+
+// Is function `id` an instruction: a `wasm_*` function of the runtime (rt.krs)?
+fn is_intrinsic(g: WGen, id: i64) -> bool {
+    if not starts_with(g.ck.sigs[id].name, "wasm_") { return false }
+    let f = g.ck.fn_hir[id].f
+    f >= 0 and f < len(g.ck.files) and ends_with(g.ck.files[f], "rt.krs")
 }
 
 // A function of the runtime (rt.krs), by name.
@@ -186,9 +195,30 @@ fn br_to(inout g: WGen, level: i64, cond: bool) {
     op_u(inout g, if cond { 13 } else { 12 }, g.depth - level)
 }
 
+// A local of type t: one a finished statement left free, or a new one. (Few locals keep the
+// frames small: a function with a thousand locals has frames of kilobytes, and deep recursion
+// would run out of the engine's stack.)
 fn new_local(inout g: WGen, t: i64) -> i64 {
+    var k = len(g.pool) - 1
+    while k >= 0 {
+        if g.pool[k].0 == t {
+            let l = g.pool[k].1
+            g.pool[k] = g.pool[len(g.pool) - 1]
+            let _ = g.pool.pop()
+            g.live.push((t, l))
+            return l
+        }
+        k -= 1
+    }
     g.ltypes.push(t)
-    len(g.ltypes) - 1
+    let l = len(g.ltypes) - 1
+    g.live.push((t, l))
+    l
+}
+
+// The locals taken since `mark` are free again (their statement is over).
+fn free_locals(inout g: WGen, mark: i64) {
+    while len(g.live) > mark { g.pool.push(g.live.pop()) }
 }
 
 // ------------------------------------------------------------------ texts and messages
@@ -461,6 +491,12 @@ fn changes(e: H) -> bool {
     false
 }
 
+// The value of e (not in the heap) on the stack: -1 (nothing to drop after).
+fn gen_v(inout g: WGen, e: H) -> i64 {
+    gen(inout g, e)
+    -1
+}
+
 // Stores the owned value on the stack in variable `n`, dropping the value it had.
 fn set_slot(inout g: WGen, n: i64) {
     let l = g.slot_local[n]
@@ -583,8 +619,10 @@ fn bind_from(inout g: WGen, p: H, s: i64, t: Ty) {
 // ------------------------------------------------------------------ expressions
 
 fn gen_stmt(inout g: WGen, e: H) {
+    let mark = len(g.live)
     gen(inout g, e)
     drop_v(inout g, e.t)
+    free_locals(inout g, mark)
 }
 
 fn gen(inout g: WGen, e: H) {
@@ -811,7 +849,7 @@ fn gen(inout g: WGen, e: H) {
             tmps.push((gen_borrow(inout g, a.kids[0], safe), a.kids[0].t))
         }
         let name = g.ck.sigs[e.n].name
-        if starts_with(name, "wasm_") {
+        if is_intrinsic(g, e.n) {
             intrinsic(inout g, name, e)
         } else {
             call_f(inout g, fn_index(inout g, e.n))
@@ -1008,6 +1046,11 @@ fn float_op(inout g: WGen, o: str, e: H) {
 fn binary_w(inout g: WGen, e: H) {
     let a = e.kids[0]
     let b = e.kids[1]
+    if a.t == Ty.TStr and e.text == "+" {
+        // texts the compiler knows are joined when compiling
+        let c = const_text(e)
+        if c.0 { return i32c(inout g, intern_obj(inout g, c.1)) }
+    }
     if heap(a.t) {
         // values in the heap are borrowed by the operation
         let ta = gen_borrow(inout g, a, not changes(b))
@@ -1196,61 +1239,84 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "pop" { return pop_w(inout g, e) }
     if b == "remove" { return remove_w(inout g, e) }
     if starts_with(b, "put_") { return put_w(inout g, e) }
+    if b == "sort" or b == "reverse" { return sort_w(inout g, e) }
     for a in args {
         if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
     }
     if b == "print" {
+        // every value first (as the interpreter), then their texts
+        var locs: List[(i64, i64)] = []
+        for i in 0..len(args) {
+            let x = args[i].kids[0]
+            let w = vt_of(inout g, x)
+            if g.failed { return }
+            if x.kind == "lit" and starts_with(x.text, "str ") {
+                locs.push((-1, -1))
+                continue
+            }
+            var safe = true
+            for j in i + 1..len(args) {
+                if changes(args[j]) { safe = false }
+            }
+            let t = if heap(x.t) { gen_borrow(inout g, x, safe) } else { gen_v(inout g, x) }
+            if w > 0 {
+                let l = new_local(inout g, w)
+                lset(inout g, l)
+                locs.push((l, t))
+            } else {
+                locs.push((-1, -1))
+            }
+        }
         for i in 0..len(args) {
             if i > 0 { emit_text(inout g, 1, " ") }
             let x = args[i].kids[0]
+            let l = locs[i].0
             let xt = vt(x.t)
             if x.kind == "lit" and starts_with(x.text, "str ") {
                 emit_text(inout g, 1, lit_text(x.text))
             } else if x.t == Ty.TStr {
-                let tx = gen_borrow(inout g, x, true)
+                lget(inout g, l)
                 call_f(inout g, f_print_str())
-                drop_tmp(inout g, tx, x.t)
             } else if heap(x.t) {
-                // a tuple or a struct: its text, as the interpreter writes it
-                let tx = gen_borrow(inout g, x, true)
+                // a tuple, a struct, a list...: its text, as the interpreter writes it
+                lget(inout g, l)
                 call_f(inout g, glue_fn(inout g, "show", x.t))
                 let st = new_local(inout g, wt_i32())
                 op_u(inout g, 34, st)
                 call_f(inout g, f_print_str())
                 drop_tmp(inout g, st, Ty.TStr)
-                drop_tmp(inout g, tx, x.t)
             } else if xt == wt_i64() {
-                gen(inout g, x)
+                lget(inout g, l)
                 call_f(inout g, f_print_i64())
             } else if xt == wt_f64() {
-                gen(inout g, x)
+                lget(inout g, l)
                 call_f(inout g, rt_fn(inout g, "rt_fmt_f64"))
+                let st = new_local(inout g, wt_i32())
+                op_u(inout g, 34, st)
                 call_f(inout g, f_print_str())
+                drop_tmp(inout g, st, Ty.TStr)
             } else if xt == wt_i32() {
-                gen(inout g, x)
+                lget(inout g, l)
                 open(inout g, 4, 0)
                 emit_text(inout g, 1, "true")
                 else_(inout g)
                 emit_text(inout g, 1, "false")
                 close(inout g)
             } else if x.t == Ty.TUnit {
-                gen(inout g, x)
                 emit_text(inout g, 1, "()")
             } else {
                 return wg_fail(inout g, x, "printing values of type `" + show(g.ck, x.t) + "`")
             }
         }
         emit_text(inout g, 1, from_codes([10]))
+        for i in 0..len(locs) { drop_tmp(inout g, locs[i].1, args[i].kids[0].t) }
         return
     }
     if b == "assert" {
+        if len(args) == 2 and not const_text(args[1].kids[0]).0 { return assert_dyn(inout g, e) }
         gen(inout g, args[0].kids[0])
         var msg = "assertion failed"
-        if len(args) == 2 {
-            let m = args[1].kids[0]
-            if not (m.kind == "lit" and starts_with(m.text, "str ")) { return wg_fail(inout g, m, "an assertion message that is not a literal") }
-            msg = unhex(substr(m.text, 4, len(m.text)))
-        }
+        if len(args) == 2 { msg = const_text(args[1].kids[0]).1 }
         op(inout g, 69)
         open(inout g, 4, 0)
         fail_at_rt(inout g, e, "R0003", msg, "")
@@ -1386,7 +1452,8 @@ fn builtin_w(inout g: WGen, e: H) {
     }
     // functions of the runtime on texts and lists, which borrow their arguments
     let on_rt = [("join", "rt_join"), ("codes", "rt_codes"), ("starts_with", "rt_starts_with"), ("ends_with", "rt_ends_with"),
-        ("find", "rt_find"), ("file_exists", "rt_file_exists"), ("file_size", "rt_file_size"), ("env", "rt_env")]
+        ("find", "rt_find"), ("file_exists", "rt_file_exists"), ("file_size", "rt_file_size"), ("env", "rt_env"), ("trim", "rt_trim"),
+        ("replace", "rt_replace"), ("to_hex", "rt_to_hex"), ("parse_float", "rt_parse_float")]
     for r in on_rt {
         if b == r.0 { return call_rt_borrowing(inout g, r.1, args) }
     }
@@ -1456,6 +1523,15 @@ fn builtin_w(inout g: WGen, e: H) {
         lget(inout g, o)
         call_f(inout g, rt_fn(inout g, "rt_from_codes"))
         return drop_tmp(inout g, t0, a0.t)
+    }
+    if b == "parse_int" { return parse_int_w(inout g, e) }
+    let classes = ["is_alphabetic", "is_alphanumeric", "is_uppercase", "is_whitespace"]
+    for k in 0..4 {
+        if b == classes[k] {
+            gen(inout g, args[0].kids[0])
+            i64c(inout g, k)
+            return call_f(inout g, rt_fn(inout g, "rt_uni_in"))
+        }
     }
     if b == "len" and args[0].kids[0].t == Ty.TStr {
         let ts = gen_borrow(inout g, args[0].kids[0], true)
@@ -1753,7 +1829,10 @@ fn for_list(inout g: WGen, e: H) {
     gen(inout g, xs)
     let o = new_local(inout g, wt_i32())
     lset(inout g, o)
+    // the index starts at 0 each time the loop runs (a loop inside another runs again)
     let i = new_local(inout g, wt_i64())
+    i64c(inout g, 0)
+    lset(inout g, i)
     let x = new_local(inout g, if w > 0 { w } else { wt_i32() })
     open(inout g, 2, 0)
     let exit = g.depth
@@ -2898,6 +2977,91 @@ fn glue_unique_bytes(inout g: WGen) {
     lget(inout g, q)
 }
 
+// ------------------------------------------------------------------ more builtins
+
+// A text the compiler knows: a literal, or literals joined with `+` (one constant in the data).
+fn const_text(e: H) -> (bool, str) {
+    if e.kind == "lit" and starts_with(e.text, "str ") { return (true, lit_text(e.text)) }
+    if e.kind == "binary" and e.text == "+" and e.t == Ty.TStr {
+        let a = const_text(e.kids[0])
+        if not a.0 { return a }
+        let b = const_text(e.kids[1])
+        if not b.0 { return b }
+        return (true, a.1 + b.1)
+    }
+    (false, "")
+}
+
+// `assert(c, message)` with a message made when the program runs: the message is made first (as
+// the interpreter does), and shown only when c is false.
+fn assert_dyn(inout g: WGen, e: H) {
+    gen(inout g, e.kids[0].kids[0])
+    let c = new_local(inout g, wt_i32())
+    lset(inout g, c)
+    gen(inout g, e.kids[1].kids[0])
+    let m = new_local(inout g, wt_i32())
+    lset(inout g, m)
+    lget(inout g, c)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    fail_dyn2(inout g, e, "R0003", ["", ""], [(m, "rt_str_same")])
+    close(inout g)
+    lget(inout g, m)
+    drop_v(inout g, Ty.TStr)
+}
+
+// `parse_int(s)`: R0010 with the text, as Rust writes it with {:?}, when it is not an integer
+fn parse_int_w(inout g: WGen, e: H) {
+    let x = e.kids[0].kids[0]
+    let tx = gen_borrow(inout g, x, true)
+    let s = new_local(inout g, wt_i32())
+    op_u(inout g, 34, s)
+    call_f(inout g, rt_fn(inout g, "rt_parse_int"))
+    let t = new_local(inout g, wt_i32())
+    lset(inout g, t)
+    lget(inout g, t)
+    load_at(inout g, wt_i32(), 8)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    fail_dyn2(inout g, e, "R0010", ["not an integer: ", ""], [(s, "rt_str_debug")])
+    close(inout g)
+    lget(inout g, t)
+    load_at(inout g, wt_i64(), 16)
+    lget(inout g, t)
+    drop_v(inout g, Ty.TTuple([Ty.TBool, Ty.TInt]))
+    drop_tmp(inout g, tx, x.t)
+}
+
+// The kind rt_sort compares by (-1: not a kind it sorts).
+fn sort_kind(t: Ty) -> i64 {
+    if t == Ty.TInt { return 0 }
+    if t == Ty.TFloat { return 1 }
+    if t == Ty.TBool { return 2 }
+    if t == Ty.TStr { return 3 }
+    -1
+}
+
+// `sort(inout xs)` and `reverse(inout xs)`: the list made unique, then changed in place
+fn sort_w(inout g: WGen, e: H) {
+    let c = place_cell(inout g, e.kids[0].kids[0], false)
+    if g.failed { return }
+    let kind = sort_kind(elem_ty(g, c.ty))
+    if e.text == "sort" and kind < 0 { return wg_fail(inout g, e, "sorting lists of `" + show(g.ck, elem_ty(g, c.ty)) + "`") }
+    cell_load(inout g, c)
+    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    cell_store(inout g, c)
+    lget(inout g, o)
+    op(inout g, 173)
+    if e.text == "sort" {
+        i64c(inout g, kind)
+        call_f(inout g, rt_fn(inout g, "rt_sort"))
+    } else {
+        call_f(inout g, rt_fn(inout g, "rt_reverse"))
+    }
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -2911,6 +3075,8 @@ fn gen_glue(inout g: WGen, j: i64) {
     g.ltypes = []
     g.slot_local = []
     g.slot_ty = []
+    g.live = []
+    g.pool = []
     g.inout_slots = []
     g.nparams = 0
     g.depth = 0
@@ -3336,6 +3502,8 @@ fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
     g.ltypes = []
     g.slot_local = []
     g.slot_ty = []
+    g.live = []
+    g.pool = []
     g.inout_slots = []
     g.nparams = np
     g.depth = 0
@@ -3554,7 +3722,7 @@ fn runtime_fns(inout g: WGen) {
 fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     var g = WGen {
         m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:],
-        code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
+        code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], live: [], pool: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
         efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()
