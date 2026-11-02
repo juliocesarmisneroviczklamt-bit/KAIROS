@@ -1,0 +1,5 @@
+// M10: bits of an i64, arithmetic that wraps around, hex, file size and date.
+print(bit_and(12, 10), bit_or(12, 10), bit_xor(12, 10), shl(1, 40), shr(-1, 60))   // out: 8 14 6 1099511627776 15
+print(wrapping_add(9223372036854775807, 1), wrapping_mul(-3750763034362895579, 1099511628211))   // out: -9223372036854775808 -5808590958014384161
+print(to_hex(255, 4), to_hex(-1, 0), to_hex(bit_and(-3750763034362895579, 4294967295), 8))   // out: 00ff ffffffffffffffff 84222325
+print(file_size("this/file/does/not/exist"), file_date("this/file/does/not/exist"))   // out: -1 0

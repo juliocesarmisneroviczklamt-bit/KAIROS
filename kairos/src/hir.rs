@@ -110,6 +110,24 @@ pub enum Builtin {
     GetStr,
     WriteBytes,
     ReadBytes,
+    /// bits of an i64 (two's complement): `bit_and/or/xor(a, b)`, `shl(a, n)`, `shr(a, n)`
+    /// (logical), and arithmetic that wraps around instead of failing: `wrapping_add/mul`
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    WrappingAdd,
+    WrappingMul,
+    /// `to_hex(x, width)`: lowercase hex of the 64 bits, zero-padded to `width`
+    ToHex,
+    /// `file_size(p)` (-1 when missing), `file_date(p)`: the day it was last written (UTC,
+    /// YYYYMMDD; 0 when missing)
+    FileSize,
+    FileDate,
+    /// `http_get_all(urls, parallel)`: GETs, `parallel` at a time, in order:
+    /// `(true, body)` or `(false, what went wrong)`
+    HttpGetAll,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -236,6 +254,17 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("get_str", Builtin::GetStr),
     ("write_bytes", Builtin::WriteBytes),
     ("read_bytes", Builtin::ReadBytes),
+    ("bit_and", Builtin::BitAnd),
+    ("bit_or", Builtin::BitOr),
+    ("bit_xor", Builtin::BitXor),
+    ("shl", Builtin::Shl),
+    ("shr", Builtin::Shr),
+    ("wrapping_add", Builtin::WrappingAdd),
+    ("wrapping_mul", Builtin::WrappingMul),
+    ("to_hex", Builtin::ToHex),
+    ("file_size", Builtin::FileSize),
+    ("file_date", Builtin::FileDate),
+    ("http_get_all", Builtin::HttpGetAll),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

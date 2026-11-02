@@ -1,0 +1,39 @@
+// How B3 and the Central Bank write numbers and dates, read exactly as the lab's Rust does.
+
+// Rust's `parse::<u32>()`: an optional +, then digits; -1 when it is not one
+fn parse_u32(s: str) -> i64 {
+    let c = codes(s)
+    var k = 0
+    if len(c) > 0 and c[0] == 43 { k = 1 }
+    if k >= len(c) { return -1 }
+    var v = 0
+    for j in k..len(c) {
+        if c[j] < 48 or c[j] > 57 { return -1 }
+        v = v * 10 + (c[j] - 48)
+        if v > 4294967295 { return -1 }
+    }
+    v
+}
+
+// "dd/mm/yyyy" -> YYYYMMDD; 0 when it is not a date (sentinels such as 31/12/9999 included)
+fn parse_ddmmyyyy(s: str) -> i64 {
+    let p = split(trim(s), "/")
+    if len(p) < 3 { return 0 }
+    let d = parse_u32(trim(p[0]))
+    let m = parse_u32(trim(p[1]))
+    let y3 = trim(p[2])
+    if utf8_len(y3) < 4 { return 0 }
+    let y = parse_u32(substr(y3, 0, 4))
+    if d < 0 or m < 0 or y < 0 { return 0 }
+    if y < 1900 or y > 2100 or m < 1 or m > 12 or d < 1 or d > 31 { return 0 }
+    y * 10000 + m * 100 + d
+}
+
+// a number as B3 writes it ("1.234,56"; without a comma, the usual way); NaN when it is not one
+fn parse_br_num(s: str) -> f64 {
+    let t = trim(s)
+    if t == "" { return nan }
+    let u = if contains(t, ",") { replace(replace(replace(t, ".", ""), " ", ""), ",", ".") } else { t }
+    let x = parse_float(u)
+    if is_nan(x - x) { nan } else { x }
+}

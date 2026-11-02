@@ -1,0 +1,34 @@
+// The daily update of the lab's data, in Kairós (what quant-b3's paper trading does before it
+// trades): this year's COTAHIST (and last year's in January), the bar store, the events of the
+// liquid stocks, the end of the CDI, the IPCA and NEFIN once a month, and the panel.
+//
+//   kairos run kairos/lab/update.krs [data] [results]
+import "panel.krs"
+import "b3api.krs"
+import "macro.krs"
+
+let data = if len(args()) > 0 { args()[0] } else { "data" }
+let results = if len(args()) > 1 { args()[1] } else { "results" }
+let now = today()
+let y = date_year(now)
+let from = if date_month(now) == 1 { y - 1 } else { y }
+let cot = data + "/raw/cotahist"
+assert(fetch_cotahist(cot, from, y) == 0, "COTAHIST: downloads falharam")
+let store = ingest_all(cot)
+write_bytes(data + "/processed/bars.bin", encode(store.0))
+refresh_active(store.0, data + "/raw/b3", 4)
+fetch_cdi_recent(data + "/raw/bcb")
+let marker = data + "/raw/bcb/.mensal_" + str(date_ym(now))
+if not file_exists(marker) {
+    fetch_ipca(data + "/raw/bcb")
+    fetch_nefin(data + "/raw/nefin")
+    write_text(marker, "")
+}
+let ev = load_events(store.0, data + "/raw/b3")
+let p = build_panel(store.0, ev.0)
+make_dir(results + "/diag")
+write_text(results + "/diag/splits_inferidos.csv", p.3[0])
+write_text(results + "/diag/movimentos_extremos.csv", p.3[1])
+write_text(results + "/diag/residuos_eventos.csv", p.3[2])
+write_bytes(data + "/processed/panel.bin", encode_panel(p.0, p.1))
+print("Dados atualizados: " + str(len(p.1)) + " papéis, " + str(len(p.0)) + " pregões, o último em " + date_iso(p.0[len(p.0) - 1]))

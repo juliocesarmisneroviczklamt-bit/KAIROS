@@ -214,6 +214,7 @@ Módulos escritos em Kairós e embutidos no executável. Para usar, `import "std
 | `std/json.krs` | `enum Json`; `json_parse` (RFC 8259, inclusive caracteres acima de U+FFFF escritos como pares substitutos), `json_text`, `json_pretty`; leitura com `json_get`, `json_at`, `json_num`, `json_str`, `json_bool`, `json_list`, `json_keys` |
 | `std/csv.krs` | `csv_parse(texto, sep)`, `csv_records` (por nome de coluna), `csv_line` (RFC 4180: aspas, separador e quebra de linha dentro do campo) |
 | `std/dates.krs` | datas AAAAMMDD: `date_days`/`days_date` (dias desde 1970), `add_days`, `days_between`, `weekday`, `is_weekend`, `month_end`, `date_iso`, `date_from_iso`, `date_from_br` |
+| `std/base64.krs` | `base64_encode(bytes)`, `base64_text(texto)` e `base64_decode(texto)` (RFC 4648) |
 
 - **JSON malformado** para o programa com R0003 e a posição do problema.
 - **Números inteiros** são escritos sem casas decimais (`202611`), para que outros programas leiam `inicio_mes` como inteiro.
@@ -229,9 +230,27 @@ Para montar a base de dados em Kairós: os arquivos da B3 são texto de largura 
 | `bytes()` e `put_u8/u32/u64/i64/f64/str(inout b, x)` | dados binários, little-endian; valor que não cabe no campo é R0014; `utf8_len(s)` dá o número de bytes do texto |
 | `get_u8/u32/u64/i64/f64(b, pos)`, `get_str(b, pos, n)` | leitura numa posição; fora dos limites é R0001 |
 | `write_bytes(p, b)`, `read_bytes(p)` | o arquivo inteiro |
+| `put_f32(inout b, x)`, `get_f32(b, pos)` | f32, arredondado como o `x as f32` do Rust |
+| `bit_and/or/xor(a, b)`, `shl(a, n)`, `shr(a, n)` | os bits de um `i64`; `shr` é lógico; deslocamento fora de 0..63 é R0014 |
+| `wrapping_add(a, b)`, `wrapping_mul(a, b)` | aritmética que dá a volta em vez de falhar (para hashes como o FNV-1a) |
+| `to_hex(x, largura)` | hexadecimal minúsculo dos 64 bits, com zeros à esquerda |
+| `file_size(p)`, `file_date(p)` | tamanho (−1 se não existe) e dia da última gravação (UTC, AAAAMMDD; 0 se não existe) |
+| `http_get_all(urls, n)` | vários GETs, `n` de cada vez, na ordem: `(true, corpo)` ou `(false, o erro)` |
+
+**A base de dados do laboratório, montada em Kairós** ([`lab/`](../lab)):
+
+| programa | o que faz (comando do `quant-b3` que substitui) |
+|---|---|
+| `fetch_cotahist.krs` | baixa os ZIPs anuais da B3 que ainda não estão completos (`fetch-cotahist`) |
+| `ingest.krs` | COTAHIST → `bars.bin` (`ingest`) |
+| `fetch_events.krs` | eventos da API da B3, com 4 requisições em paralelo, num cache igual ao do Rust (`fetch-events`) |
+| `fetch_macro.krs` | CDI, IPCA e fatores do NEFIN (`fetch-macro`) |
+| `build.krs` | eventos + `bars.bin` → `panel.bin` e diagnósticos (`build`) |
+| `update.krs` | a atualização diária que o paper trading faz antes de operar |
 
 - **COTAHIST em Kairós:** [`lab/ingest.krs`](../lab/ingest.krs) lê os 32 ZIPs anuais e grava o mesmo `bars.bin` do Rust, byte a byte (220 MB, 2,3 milhões de pregões, 2.241 séries, 381 trocas de código encadeadas por ISIN), em 42 s.
 - **Eventos e painel em Kairós:** [`lab/build.krs`](../lab/build.krs), com [`events.krs`](../lab/events.krs) e [`panel.krs`](../lab/panel.krs), lê os 2.632 arquivos de eventos da B3 e monta o retorno total diário. O `panel.bin` (80 MB) e os três CSVs de diagnóstico saem iguais aos do Rust, byte a byte, em 16 s. Isso inclui proventos, JCP, desdobramentos e grupamentos (os da B3, os inferidos e os descartados), cisões, subscrições e a neutralização de saltos sem explicação. Reproduz até o jeito do `serde` de ignorar um arquivo inteiro quando um campo vem com o tipo errado.
+- **Downloads em Kairós:** os 16 arquivos de eventos de uma base de 6 ações e o ZIP da COTAHIST 1995 saem iguais aos baixados pelo Rust, byte a byte, e o nome de cada arquivo de cache (o `slug`, com hash FNV-1a) é o mesmo nos 2.632 arquivos.
 - **`std/json.krs`** ganhou `json_try(texto) -> (bool, Json)`, que devolve o erro em vez de parar o programa.
 - **`substr` em texto ASCII** corta os bytes direto, sem percorrer os caracteres.
 

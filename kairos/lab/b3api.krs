@@ -1,0 +1,211 @@
+// B3's corporate-events API in Kairós (quant-b3 b3events `fetch` and `refresh_active`). The
+// answers are cached in data/raw/b3: one file per company (stock events and subscriptions) and
+// one per trading name (cash), written as the lab writes them (serde_json: compact, keys in
+// alphabetical order), so both read the same cache.
+import "std/json.krs"
+import "std/base64.krs"
+import "std/dates.krs"
+import "bars.krs"
+
+fn b3_base() -> str {
+    "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall"
+}
+
+// A safe file name plus a short hash (the lab's `slug`): ASCII letters and digits kept, every
+// other character `_`, then 8 hex digits of FNV-1a (64 bits) of the UTF-8 bytes.
+fn slug(s: str) -> str {
+    var base = []
+    for c in codes(s) {
+        let alnum = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+        base.push(if alnum { c } else { 95 })
+    }
+    var b = bytes()
+    b.put_str(s)
+    var h = -3750763034362895579        // 0xcbf29ce484222325
+    for i in 0..len(b) {
+        h = wrapping_mul(bit_xor(h, get_u8(b, i)), 1099511628211)   // 0x100000001b3
+    }
+    from_codes(base) + "_" + to_hex(bit_and(h, 4294967295), 8)
+}
+
+fn supp_name(issuer: str) -> str {
+    "supp_" + slug(issuer) + ".json"
+}
+
+fn cash_name(trading: str) -> str {
+    "cash_" + slug(trading) + ".json"
+}
+
+// serde_json's compact text: its maps keep their keys in alphabetical order
+fn json_sorted(v: Json) -> str {
+    match v {
+        Arr(xs) => {
+            var parts = []
+            for x in xs { parts.push(json_sorted(x)) }
+            "[" + join(parts, ",") + "]"
+        },
+        Obj(m) => {
+            var ks = keys(m)
+            ks.sort()
+            var parts = []
+            for k in ks { parts.push(json_quote(k) + ":" + json_sorted(m[k])) }
+            "{" + join(parts, ",") + "}"
+        },
+        _ => json_text(v),
+    }
+}
+
+fn supp_url(issuer: str) -> str {
+    let q: Map[str, Json] = ["issuingCompany": Json.Str(issuer), "language": Json.Str("pt-br")]
+    b3_base() + "/GetListedSupplementCompany/" + base64_text(json_sorted(Json.Obj(q)))
+}
+
+fn cash_url(trading: str, page: i64) -> str {
+    let q: Map[str, Json] = ["language": Json.Str("pt-br"), "pageNumber": Json.Num(float(page)), "pageSize": Json.Num(120.0), "tradingName": Json.Str(trading)]
+    b3_base() + "/GetListedCashDividends/" + base64_text(json_sorted(Json.Obj(q)))
+}
+
+// Downloads the companies' stock events and the trading names' cash payments, `workers` at a
+// time; a job that fails writes nothing (run it again: only what is missing is fetched). The
+// number of failures.
+fn fetch_jobs(issuers: List[str], names: List[str], dir: str, workers: i64) -> i64 {
+    print("Eventos B3: " + str(len(issuers) + len(names)) + " requisições (" + str(workers) + " em paralelo)")
+    var fails = []
+    // the companies: one request each
+    var urls = []
+    for i in issuers { urls.push(supp_url(i)) }
+    let got = http_get_all(urls, workers)
+    for k in 0..len(issuers) {
+        if not got[k].0 {
+            fails.push(got[k].1)
+            continue
+        }
+        var data = Json.Arr([])
+        if trim(got[k].1) != "" {
+            let r = json_try(got[k].1)
+            if not r.0 {
+                fails.push("supp " + issuers[k] + ": resposta não-JSON")
+                continue
+            }
+            data = r.1
+        }
+        let m: Map[str, Json] = ["issuer": Json.Str(issuers[k]), "data": data]
+        write_text(dir + "/" + supp_name(issuers[k]), json_sorted(Json.Obj(m)))
+    }
+    // the cash payments: page by page (120 per page, at most 60 pages)
+    var results: List[List[Json]] = []
+    var pages = []
+    var ok = []
+    for n in names {
+        results.push([])
+        pages.push(1)
+        ok.push(true)
+    }
+    var page = 1
+    while true {
+        var who = []
+        var purls = []
+        for k in 0..len(names) {
+            if ok[k] and page <= pages[k] {
+                who.push(k)
+                purls.push(cash_url(names[k], page))
+            }
+        }
+        if len(who) == 0 { break }
+        let res = http_get_all(purls, workers)
+        for j in 0..len(who) {
+            let k = who[j]
+            if not res[j].0 {
+                ok[k] = false
+                fails.push(res[j].1)
+                continue
+            }
+            if trim(res[j].1) == "" {
+                // no more pages
+                pages[k] = page - 1
+                continue
+            }
+            let r = json_try(res[j].1)
+            if not r.0 {
+                ok[k] = false
+                fails.push("cash " + names[k] + ": resposta não-JSON")
+                continue
+            }
+            let tp = json_num(json_get(json_get(r.1, "page"), "totalPages"))
+            pages[k] = if is_nan(tp) or tp < 0.0 or tp != floor(tp) { 1 } else { min(int(tp), 60) }
+            for x in json_list(json_get(r.1, "results")) { results[k].push(x) }
+        }
+        page += 1
+    }
+    for k in 0..len(names) {
+        if not ok[k] { continue }
+        let m: Map[str, Json] = ["tradingName": Json.Str(names[k]), "results": Json.Arr(results[k])]
+        write_text(dir + "/" + cash_name(names[k]), json_sorted(Json.Obj(m)))
+    }
+    if len(fails) > 0 {
+        print(str(len(fails)) + " falhas (rode de novo: só o que falta é baixado). Exemplos:")
+        for k in 0..min(5, len(fails)) { print("  " + fails[k]) }
+    }
+    len(fails)
+}
+
+fn sorted_unique(xs: List[str]) -> List[str] {
+    var s = xs
+    s.sort()
+    var out = []
+    for x in s {
+        if len(out) == 0 or out[len(out) - 1] != x { out.push(x) }
+    }
+    out
+}
+
+// Every company and trading name of the store (`refresh`: again, even those already cached).
+fn fetch_events(series: List[Series], dir: str, workers: i64, refresh: bool) -> i64 {
+    var issuers = []
+    var names = []
+    for s in series {
+        if s.class == "CI" { continue }
+        issuers.push(issuer_of(s.ticker))
+        for a in s.aliases { issuers.push(issuer_of(a)) }
+        for nm in s.names {
+            if nm.0 != "" { names.push(nm.0) }
+        }
+    }
+    var is = []
+    for i in sorted_unique(issuers) {
+        if refresh or not file_exists(dir + "/" + supp_name(i)) { is.push(i) }
+    }
+    var ns = []
+    for n in sorted_unique(names) {
+        if refresh or not file_exists(dir + "/" + cash_name(n)) { ns.push(n) }
+    }
+    fetch_jobs(is, ns, dir, workers)
+}
+
+// Again the events of the stocks traded and liquid in the last weeks, to catch newly announced
+// payments; at most once a day.
+fn refresh_active(series: List[Series], dir: str, workers: i64) -> i64 {
+    let now = today()
+    let marker = dir + "/.atualizado_" + str(now)
+    if file_exists(marker) { return 0 }
+    let cutoff = add_days(now, -45)
+    var issuers = []
+    var names = []
+    for s in series {
+        if s.class == "CI" or last_date(s) < cutoff { continue }
+        var v = []
+        for k in max(len(s.bars) - 21, 0)..len(s.bars) { v.push(s.bars[k].vol) }
+        v.sort()
+        if len(v) == 0 or v[len(v) / 2] < 200000.0 { continue }
+        issuers.push(issuer_of(s.ticker))
+        // the latest trading name (the last one, on a tie)
+        var best = -1
+        for k in 0..len(s.names) {
+            if best < 0 or s.names[k].2 >= s.names[best].2 { best = k }
+        }
+        if best >= 0 { names.push(s.names[best].0) }
+    }
+    let fails = fetch_jobs(sorted_unique(issuers), sorted_unique(names), dir, workers)
+    write_text(marker, "")
+    fails
+}

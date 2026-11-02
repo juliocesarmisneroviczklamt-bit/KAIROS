@@ -5,25 +5,10 @@ import "bars.krs"
 
 let raw = if len(args()) > 0 { args()[0] } else { "data/raw/cotahist" }
 let out_path = if len(args()) > 1 { args()[1] } else { "data/processed/bars.bin" }
-var files = []
-for f in list_dir(raw) {
-    if ends_with(lower(f), ".zip") { files.push(f) }
-}
-assert(len(files) > 0, "no COTAHIST in " + raw + " (run fetch-cotahist)")
-print("Lendo " + str(len(files)) + " arquivos COTAHIST...")
-var acc: Map[str, Acc] = [:]
-var total = 0
-for f in files {
-    let n = add_year(inout acc, raw + "/" + f)
-    total += n
-    print("  " + f + "  ações/units=" + str(n))
-}
-var series = []
-for (t, a) in items(acc) { series.push(to_series(t, a)) }
-let chained = chain_renames(series)
+let r = ingest_all(raw)
 var nbars = 0
-for s in chained.0 { nbars += len(s.bars) }
-print("Total: " + str(total) + " registros -> " + str(len(chained.0)) + " séries, " + str(nbars) + " pregões (" + str(len(chained.1)) + " trocas de código encadeadas por ISIN)")
-for k in 0..min(12, len(chained.1)) { print("  " + chained.1[k]) }
-write_bytes(out_path, encode(chained.0))
+for s in r.0 { nbars += len(s.bars) }
+print("Total: " + str(r.1) + " registros -> " + str(len(r.0)) + " séries, " + str(nbars) + " pregões (" + str(len(r.2)) + " trocas de código encadeadas por ISIN)")
+for k in 0..min(12, len(r.2)) { print("  " + r.2[k]) }
+write_bytes(out_path, encode(r.0))
 print("Gravado " + out_path)

@@ -267,6 +267,60 @@ fn chain_renames(series: List[Series]) -> (List[Series], List[str]) {
     (sorted, log)
 }
 
+// ------------------------------------------------------------------ the whole store
+
+// The yearly zips of `raw` (in name order) -> (the series by ticker, the records accepted, the
+// ticker changes chained).
+fn ingest_all(raw: str) -> (List[Series], i64, List[str]) {
+    var files = []
+    for f in list_dir(raw) {
+        if ends_with(lower(f), ".zip") { files.push(f) }
+    }
+    assert(len(files) > 0, "no COTAHIST in " + raw + " (run fetch_cotahist.krs)")
+    print("Lendo " + str(len(files)) + " arquivos COTAHIST...")
+    var acc: Map[str, Acc] = [:]
+    var total = 0
+    for f in files {
+        let n = add_year(inout acc, raw + "/" + f)
+        total += n
+        print("  " + f + "  ações/units=" + str(n))
+    }
+    var series = []
+    for (t, a) in items(acc) { series.push(to_series(t, a)) }
+    let chained = chain_renames(series)
+    (chained.0, total, chained.1)
+}
+
+// A yearly file already complete: a closed year downloaded after its end, or the current year
+// downloaded today.
+fn cotahist_complete(path: str, y: i64, now: i64) -> bool {
+    if file_size(path) < 1000 { return false }
+    let d = file_date(path)
+    if y < date_year(now) { d > y * 10000 + 1231 } else { d >= now }
+}
+
+// B3's yearly COTAHIST files from `from` to `to`, those not complete yet. The number of failures.
+fn fetch_cotahist(dir: str, from: i64, to: i64) -> i64 {
+    let now = today()
+    print("COTAHIST " + str(from) + ".." + str(to) + " -> " + dir)
+    make_dir(dir)
+    var fails = 0
+    for y in from..=to {
+        let dest = dir + "/COTAHIST_A" + str(y) + ".ZIP"
+        if cotahist_complete(dest, y, now) { continue }
+        let n = download("https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_A" + str(y) + ".ZIP", dest)
+        // B3 answers an HTML page for a year it does not have
+        let head = read_bytes(dest)
+        if len(head) < 2 or get_u8(head, 0) != 80 or get_u8(head, 1) != 75 {
+            print("  ERRO " + str(y) + ": não é ZIP")
+            fails += 1
+            continue
+        }
+        print("  " + str(y) + ": " + format_fixed(float(n) / 1000000.0, 1) + " MB")
+    }
+    fails
+}
+
 // ------------------------------------------------------------------ bincode
 
 fn put_text(inout b: Bytes, s: str) {

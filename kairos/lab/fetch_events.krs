@@ -1,0 +1,13 @@
+// B3's corporate events in Kairós (quant-b3 `fetch-events`): the companies and trading names
+// of the bar store not cached yet (`refresh`: all of them again; `active`: the liquid stocks of
+// the last weeks, once a day, as the daily paper trading does).
+//
+//   kairos run kairos/lab/fetch_events.krs [missing|refresh|active] [data]
+import "b3api.krs"
+
+let mode = if len(args()) > 0 { args()[0] } else { "missing" }
+let data = if len(args()) > 1 { args()[1] } else { "data" }
+let series = read_bars(data + "/processed/bars.bin")
+make_dir(data + "/raw/b3")
+let fails = if mode == "active" { refresh_active(series, data + "/raw/b3", 4) } else { fetch_events(series, data + "/raw/b3", 4, mode == "refresh") }
+print(if fails == 0 { "ok" } else { str(fails) + " falhas" })

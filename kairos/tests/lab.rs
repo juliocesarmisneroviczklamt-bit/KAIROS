@@ -612,3 +612,25 @@ fn the_panel_build_in_kairos_writes_the_rust_panel() {
         assert!(got == want, "panel.bin differs ({} bytes written, {} expected)", got.len(), want.len());
     })
 }
+
+/// The names of B3's cached answers (lab/b3api.krs `slug`: ASCII letters and digits, then 8 hex
+/// digits of FNV-1a over the UTF-8 bytes, with 64-bit wrapping arithmetic) are quant-b3's.
+#[test]
+fn the_cache_names_in_kairos_are_the_rust_ones() {
+    on_big_stack_with(|| {
+        let names = ["BRADESCO", "VALE R DOCE", "AÇÚCAR GUARANI", "BB", "PET", "", "Ö 1/2 & ç", "ITAUUNIBANCO"];
+        let mut src = String::from("import \"b3api.krs\"\n");
+        for n in names {
+            src.push_str(&format!("print(slug({n:?}))\n"));
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lab").join("_slugs.krs");
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut s = Session::new(Box::new(Buf(buf.clone())));
+        if let Err(e) = s.run(&path.to_string_lossy(), &src) {
+            panic!("{}", s.render(&e));
+        }
+        let got = String::from_utf8(buf.borrow().clone()).unwrap();
+        let want: String = names.iter().map(|n| format!("{}\n", quant_b3::util::slug(n))).collect();
+        assert_eq!(got, want);
+    })
+}

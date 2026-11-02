@@ -1,73 +1,7 @@
-// Macro data in Kairós (quant-b3 `fetch-macro`): the daily CDI and the monthly IPCA from the
-// Central Bank of Brazil (SGS series 12 and 433), and NEFIN-USP's risk factors.
+// Macro data in Kairós (quant-b3 `fetch-macro`): the whole CDI, the IPCA and NEFIN's factors.
 //
 //   kairos run kairos/lab/fetch_macro.krs [data/raw]
-//
-// Writes bcb/cdi.csv, bcb/ipca.csv and nefin/*.csv under the folder, as the lab reads them.
-import "std/json.krs"
-import "std/dates.krs"
-
-// an f64 as Rust prints it (`{}`): whole numbers without decimals
-fn plain(x: f64) -> str {
-    if x == floor(x) and abs(x) < 10000000000000000.0 { return str(int(x)) }
-    str(x)
-}
-
-// dd/mm/yyyy, as the SGS API wants dates
-fn br(d: i64) -> str {
-    date_two(date_day(d)) + "/" + date_two(date_month(d)) + "/" + str(date_year(d))
-}
-
-fn sgs(series: i64, from: str, to: str) -> List[Json] {
-    let url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs." + str(series) + "/dados?formato=json&dataInicial=" + from + "&dataFinal=" + to
-    json_list(json_parse(http_get(url)))
-}
-
-// The API limits daily series to 10-year windows: blocks of 5.
-fn fetch_cdi(dir: str, from_year: i64) {
-    let now = today()
-    let last_year = date_year(now)
-    var out = ["data,cdi_pct_dia"]
-    var y = from_year
-    var n = 0
-    while y <= last_year {
-        let y2 = min(y + 4, last_year)
-        let end = if y2 == last_year { br(now) } else { "31/12/" + str(y2) }
-        for it in sgs(12, "01/01/" + str(y), end) {
-            let d = json_str(json_get(it, "data"))
-            let v = parse_float(json_str(json_get(it, "valor")))
-            if d != "" and not is_nan(v) {
-                out.push(str(date_from_br(d)) + "," + plain(v))
-                n += 1
-            }
-        }
-        y = y2 + 1
-    }
-    write_text(dir + "/cdi.csv", join(out, "\n") + "\n")
-    print("  CDI: " + str(n) + " dias")
-}
-
-fn fetch_ipca(dir: str) {
-    var out = ["mes,ipca_pct_mes"]
-    var n = 0
-    for it in sgs(433, "01/01/1995", br(today())) {
-        let d = json_str(json_get(it, "data"))
-        let v = parse_float(json_str(json_get(it, "valor")))
-        if d != "" and not is_nan(v) {
-            out.push(str(date_ym(date_from_br(d))) + "," + plain(v))
-            n += 1
-        }
-    }
-    write_text(dir + "/ipca.csv", join(out, "\n") + "\n")
-    print("  IPCA: " + str(n) + " meses")
-}
-
-fn fetch_nefin(dir: str) {
-    for f in ["nefin_factors.csv", "nefin_factors_equally_weighted.csv", "nefin_factors_monthly.csv", "nefin_factors_equally_weighted_monthly.csv"] {
-        let n = download("https://nefin.com.br/nefindata/risk-factors/" + f, dir + "/" + f)
-        print("  NEFIN " + f + ": " + format_fixed(float(n) / 1000.0, 0) + " KB")
-    }
-}
+import "macro.krs"
 
 let root = if len(args()) > 0 { args()[0] } else { "data/raw" }
 make_dir(root + "/bcb")

@@ -1,0 +1,10 @@
+// B3's yearly COTAHIST files in Kairós (quant-b3 `fetch-cotahist`): the years not complete yet.
+//
+//   kairos run kairos/lab/fetch_cotahist.krs [from (1995)] [to (this year)] [data/raw/cotahist]
+import "bars.krs"
+
+let from = if len(args()) > 0 { parse_int(args()[0]) } else { 1995 }
+let to = if len(args()) > 1 { parse_int(args()[1]) } else { date_year(today()) }
+let dir = if len(args()) > 2 { args()[2] } else { "data/raw/cotahist" }
+let fails = fetch_cotahist(dir, from, to)
+assert(fails == 0, str(fails) + " downloads falharam")

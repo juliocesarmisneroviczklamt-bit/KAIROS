@@ -1,0 +1,14 @@
+// M10: Base64 written in Kairós (std/base64.krs), RFC 4648's test vectors.
+import "std/base64.krs"
+for t in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {
+    print("[" + base64_text(t) + "]")
+}
+// out: []
+// out: [Zg==]
+// out: [Zm8=]
+// out: [Zm9v]
+// out: [Zm9vYg==]
+// out: [Zm9vYmE=]
+// out: [Zm9vYmFy]
+let b = base64_decode(base64_text("ação"))
+print(len(b), get_str(b, 0, len(b)))   // out: 6 ação

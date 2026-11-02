@@ -1,0 +1,68 @@
+// Base64 (RFC 4648, standard alphabet, with padding), written in Kairós:
+// `import "std/base64.krs"`.
+//
+//   base64_encode(b: Bytes) -> str
+//   base64_text(s) -> str          the Base64 of the text's UTF-8 bytes
+//   base64_decode(s) -> Bytes      stops the program (R0003) when `s` is not Base64
+
+fn b64_alphabet() -> List[i64] {
+    codes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+}
+
+fn base64_encode(b: Bytes) -> str {
+    let a = b64_alphabet()
+    let n = len(b)
+    var out = []
+    var i = 0
+    while i + 2 < n {
+        let x = get_u8(b, i) * 65536 + get_u8(b, i + 1) * 256 + get_u8(b, i + 2)
+        out.push(a[x / 262144])
+        out.push(a[(x / 4096) % 64])
+        out.push(a[(x / 64) % 64])
+        out.push(a[x % 64])
+        i += 3
+    }
+    if n - i == 1 {
+        let x = get_u8(b, i) * 65536
+        for c in [a[x / 262144], a[(x / 4096) % 64], 61, 61] { out.push(c) }
+    } else if n - i == 2 {
+        let x = get_u8(b, i) * 65536 + get_u8(b, i + 1) * 256
+        for c in [a[x / 262144], a[(x / 4096) % 64], a[(x / 64) % 64], 61] { out.push(c) }
+    }
+    from_codes(out)
+}
+
+fn base64_text(s: str) -> str {
+    var b = bytes()
+    b.put_str(s)
+    base64_encode(b)
+}
+
+fn base64_decode(s: str) -> Bytes {
+    var value: Map[i64, i64] = [:]
+    let a = b64_alphabet()
+    for k in 0..64 { value[a[k]] = k }
+    var vals = []
+    var pad = 0
+    for c in codes(s) {
+        if c == 61 {
+            pad += 1
+        } else {
+            assert(pad == 0 and contains(value, c), "base64: not Base64 text")
+            vals.push(value[c])
+        }
+    }
+    assert((len(vals) + pad) % 4 == 0 and pad <= 2, "base64: the length is not a multiple of 4")
+    var out = bytes()
+    var i = 0
+    while i < len(vals) {
+        let k = min(4, len(vals) - i)
+        var x = 0
+        for j in 0..4 { x = x * 64 + (if j < k { vals[i + j] } else { 0 }) }
+        out.put_u8(x / 65536)
+        if k > 2 { out.put_u8((x / 256) % 256) }
+        if k > 3 { out.put_u8(x % 256) }
+        i += 4
+    }
+    out
+}

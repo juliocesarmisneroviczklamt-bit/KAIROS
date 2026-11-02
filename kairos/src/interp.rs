@@ -123,6 +123,32 @@ fn read_lines_kept(path: &str, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec
     Ok(out)
 }
 
+/// GETs `parallel` at a time (each one a `curl`), in the order given.
+fn curl_all(urls: &[String], parallel: usize) -> Vec<Result<Vec<u8>, String>> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let out: Mutex<Vec<Option<Result<Vec<u8>, String>>>> = Mutex::new(vec![None; urls.len()]);
+    let next = AtomicUsize::new(0);
+    let work = || loop {
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        if i >= urls.len() {
+            return;
+        }
+        let r = curl(&urls[i], None);
+        out.lock().expect("results")[i] = Some(r);
+    };
+    if cfg!(target_family = "wasm") || parallel <= 1 {
+        work();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..parallel.min(32) {
+                s.spawn(work);
+            }
+        });
+    }
+    out.into_inner().expect("results").into_iter().map(|r| r.unwrap_or_else(|| Err("not run".into()))).collect()
+}
+
 /// `n` bytes of `b` from `at`, or R0001.
 fn bytes_at(b: &[u8], at: i64, n: usize, sp: Span) -> R<&[u8]> {
     let ok = usize::try_from(at).ok().and_then(|a| b.get(a..a.checked_add(n)?));
@@ -865,6 +891,53 @@ impl<'a> Interp<'a> {
                 }
             }
             Builtin::BytesNew => Ok(Value::Bytes(Rc::new(Vec::new()))),
+            Builtin::BitAnd | Builtin::BitOr | Builtin::BitXor | Builtin::WrappingAdd | Builtin::WrappingMul => {
+                let (a, c) = (as_int(v[0].clone()), as_int(v[1].clone()));
+                Ok(Value::Int(match b {
+                    Builtin::BitAnd => a & c,
+                    Builtin::BitOr => a | c,
+                    Builtin::BitXor => a ^ c,
+                    Builtin::WrappingAdd => a.wrapping_add(c),
+                    _ => a.wrapping_mul(c),
+                }))
+            }
+            Builtin::Shl | Builtin::Shr => {
+                let (a, n) = (as_int(v[0].clone()), as_int(v[1].clone()));
+                if !(0..64).contains(&n) {
+                    return err("R0014", sp, format!("shift by {n}: it must be from 0 to 63"));
+                }
+                Ok(Value::Int(if b == Builtin::Shl { ((a as u64) << n) as i64 } else { ((a as u64) >> n) as i64 }))
+            }
+            Builtin::ToHex => {
+                let (x, w) = (as_int(v[0].clone()), as_int(v[1].clone()).clamp(0, 64) as usize);
+                Ok(Value::Str(format!("{:0w$x}", x as u64).into()))
+            }
+            Builtin::FileSize => Ok(Value::Int(std::fs::metadata(str_of(&v[0])).map_or(-1, |m| m.len() as i64))),
+            Builtin::FileDate => {
+                let days = std::fs::metadata(str_of(&v[0]))
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| (d.as_secs() / 86_400) as i64);
+                Ok(Value::Int(days.map_or(0, |n| i64::from(quant_b3::util::from_days(n)))))
+            }
+            Builtin::HttpGetAll => {
+                let Value::List(us) = &v[0] else { unreachable!("http_get_all of a non-list") };
+                let urls: Vec<String> = us.iter().map(|u| str_of(u).to_string()).collect();
+                let par = as_int(v[1].clone()).max(1) as usize;
+                let res = curl_all(&urls, par);
+                Ok(Value::List(Rc::new(
+                    res.into_iter()
+                        .map(|r| {
+                            let (ok, text) = match r {
+                                Ok(bytes) => (true, decode_text(bytes)),
+                                Err(e) => (false, e),
+                            };
+                            Value::Tuple(Rc::new(vec![Value::Bool(ok), Value::Str(text.into())]))
+                        })
+                        .collect(),
+                )))
+            }
             Builtin::Utf8Len => Ok(Value::Int(str_of(&v[0]).len() as i64)),
             Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 | Builtin::GetF64 | Builtin::GetF32 | Builtin::GetStr => {
                 let Value::Bytes(bs) = &v[0] else { unreachable!("get from non-bytes") };

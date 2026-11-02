@@ -1896,6 +1896,15 @@ impl Checker {
             Builtin::GetStr => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int, Ty::Int], sp, name)?, Ty::Str),
             Builtin::WriteBytes => (self.fixed_args(&all, &[Ty::Str, Ty::Bytes], sp, name)?, Ty::Unit),
             Builtin::ReadBytes => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Bytes),
+            Builtin::BitAnd | Builtin::BitOr | Builtin::BitXor | Builtin::Shl | Builtin::Shr | Builtin::WrappingAdd | Builtin::WrappingMul => {
+                (self.fixed_args(&all, &[Ty::Int, Ty::Int], sp, name)?, Ty::Int)
+            }
+            Builtin::ToHex => (self.fixed_args(&all, &[Ty::Int, Ty::Int], sp, name)?, Ty::Str),
+            Builtin::FileSize | Builtin::FileDate => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
+            Builtin::HttpGetAll => (
+                self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Int], sp, name)?,
+                Ty::List(Box::new(Ty::Tuple(vec![Ty::Bool, Ty::Str]))),
+            ),
             Builtin::Download => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Int),
             Builtin::Keys | Builtin::Values | Builtin::Items | Builtin::Get | Builtin::Remove => {
                 arity(if b == Builtin::Get { 3 } else if b == Builtin::Remove { 2 } else { 1 })?;
