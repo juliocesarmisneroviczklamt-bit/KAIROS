@@ -1,0 +1,14 @@
+// The tokens of files, by the lexer written in Kairós (as `kairos tokens file.krs` prints them).
+//
+//   kairos run kairos/compiler/tokens.krs file.krs [more.krs ...]
+import "lexer.krs"
+
+for p in args() {
+    if len(args()) > 1 { print("== " + p) }
+    let r = lex(read_text(p))
+    if r.0 {
+        for t in r.1 { print(token_line(t)) }
+    } else {
+        print("error " + r.2.code + " " + str(r.2.lo) + " " + str(r.2.hi) + " " + r.2.msg)
+    }
+}

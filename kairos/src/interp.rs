@@ -912,6 +912,14 @@ impl<'a> Interp<'a> {
                 let (x, w) = (as_int(v[0].clone()), as_int(v[1].clone()).clamp(0, 64) as usize);
                 Ok(Value::Str(format!("{:0w$x}", x as u64).into()))
             }
+            Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace => {
+                let c = u32::try_from(as_int(v[0].clone())).ok().and_then(char::from_u32);
+                Ok(Value::Bool(c.is_some_and(|c| match b {
+                    Builtin::IsAlphabetic => c.is_alphabetic(),
+                    Builtin::IsAlphanumeric => c.is_alphanumeric(),
+                    _ => c.is_whitespace(),
+                })))
+            }
             Builtin::FileSize => Ok(Value::Int(std::fs::metadata(str_of(&v[0])).map_or(-1, |m| m.len() as i64))),
             Builtin::FileDate => {
                 let days = std::fs::metadata(str_of(&v[0]))

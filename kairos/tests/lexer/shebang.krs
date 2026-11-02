@@ -1,0 +1,2 @@
+#!/usr/bin/env kairos
+print(1)

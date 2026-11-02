@@ -46,6 +46,8 @@ fn real_main(args: Vec<String>) -> i32 {
         Some("check") => file_cmd(args.get(2), &[], false),
         Some("repl") | None => repl(),
         Some("ledger") => ledger_cmd(&args[2..]),
+        // the lexer's tokens, one per line (to compare with the lexer written in Kairós)
+        Some("tokens") => tokens_cmd(args.get(2)),
         Some("--version") | Some("-V") => {
             println!("kairos {}", env!("CARGO_PKG_VERSION"));
             0
@@ -59,6 +61,29 @@ fn real_main(args: Vec<String>) -> i32 {
             2
         }
     }
+}
+
+fn tokens_cmd(path: Option<&String>) -> i32 {
+    let Some(path) = path else {
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
+    match kairos::lexer::lex(&src, 0) {
+        Ok(toks) => {
+            for t in &toks {
+                println!("{}", kairos::lexer::canonical(t));
+            }
+        }
+        Err(d) => println!("error {} {} {} {}", d.code, d.span.lo, d.span.hi, d.msg),
+    }
+    0
 }
 
 fn file_cmd(path: Option<&String>, prog_args: &[String], run: bool) -> i32 {

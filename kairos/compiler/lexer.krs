@@ -1,0 +1,292 @@
+// The lexer of Kairós, written in Kairós (M12: the language implemented in itself). It is
+// src/lexer.rs, token for token: the same kinds, the same byte spans, the same errors.
+//
+// Go/Swift-style automatic semicolon insertion: a newline ends a statement when the previous
+// token can end one (identifier, literal, `)`, `]`, `}`, `return`, `break`, `continue`).
+// Newlines inside `( )` and `[ ]` are ignored, a line starting with `.` continues the previous
+// one, and no `;` is inserted before `}`, so the last line of a block stays its value.
+
+struct Token {
+    kind: str,          // "Ident", "Int", "Float", "Str", "Let", ..., "Semi", "Eof"
+    text: str,          // an identifier or a reserved word
+    int: i64,
+    float: f64,
+    chars: List[i64],   // a string's code points
+    lo: i64,            // byte offsets in the source
+    hi: i64,
+    nl: bool,           // a newline came before it
+}
+
+struct LexErr {
+    code: str,
+    lo: i64,
+    hi: i64,
+    msg: str,
+}
+
+fn lx_keywords() -> Map[str, str] {
+    ["let": "Let", "var": "Var", "fn": "Fn", "if": "If", "else": "Else", "match": "Match", "for": "For",
+     "in": "In", "while": "While", "break": "Break", "continue": "Continue", "return": "Return",
+     "struct": "Struct", "enum": "Enum", "inout": "Inout", "axis": "Axis", "protocol": "Protocol",
+     "import": "Import", "true": "True", "false": "False", "and": "And", "or": "Or", "not": "Not"]
+}
+
+// reserved for later milestones (axes, time, smooth, linear types, kernels...)
+fn lx_reserved() -> List[str] {
+    ["trait", "kernel", "compute", "schedule", "unsafe", "parallel", "smooth", "sink", "pub", "as", "loop", "type", "const", "use", "self"]
+}
+
+fn lx_token(kind: str, lo: i64, hi: i64, nl: bool) -> Token {
+    Token { kind: kind, text: "", int: 0, float: 0.0, chars: [], lo: lo, hi: hi, nl: nl }
+}
+
+fn lx_err(code: str, lo: i64, hi: i64, msg: str) -> (bool, List[Token], LexErr) {
+    let none: List[Token] = []
+    (false, none, LexErr { code: code, lo: lo, hi: hi, msg: msg })
+}
+
+fn lx_utf8_len(c: i64) -> i64 {
+    if c < 128 { 1 } else if c < 2048 { 2 } else if c < 65536 { 3 } else { 4 }
+}
+
+fn lx_digit(c: i64) -> bool {
+    c >= 48 and c <= 57
+}
+
+fn lx_text(cs: List[i64], a: i64, b: i64) -> str {
+    var buf = []
+    for k in a..b { buf.push(cs[k]) }
+    from_codes(buf)
+}
+
+// The value of up to 6 hex digits (an optional + first, as Rust's from_str_radix); -1 if not.
+fn lx_hex(h: List[i64]) -> i64 {
+    var k = 0
+    if len(h) > 0 and h[0] == 43 { k = 1 }
+    if k >= len(h) { return -1 }
+    var v = 0
+    for j in k..len(h) {
+        let c = h[j]
+        let d = if lx_digit(c) { c - 48 } else if c >= 97 and c <= 102 { c - 87 } else if c >= 65 and c <= 70 { c - 55 } else { -1 }
+        if d < 0 { return -1 }
+        v = v * 16 + d
+    }
+    v
+}
+
+// (ok, the tokens, the error)
+fn lex(src: str) -> (bool, List[Token], LexErr) {
+    let cs = codes(src)
+    let n = len(cs)
+    // the byte offset of every character (and of the end)
+    var boff = [0]
+    for k in 0..n { boff.push(boff[k] + lx_utf8_len(cs[k])) }
+    let kw = lx_keywords()
+    let reserved = lx_reserved()
+    let bs = from_codes([92])
+    var toks: List[Token] = []
+    var i = 0
+    var nl = false
+    // `#!/usr/bin/env kairos` on the first line: a .krs file can be an executable script
+    if starts_with(src, "#!") {
+        while i < n and cs[i] != 10 { i += 1 }
+    }
+    while i < n {
+        let start_i = i
+        let start = boff[i]
+        let c = cs[i]
+        if c == 10 {
+            nl = true
+            i += 1
+            continue
+        }
+        if is_whitespace(c) {
+            i += 1
+            continue
+        }
+        if c == 47 and i + 1 < n and cs[i + 1] == 47 {
+            while i < n and cs[i] != 10 { i += 1 }
+            continue
+        }
+        if c == 47 and i + 1 < n and cs[i + 1] == 42 {
+            i += 2
+            while i + 1 < n and not (cs[i] == 42 and cs[i + 1] == 47) {
+                if cs[i] == 10 { nl = true }
+                i += 1
+            }
+            if i + 1 >= n { return lx_err("E0001", start, start + 2, "unterminated block comment") }
+            i += 2
+            continue
+        }
+        var t = lx_token("", start, 0, nl)
+        if is_alphabetic(c) or c == 95 {
+            while i < n and (is_alphanumeric(cs[i]) or cs[i] == 95) { i += 1 }
+            let s = lx_text(cs, start_i, i)
+            if contains(kw, s) {
+                t.kind = kw[s]
+            } else if contains(reserved, s) {
+                t.kind = "Reserved"
+                t.text = s
+            } else {
+                t.kind = "Ident"
+                t.text = s
+            }
+        } else if lx_digit(c) {
+            var is_float = false
+            while i < n and (lx_digit(cs[i]) or cs[i] == 95) { i += 1 }
+            if i + 1 < n and cs[i] == 46 and lx_digit(cs[i + 1]) {
+                is_float = true
+                i += 1
+                while i < n and (lx_digit(cs[i]) or cs[i] == 95) { i += 1 }
+            }
+            if i < n and (cs[i] == 101 or cs[i] == 69) {
+                var j = i + 1
+                if j < n and (cs[j] == 43 or cs[j] == 45) { j += 1 }
+                if j < n and lx_digit(cs[j]) {
+                    is_float = true
+                    i = j
+                    while i < n and lx_digit(cs[i]) { i += 1 }
+                }
+            }
+            var digits = []
+            for k in start_i..i {
+                if cs[k] != 95 { digits.push(cs[k]) }
+            }
+            let hi = boff[i]
+            if is_float {
+                let x = parse_float(from_codes(digits))
+                if is_nan(x) { return lx_err("E0001", start, hi, "invalid number") }
+                t.kind = "Float"
+                t.float = x
+            } else {
+                var v = 0
+                for d in digits {
+                    if v > (9223372036854775807 - (d - 48)) / 10 { return lx_err("E0001", start, hi, "integer literal too large for `i64`") }
+                    v = v * 10 + (d - 48)
+                }
+                t.kind = "Int"
+                t.int = v
+            }
+        } else if c == 34 {
+            i += 1
+            var s = []
+            while true {
+                if i >= n { return lx_err("E0001", start, boff[n], "unterminated string") }
+                let ch = cs[i]
+                if ch == 34 {
+                    i += 1
+                    break
+                }
+                if ch == 92 and i + 1 < n {
+                    let e = cs[i + 1]
+                    // a Unicode code point in braces, 1 to 6 hex digits
+                    if e == 117 {
+                        if i + 2 >= n or cs[i + 2] != 123 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "invalid escape") }
+                        var j = i + 3
+                        var hex = []
+                        while j < n and cs[j] != 125 and len(hex) < 7 {
+                            hex.push(cs[j])
+                            j += 1
+                        }
+                        var v = -1
+                        if j < n and cs[j] == 125 and len(hex) >= 1 and len(hex) <= 6 { v = lx_hex(hex) }
+                        if v < 0 or v > 1114111 or (v >= 55296 and v <= 57343) { return lx_err("E0001", boff[i], boff[min(j + 1, n)], "invalid escape") }
+                        s.push(v)
+                        i = j + 1
+                        continue
+                    }
+                    let esc = if e == 110 { 10 } else if e == 116 { 9 } else if e == 114 { 13 } else if e == 48 { 0 } else if e == 34 { 34 } else if e == 92 { 92 } else { -1 }
+                    if esc < 0 { return lx_err("E0001", boff[i], boff[min(i + 2, n)], "unknown escape `" + bs + from_codes([e]) + "`") }
+                    s.push(esc)
+                    i += 2
+                    continue
+                }
+                s.push(ch)
+                i += 1
+            }
+            t.kind = "Str"
+            t.chars = s
+        } else {
+            let next = if i + 1 < n { cs[i + 1] } else { 0 }
+            let next2 = if i + 2 < n { cs[i + 2] } else { 0 }
+            let two = from_codes([c, next])
+            var kind = ""
+            var width = 2
+            if two == "->" { kind = "Arrow" }
+            else if two == "=>" { kind = "FatArrow" }
+            else if two == "==" { kind = "EqEq" }
+            else if two == "!=" { kind = "NotEq" }
+            else if two == "<=" { kind = "Le" }
+            else if two == ">=" { kind = "Ge" }
+            else if two == "+=" { kind = "PlusAssign" }
+            else if two == "-=" { kind = "MinusAssign" }
+            else if two == "*=" { kind = "StarAssign" }
+            else if two == "/=" { kind = "SlashAssign" }
+            else if two == ".." {
+                if next2 == 61 {
+                    kind = "DotDotEq"
+                    width = 3
+                } else {
+                    kind = "DotDot"
+                }
+            } else {
+                width = 1
+                let one: Map[i64, str] = [40: "LParen", 41: "RParen", 123: "LBrace", 125: "RBrace", 91: "LBracket", 93: "RBracket",
+                    44: "Comma", 58: "Colon", 59: "Semi", 46: "Dot", 124: "Pipe", 64: "At", 63: "Question", 43: "Plus",
+                    45: "Minus", 42: "Star", 47: "Slash", 37: "Percent", 94: "Caret", 61: "Assign", 60: "Lt", 62: "Gt"]
+                if c == 33 { return lx_err("E0001", start, start + 1, "unexpected `!`") }
+                if c == 38 { return lx_err("E0001", start, start + 1, "unexpected `&`") }
+                if not contains(one, c) { return lx_err("E0001", start, boff[min(i + 1, n)], "unexpected character `" + from_codes([c]) + "`") }
+                kind = one[c]
+            }
+            t.kind = kind
+            i += width
+        }
+        t.hi = boff[min(i, n)]
+        toks.push(t)
+        nl = false
+    }
+    toks.push(lx_token("Eof", boff[n], boff[n], nl))
+    (true, lx_semicolons(toks), LexErr { code: "", lo: 0, hi: 0, msg: "" })
+}
+
+fn lx_ends_statement(k: str) -> bool {
+    contains(["Ident", "Int", "Float", "Str", "True", "False", "RParen", "RBracket", "RBrace", "Return", "Break", "Continue", "Question"], k)
+}
+
+fn lx_semicolons(toks: List[Token]) -> List[Token] {
+    var out: List[Token] = []
+    var stack = []
+    for t in toks {
+        let active = len(stack) == 0 or stack[len(stack) - 1] == "{"
+        if t.nl and active and t.kind != "RBrace" and t.kind != "Dot" and len(out) > 0 {
+            let prev = out[len(out) - 1]
+            if lx_ends_statement(prev.kind) { out.push(lx_token("Semi", prev.hi, prev.hi, false)) }
+        }
+        if t.kind == "LParen" { stack.push("(") }
+        else if t.kind == "LBracket" { stack.push("[") }
+        else if t.kind == "LBrace" { stack.push("{") }
+        else if t.kind == "RParen" or t.kind == "RBracket" or t.kind == "RBrace" {
+            if len(stack) > 0 { let _ = stack.pop() }
+        }
+        out.push(t)
+    }
+    out
+}
+
+// A token as one line of text, as `kairos tokens` prints them.
+fn token_line(t: Token) -> str {
+    var kind = t.kind
+    if t.kind == "Int" {
+        kind = "Int(" + str(t.int) + ")"
+    } else if t.kind == "Float" {
+        kind = "Float(" + str(t.float) + ")"
+    } else if t.kind == "Str" {
+        var hs = []
+        for c in t.chars { hs.push(to_hex(c, 0)) }
+        kind = "Str(" + join(hs, " ") + ")"
+    } else if t.kind == "Ident" or t.kind == "Reserved" {
+        kind = t.kind + "(" + t.text + ")"
+    }
+    kind + " " + str(t.lo) + " " + str(t.hi) + (if t.nl { " nl" } else { "" })
+}

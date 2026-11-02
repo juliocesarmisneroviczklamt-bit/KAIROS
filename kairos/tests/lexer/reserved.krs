@@ -1,0 +1,2 @@
+let unsafe = 1
+fn self() {}

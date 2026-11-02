@@ -128,6 +128,11 @@ pub enum Builtin {
     /// `http_get_all(urls, parallel)`: GETs, `parallel` at a time, in order:
     /// `(true, body)` or `(false, what went wrong)`
     HttpGetAll,
+    /// Unicode classes of a code point (as Rust's `char`): `is_alphabetic(c)`,
+    /// `is_alphanumeric(c)`, `is_whitespace(c)`
+    IsAlphabetic,
+    IsAlphanumeric,
+    IsWhitespace,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -265,6 +270,9 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("file_size", Builtin::FileSize),
     ("file_date", Builtin::FileDate),
     ("http_get_all", Builtin::HttpGetAll),
+    ("is_alphabetic", Builtin::IsAlphabetic),
+    ("is_alphanumeric", Builtin::IsAlphanumeric),
+    ("is_whitespace", Builtin::IsWhitespace),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

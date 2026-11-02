@@ -119,6 +119,19 @@ fn keyword(s: &str) -> Option<Tok> {
     })
 }
 
+/// A token as one line of text, for comparing lexers (`kairos tokens file.krs`; the lexer written
+/// in Kairós prints the same): `Kind(payload) lo hi`, `nl` when a newline came before it. Strings
+/// are their code points in hex.
+pub fn canonical(t: &Token) -> String {
+    let kind = match &t.tok {
+        Tok::Str(s) => format!("Str({})", s.chars().map(|c| format!("{:x}", c as u32)).collect::<Vec<_>>().join(" ")),
+        Tok::Ident(s) => format!("Ident({s})"),
+        Tok::Reserved(r) => format!("Reserved({r})"),
+        other => format!("{other:?}"),
+    };
+    format!("{kind} {} {}{}", t.span.lo, t.span.hi, if t.nl_before { " nl" } else { "" })
+}
+
 /// Human description of a token for error messages.
 pub fn describe(t: &Tok) -> String {
     match t {

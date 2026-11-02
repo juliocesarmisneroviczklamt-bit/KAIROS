@@ -1,0 +1,7 @@
+let a = 1_000_000
+let b = 3.141_5
+let c = 1e10
+let d = 2.5E-3
+let e = 7e
+let f = 1e400
+let g = 0.5..=9
