@@ -1,0 +1,5 @@
+// A value that does not fit in the binary field stops the program.
+var b = bytes()
+b.put_u8(255)
+print(len(b))      // out: 1
+b.put_u8(256)      // error: R0014

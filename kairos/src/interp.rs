@@ -88,6 +88,50 @@ fn curl(url: &str, out: Option<&str>) -> Result<Vec<u8>, String> {
     }
 }
 
+/// The lines of a text file, or of the first file inside a .zip, that have each `(column, text)`
+/// of `keep` (byte columns: B3's fixed-width files are Latin-1, one byte per character). A line
+/// is UTF-8 when it is valid UTF-8, Latin-1 otherwise; `\n` and `\r\n` are removed.
+fn read_lines_kept(path: &str, keep: &[(usize, Vec<u8>)]) -> std::io::Result<Vec<String>> {
+    use std::io::{BufRead, BufReader};
+    let mut out = Vec::new();
+    let mut scan = |rd: &mut dyn BufRead| -> std::io::Result<()> {
+        let mut buf = Vec::with_capacity(512);
+        loop {
+            buf.clear();
+            if rd.read_until(b'\n', &mut buf)? == 0 {
+                return Ok(());
+            }
+            while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                buf.pop();
+            }
+            if keep.iter().all(|(at, t)| buf.get(*at..at + t.len()) == Some(&t[..])) {
+                out.push(match std::str::from_utf8(&buf) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => buf.iter().map(|&c| c as char).collect(),
+                });
+            }
+        }
+    };
+    let f = std::fs::File::open(path)?;
+    if path.to_ascii_lowercase().ends_with(".zip") {
+        let mut z = zip::ZipArchive::new(f).map_err(std::io::Error::other)?;
+        let entry = z.by_index(0).map_err(std::io::Error::other)?;
+        scan(&mut BufReader::with_capacity(1 << 20, entry))?;
+    } else {
+        scan(&mut BufReader::with_capacity(1 << 20, f))?;
+    }
+    Ok(out)
+}
+
+/// `n` bytes of `b` from `at`, or R0001.
+fn bytes_at(b: &[u8], at: i64, n: usize, sp: Span) -> R<&[u8]> {
+    let ok = usize::try_from(at).ok().and_then(|a| b.get(a..a.checked_add(n)?));
+    match ok {
+        Some(s) => Ok(s),
+        None => err("R0001", sp, format!("reading {n} byte(s) at {at}, out of bounds for {} bytes", b.len())),
+    }
+}
+
 fn as_bool(v: Value) -> bool {
     matches!(v, Value::Bool(true))
 }
@@ -533,6 +577,29 @@ impl<'a> Interp<'a> {
     }
 
     fn builtin(&mut self, b: Builtin, args: &[HArg], f: &mut Vec<Value>, sp: Span) -> R<Value> {
+        if matches!(b, Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutStr) {
+            let HArg::InOut(p) = &args[0] else { unreachable!("put without a place") };
+            let x = self.val(&args[1], f)?;
+            let (root, path) = self.resolve_place(p, f)?;
+            let Value::Bytes(bs) = place_mut(&mut f[root], &path)? else { unreachable!("put into non-bytes") };
+            let bs = Rc::make_mut(bs);
+            let range = |n: i64, max: u64, what: &str| -> R<u64> {
+                match u64::try_from(n) {
+                    Ok(u) if u <= max => Ok(u),
+                    _ => err("R0014", sp, format!("{n} does not fit in {what}")),
+                }
+            };
+            match (b, x) {
+                (Builtin::PutU8, Value::Int(n)) => bs.push(range(n, 255, "u8")? as u8),
+                (Builtin::PutU32, Value::Int(n)) => bs.extend_from_slice(&(range(n, u64::from(u32::MAX), "u32")? as u32).to_le_bytes()),
+                (Builtin::PutU64, Value::Int(n)) => bs.extend_from_slice(&range(n, u64::MAX, "u64")?.to_le_bytes()),
+                (Builtin::PutI64, Value::Int(n)) => bs.extend_from_slice(&n.to_le_bytes()),
+                (Builtin::PutF64, Value::Float(x)) => bs.extend_from_slice(&x.to_le_bytes()),
+                (Builtin::PutStr, Value::Str(s)) => bs.extend_from_slice(s.as_bytes()),
+                (b, x) => unreachable!("{b:?} of {x:?}"),
+            }
+            return Ok(Value::Unit);
+        }
         if b == Builtin::Remove {
             let HArg::InOut(p) = &args[0] else { unreachable!("remove without a place") };
             let key = self.val(&args[1], f)?;
@@ -587,6 +654,7 @@ impl<'a> Interp<'a> {
             }
             Builtin::Len => Ok(Value::Int(match &v[0] {
                 Value::List(xs) => xs.len() as i64,
+                Value::Bytes(b) => b.len() as i64,
                 Value::Map(m) => m.len() as i64,
                 Value::Str(s) => s.chars().count() as i64,
                 other => unreachable!("len of {other:?}"),
@@ -780,6 +848,63 @@ impl<'a> Interp<'a> {
                 Ok(bytes) => Ok(Value::Str(decode_text(bytes).into())),
                 Err(e) => err("R0013", sp, e),
             },
+            Builtin::ReadLines => {
+                let p = str_of(&v[0]);
+                let Value::List(ks) = &v[1] else { unreachable!("read_lines without a list") };
+                let mut keep = Vec::with_capacity(ks.len());
+                for k in ks.iter() {
+                    let Value::Tuple(t) = k else { unreachable!("read_lines keeps (column, text)") };
+                    let at = as_int(t[0].clone());
+                    let Ok(at) = usize::try_from(at) else { return err("R0010", sp, format!("column {at} is negative")) };
+                    keep.push((at, str_of(&t[1]).as_bytes().to_vec()));
+                }
+                match read_lines_kept(p, &keep) {
+                    Ok(ls) => Ok(str_list(ls)),
+                    Err(e) => err("R0011", sp, format!("cannot read {p}: {e}")),
+                }
+            }
+            Builtin::BytesNew => Ok(Value::Bytes(Rc::new(Vec::new()))),
+            Builtin::Utf8Len => Ok(Value::Int(str_of(&v[0]).len() as i64)),
+            Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 | Builtin::GetF64 | Builtin::GetStr => {
+                let Value::Bytes(bs) = &v[0] else { unreachable!("get from non-bytes") };
+                let at = as_int(v[1].clone());
+                Ok(match b {
+                    Builtin::GetU8 => Value::Int(i64::from(bytes_at(bs, at, 1, sp)?[0])),
+                    Builtin::GetU32 => Value::Int(i64::from(u32::from_le_bytes(bytes_at(bs, at, 4, sp)?.try_into().expect("4 bytes")))),
+                    Builtin::GetU64 => {
+                        let u = u64::from_le_bytes(bytes_at(bs, at, 8, sp)?.try_into().expect("8 bytes"));
+                        match i64::try_from(u) {
+                            Ok(n) => Value::Int(n),
+                            Err(_) => return err("R0014", sp, format!("{u} does not fit in i64")),
+                        }
+                    }
+                    Builtin::GetI64 => Value::Int(i64::from_le_bytes(bytes_at(bs, at, 8, sp)?.try_into().expect("8 bytes"))),
+                    Builtin::GetF64 => Value::Float(f64::from_le_bytes(bytes_at(bs, at, 8, sp)?.try_into().expect("8 bytes"))),
+                    _ => {
+                        let n = as_int(v[2].clone());
+                        let Ok(n) = usize::try_from(n) else { return err("R0001", sp, format!("{n} bytes")) };
+                        match std::str::from_utf8(bytes_at(bs, at, n, sp)?) {
+                            Ok(s) => Value::Str(s.into()),
+                            Err(_) => return err("R0010", sp, format!("the {n} bytes at {at} are not UTF-8 text")),
+                        }
+                    }
+                })
+            }
+            Builtin::WriteBytes => {
+                let p = str_of(&v[0]);
+                let Value::Bytes(bs) = &v[1] else { unreachable!("write_bytes of non-bytes") };
+                match std::fs::write(p, &bs[..]) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(e) => err("R0011", sp, format!("cannot write {p}: {e}")),
+                }
+            }
+            Builtin::ReadBytes => {
+                let p = str_of(&v[0]);
+                match std::fs::read(p) {
+                    Ok(bs) => Ok(Value::Bytes(Rc::new(bs))),
+                    Err(e) => err("R0011", sp, format!("cannot read {p}: {e}")),
+                }
+            }
             Builtin::Download => {
                 let (url, dest) = (str_of(&v[0]), str_of(&v[1]));
                 // into `dest.part`, renamed when complete: an interrupted download leaves no file
@@ -797,6 +922,11 @@ impl<'a> Interp<'a> {
                 let Value::Str(s) = &v[0] else { unreachable!("substr of a non-string") };
                 let a = as_int(v[1].clone()).max(0) as usize;
                 let c = as_int(v[2].clone()).max(0) as usize;
+                // one byte per character: slice directly (fixed-width files are read this way)
+                if s.is_ascii() {
+                    let a = a.min(s.len());
+                    return Ok(Value::Str(s[a..a.saturating_add(c).min(s.len())].into()));
+                }
                 Ok(Value::Str(s.chars().skip(a).take(c).collect::<String>().into()))
             }
             Builtin::FormatFixed => {
@@ -835,6 +965,7 @@ impl<'a> Interp<'a> {
                 }
             }
             Value::List(xs) => format!("[{}]", join(xs)),
+            Value::Bytes(b) => format!("<{} bytes>", b.len()),
             Value::Map(m) => {
                 if m.is_empty() {
                     "[:]".into()

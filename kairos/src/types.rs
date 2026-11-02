@@ -26,6 +26,8 @@ pub enum Ty {
     List(Box<Ty>),
     /// `Map[K, V]` (M9): keys `i64` or `str`
     Map(Box<Ty>, Box<Ty>),
+    /// binary data (M10)
+    Bytes,
     Tuple(Vec<Ty>),
     Struct(u32),
     Enum(u32),
@@ -578,6 +580,7 @@ impl Checker {
             Ty::Never => "!".into(),
             Ty::List(x) => format!("List[{}]", self.show(&x)),
             Ty::Map(k, x) => format!("Map[{}, {}]", self.show(&k), self.show(&x)),
+            Ty::Bytes => "Bytes".into(),
             Ty::Tuple(xs) => format!("({})", xs.iter().map(|x| self.show(x)).collect::<Vec<_>>().join(", ")),
             Ty::Struct(i) => self.structs[i as usize].name.clone(),
             Ty::Enum(i) => self.enums[i as usize].name.clone(),
@@ -680,6 +683,10 @@ impl Checker {
                     "Holdout" => {
                         arity(0)?;
                         Ty::Holdout
+                    }
+                    "Bytes" => {
+                        arity(0)?;
+                        Ty::Bytes
                     }
                     "Tensor" => {
                         return Err(Diag::new("E0101", *span, "`Tensor` needs its axes and element type")
@@ -1721,7 +1728,20 @@ impl Checker {
                 }
             }
         }
-        let mutating = matches!(b, Builtin::Push | Builtin::Pop | Builtin::Sort | Builtin::Reverse | Builtin::Remove);
+        let mutating = matches!(
+            b,
+            Builtin::Push
+                | Builtin::Pop
+                | Builtin::Sort
+                | Builtin::Reverse
+                | Builtin::Remove
+                | Builtin::PutU8
+                | Builtin::PutU32
+                | Builtin::PutU64
+                | Builtin::PutI64
+                | Builtin::PutF64
+                | Builtin::PutStr
+        );
         for (i, (e, flag)) in all.iter().enumerate() {
             let is_recv = recv.is_some() && i == 0;
             if mutating && i == 0 {
@@ -1762,7 +1782,7 @@ impl Checker {
                 arity(1)?;
                 let (h, t) = self.expr(all[0].0, None)?;
                 match self.resolve(&t) {
-                    Ty::Str | Ty::List(_) | Ty::Map(..) => {}
+                    Ty::Str | Ty::List(_) | Ty::Map(..) | Ty::Bytes => {}
                     _ => {
                         self.list_elem(&t, all[0].0.span)?;
                     }
@@ -1851,6 +1871,30 @@ impl Checker {
             Builtin::Args => (self.fixed_args(&all, &[], sp, name)?, Ty::List(Box::new(Ty::Str))),
             Builtin::Today => (self.fixed_args(&all, &[], sp, name)?, Ty::Int),
             Builtin::HttpGet => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Str),
+            Builtin::ReadLines => {
+                let keep = Ty::List(Box::new(Ty::Tuple(vec![Ty::Int, Ty::Str])));
+                (self.fixed_args(&all, &[Ty::Str, keep], sp, name)?, Ty::List(Box::new(Ty::Str)))
+            }
+            Builtin::BytesNew => (self.fixed_args(&all, &[], sp, name)?, Ty::Bytes),
+            Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutStr => {
+                arity(2)?;
+                let (place, t) = self.place(all[0].0)?;
+                self.expect_ty(&t, &Ty::Bytes, all[0].0.span)?;
+                let want = match b {
+                    Builtin::PutF64 => Ty::Float,
+                    Builtin::PutStr => Ty::Str,
+                    _ => Ty::Int,
+                };
+                let (hx, tx) = self.expr(all[1].0, Some(&want))?;
+                self.expect_ty(&tx, &want, all[1].0.span)?;
+                (vec![HArg::InOut(place), HArg::Val(hx)], Ty::Unit)
+            }
+            Builtin::Utf8Len => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
+            Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int], sp, name)?, Ty::Int),
+            Builtin::GetF64 => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int], sp, name)?, Ty::Float),
+            Builtin::GetStr => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int, Ty::Int], sp, name)?, Ty::Str),
+            Builtin::WriteBytes => (self.fixed_args(&all, &[Ty::Str, Ty::Bytes], sp, name)?, Ty::Unit),
+            Builtin::ReadBytes => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Bytes),
             Builtin::Download => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Int),
             Builtin::Keys | Builtin::Values | Builtin::Items | Builtin::Get | Builtin::Remove => {
                 arity(if b == Builtin::Get { 3 } else if b == Builtin::Remove { 2 } else { 1 })?;

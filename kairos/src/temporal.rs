@@ -933,7 +933,7 @@ impl<'a> An<'a> {
         use Builtin as B;
         match b {
             // removing a key: which keys are left depends on it
-            B::Push | B::Remove => {
+            B::Push | B::Remove | B::PutU8 | B::PutU32 | B::PutU64 | B::PutI64 | B::PutF64 | B::PutStr => {
                 let x = self.val(&args[1], f)?;
                 let HArg::InOut(p) = &args[0] else { unreachable!("push without a place") };
                 self.store_weak(p, x, f)?;
@@ -1023,7 +1023,7 @@ impl<'a> An<'a> {
             }
             // what is in a file has no known time: it cannot reach a decision unless declared
             // with `observed` (configuration and market data look the same to the compiler)
-            B::ReadText | B::FileExists | B::ListDir | B::HttpGet | B::Download => {
+            B::ReadText | B::FileExists | B::ListDir | B::HttpGet | B::Download | B::ReadLines | B::ReadBytes => {
                 for a in args {
                     self.val(a, f)?;
                 }

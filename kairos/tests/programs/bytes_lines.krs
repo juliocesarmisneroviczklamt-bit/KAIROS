@@ -1,0 +1,22 @@
+// M10: fixed-width lines filtered by column, and binary data (little-endian).
+var tmp = env("TMPDIR")
+if tmp == "" { tmp = env("TEMP") }
+if tmp == "" { tmp = "/tmp" }
+make_dir(tmp + "/kairos_golden_m10")
+let path = tmp + "/kairos_golden_m10/quotes.txt"
+write_text(path, "00HEADER\r\n01PETR4 010 R$ 38.50\r\n01VALE3 070 R$ 61.25\r\n01ITUB4 010 US 33.00\r\n01BBAS3 010 R$ 27.10\r\n99TRAILER\r\n")
+let spot = read_lines(path, [(0, "01"), (8, "010"), (12, "R$")])
+print(spot)                                       // out: ["01PETR4 010 R$ 38.50", "01BBAS3 010 R$ 27.10"]
+print(len(read_lines(path, [])), substr(spot[1], 2, 5))   // out: 6 BBAS3
+
+var b = bytes()
+b.put_u64(2)
+b.put_u32(20261103)
+b.put_f64(-1.5)
+b.put_i64(-7)
+b.put_u8(255)
+b.put_str("ação")
+print(len(b), utf8_len("ação"), b)                // out: 35 6 <35 bytes>
+print(get_u64(b, 0), get_u32(b, 8), get_f64(b, 12), get_i64(b, 20), get_u8(b, 28), get_str(b, 29, 6))   // out: 2 20261103 -1.5 -7 255 ação
+write_bytes(tmp + "/kairos_golden_m10/b.bin", b)
+print(read_bytes(tmp + "/kairos_golden_m10/b.bin") == b)   // out: true

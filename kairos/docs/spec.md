@@ -211,13 +211,27 @@ Módulos escritos em Kairós e embutidos no executável. Para usar, `import "std
 
 | módulo | o que tem |
 |---|---|
-| `std/json.krs` | `enum Json`; `json_parse` (RFC 8259, com pares substitutos `📈`), `json_text`, `json_pretty`; leitura com `json_get`, `json_at`, `json_num`, `json_str`, `json_bool`, `json_list`, `json_keys` |
+| `std/json.krs` | `enum Json`; `json_parse` (RFC 8259, inclusive caracteres acima de U+FFFF escritos como pares substitutos), `json_text`, `json_pretty`; leitura com `json_get`, `json_at`, `json_num`, `json_str`, `json_bool`, `json_list`, `json_keys` |
 | `std/csv.krs` | `csv_parse(texto, sep)`, `csv_records` (por nome de coluna), `csv_line` (RFC 4180: aspas, separador e quebra de linha dentro do campo) |
 | `std/dates.krs` | datas AAAAMMDD: `date_days`/`days_date` (dias desde 1970), `add_days`, `days_between`, `weekday`, `is_weekend`, `month_end`, `date_iso`, `date_from_iso`, `date_from_br` |
 
 - **JSON malformado** para o programa com R0003 e a posição do problema.
 - **Números inteiros** são escritos sem casas decimais (`202611`), para que outros programas leiam `inicio_mes` como inteiro.
 - **Desempenho:** 300 KB de JSON da B3 são lidos em 0,2 s pelo interpretador.
+
+### 4.9 Arquivos de largura fixa e dados binários (M10)
+
+Para montar a base de dados em Kairós: os arquivos da B3 são texto de largura fixa dentro de ZIPs, e a base do laboratório é binária.
+
+| função | o que faz |
+|---|---|
+| `read_lines(p, keep)` | as linhas de um arquivo de texto, ou do primeiro arquivo dentro de um `.zip`, que têm cada texto de `keep` (lista de `(coluna, texto)`) naquela coluna. O filtro roda enquanto o arquivo é lido: o ZIP de 86 MB da COTAHIST 2026 vira as 296.697 linhas do mercado à vista em cerca de 1 s |
+| `bytes()` e `put_u8/u32/u64/i64/f64/str(inout b, x)` | dados binários, little-endian; valor que não cabe no campo é R0014; `utf8_len(s)` dá o número de bytes do texto |
+| `get_u8/u32/u64/i64/f64(b, pos)`, `get_str(b, pos, n)` | leitura numa posição; fora dos limites é R0001 |
+| `write_bytes(p, b)`, `read_bytes(p)` | o arquivo inteiro |
+
+- **COTAHIST em Kairós:** [`lab/ingest.krs`](../lab/ingest.krs) lê os 32 ZIPs anuais e grava o mesmo `bars.bin` do Rust, byte a byte (220 MB, 2,3 milhões de pregões, 2.241 séries, 381 trocas de código encadeadas por ISIN), em 42 s.
+- **`substr` em texto ASCII** corta os bytes direto, sem percorrer os caracteres.
 
 ## 5. Eixos nomeados (M2)
 

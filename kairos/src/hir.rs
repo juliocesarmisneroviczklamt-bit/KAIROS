@@ -84,6 +84,29 @@ pub enum Builtin {
     HttpGet,
     /// `download(url, path)`: saves the body of a GET in a file; the number of bytes
     Download,
+    // ---- M10: data files
+    /// `read_lines(path, keep)`: the lines of a text file (or of the first file inside a .zip)
+    /// that have, for every `(column, text)` of `keep`, `text` at that column (in bytes)
+    ReadLines,
+    /// `bytes()`: empty binary data; `put_u8/u32/u64/i64/f64/str(inout b, x)` append to it
+    /// (little-endian; `put_str` writes the UTF-8 bytes, `utf8_len(s)` counts them)
+    BytesNew,
+    PutU8,
+    PutU32,
+    PutU64,
+    PutI64,
+    PutF64,
+    PutStr,
+    Utf8Len,
+    /// `get_u8/u32/u64/i64/f64(b, at)`, `get_str(b, at, n)`: read at a byte offset
+    GetU8,
+    GetU32,
+    GetU64,
+    GetI64,
+    GetF64,
+    GetStr,
+    WriteBytes,
+    ReadBytes,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -191,6 +214,23 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("today", Builtin::Today),
     ("http_get", Builtin::HttpGet),
     ("download", Builtin::Download),
+    ("read_lines", Builtin::ReadLines),
+    ("bytes", Builtin::BytesNew),
+    ("put_u8", Builtin::PutU8),
+    ("put_u32", Builtin::PutU32),
+    ("put_u64", Builtin::PutU64),
+    ("put_i64", Builtin::PutI64),
+    ("put_f64", Builtin::PutF64),
+    ("put_str", Builtin::PutStr),
+    ("utf8_len", Builtin::Utf8Len),
+    ("get_u8", Builtin::GetU8),
+    ("get_u32", Builtin::GetU32),
+    ("get_u64", Builtin::GetU64),
+    ("get_i64", Builtin::GetI64),
+    ("get_f64", Builtin::GetF64),
+    ("get_str", Builtin::GetStr),
+    ("write_bytes", Builtin::WriteBytes),
+    ("read_bytes", Builtin::ReadBytes),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

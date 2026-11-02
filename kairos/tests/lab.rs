@@ -390,3 +390,29 @@ fn the_registry_report_in_kairos_is_the_rust_one() {
         let _ = std::fs::remove_dir_all(&dir);
     })
 }
+
+/// `quant-b3 ingest` → data/processed/bars.bin: the COTAHIST ingestion written in Kairós
+/// (lab/ingest.krs) writes the same file, byte for byte, from the same yearly zips.
+#[test]
+#[ignore]
+fn the_cotahist_ingestion_in_kairos_writes_the_rust_bars() {
+    on_big_stack_with(|| {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let raw = root.join("data").join("raw").join("cotahist");
+        let Ok(want) = std::fs::read(root.join("data").join("processed").join("bars.bin")) else {
+            eprintln!("skipped: no data/processed/bars.bin");
+            return;
+        };
+        let out = std::env::temp_dir().join(format!("kairos_bars_{}.bin", std::process::id()));
+        let path = root.join("kairos").join("lab").join("ingest.krs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        let mut s = Session::new(Box::new(std::io::sink()));
+        s.host().set_args(vec![raw.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
+        if let Err(e) = s.run(&path.to_string_lossy(), &src) {
+            panic!("{}", s.render(&e));
+        }
+        let got = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        assert!(got == want, "bars.bin differs ({} bytes written, {} expected)", got.len(), want.len());
+    })
+}

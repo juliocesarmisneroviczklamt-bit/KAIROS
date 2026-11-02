@@ -18,6 +18,8 @@ path = "src/main.rs"
 quant-b3 = { path = "..", default-features = false }
 # exp, ln e pow em Rust puro: o mesmo programa dá os mesmos bits em qualquer sistema
 libm = "0.2"
+# the same ZIP reader the lab uses (pure Rust): `read_lines` of a .zip file
+zip = { version = "9.2.1", default-features = false, features = ["deflate"] }
 
 # M7: back-end nativo (JIT) onde o Cranelift tem suporte; nas outras plataformas o interpretador
 # roda tudo. A mesma condição está em build.rs (cfg `kairos_jit`).

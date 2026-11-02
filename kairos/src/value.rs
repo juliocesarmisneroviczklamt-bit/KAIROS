@@ -25,6 +25,8 @@ pub enum Value {
     Holdout(u32),
     /// `Map[K, V]` (M9): keys `i64` or `str`, in insertion order
     Map(Rc<MapVal>),
+    /// `Bytes` (M10): binary data, little-endian
+    Bytes(Rc<Vec<u8>>),
     /// a float or float tensor tracked by `grad` (M4): index of its node on the active tape
     Node(u32),
 }
@@ -54,6 +56,7 @@ impl PartialEq for Value {
             (Node(a), Node(b)) => a == b,
             (Holdout(a), Holdout(b)) => a == b,
             (Map(a), Map(b)) => a == b,
+            (Bytes(a), Bytes(b)) => a == b,
             _ => false,
         }
     }
