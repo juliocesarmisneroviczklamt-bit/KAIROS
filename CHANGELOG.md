@@ -2,6 +2,30 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.15.0 — M15: o interpretador escrito em Kairós
+
+**A Kairós agora tem um interpretador escrito nela mesma.** [`compiler/interp.krs`](kairos/compiler/interp.krs) roda o HIR do front-end em Kairós como o interpretador Rust roda o seu. A saída, os erros com as mesmas mensagens, os números e o código de saída são os mesmos. [`compiler/ki.krs`](kairos/compiler/ki.krs) é o equivalente de `kairos run`. Compilado para WebAssembly pelo compilador em Kairós, o `ki.wasm` roda programas Kairós sem nenhum Rust: junto com o `kw.wasm`, que compila (e compila a si mesmo), a linguagem se basta.
+
+- **Tudo o que as suítes de teste cobrem roda igual:**
+  - a linguagem inteira, tensores e `grad` (a fita de `rt_diff.krs`, gravada nó a nó como a do Rust, com os mesmos gradientes, bit a bit);
+  - arquivos, rede e `Bytes`;
+  - a ponte `b3`, os protocolos e os holdouts de uso único: o `momentum` roda sobre os dados reais da B3 e grava o mesmo registro de testes e o mesmo livro-razão;
+  - 158 programas de teste, inclusive os 55 que usam `b3`. As únicas diferenças vêm do hospedeiro WebAssembly: o texto de um erro do sistema, e o `list_dir`, que o node no Windows não implementa.
+- **Como funciona:**
+  - os valores são uma struct, não um enum, para listas, mapas e structs mudarem no lugar, copiados só quando outro valor os compartilha (a semântica de valor da própria linguagem);
+  - o controle de fluxo (`return`, `break`, `continue` e os erros) é um estado do interpretador;
+  - tensores, `grad` e a ponte `b3` reaproveitam o runtime em Kairós do back-end WebAssembly.
+- **A ponte `b3` escrita em Kairós** (`rt_b3.krs`) passou a ter o núcleo com o estado explícito. Os programas compilados e o interpretador usam o mesmo código. O `open_once` foi dividido em abertura, fechamento e falha. As estatísticas do simulador recebem o CDI e o NEFIN do estado (`sim_eval_on`).
+- **Builtins novos na linguagem:**
+  - `eprint(...)`, que escreve como `print` no stderr, e `exit(código)`;
+  - nove variantes que devolvem o erro em vez de parar o programa: `try_read_text`, `try_read_bytes`, `try_write_text`, `try_write_bytes`, `try_list_dir`, `try_make_dir`, `try_read_lines`, `try_http_get` e `try_download`. Os programas Kairós passam a poder tratar falhas de arquivo e de rede.
+- **O verificador em Kairós** agora escreve o rótulo depois dos `^^^^` (os 11 rótulos do verificador Rust e da análise temporal) e guarda o arquivo do erro. Assim os erros de compilação saem como os do `kairos run`.
+- **Testes:** `cargo test --release -p kairos --test wasm the_interpreter_written` compila o interpretador para WebAssembly e roda cada programa de teste pelos dois interpretadores; com os dados da B3, quatro programas `b3` também.
+- **Limites conhecidos:**
+  - o REPL e os outros subcomandos de `kairos` (`check`, `ledger`, `tokens`…) ainda são só do Rust;
+  - o hospedeiro WebAssembly precisa de uma pilha funda: um interpretador recursa tão fundo quanto o programa que roda (no node, uma worker com `stackSizeMb`; no wasmi, `set_max_stack_height`);
+  - a memória do WebAssembly continua grande com os dados da B3 (o alocador não junta blocos livres).
+
 ## 0.14.0 — M14: o back-end WebAssembly completo
 
 **Os programas da Kairós rodam como WebAssembly com os mesmos números do interpretador, inclusive os que usam o laboratório, os holdouts e o `grad`.** O back-end escrito em Kairós ([`compiler/wasmgen.krs`](kairos/compiler/wasmgen.krs)) agora compila closures, tensores, a ponte `b3`, os protocolos e a diferenciação automática. O runtime dos módulos continua escrito em Kairós.

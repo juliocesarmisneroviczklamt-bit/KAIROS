@@ -894,7 +894,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 Um programa que os usa é recusado com W0001, no ponto exato.
 
-## 16. O interpretador escrito em Kairós (M15, em andamento)
+## 16. O interpretador escrito em Kairós (M15, v0.15.0)
 
 [`compiler/interp.krs`](../compiler/interp.krs) roda o HIR que o front-end em Kairós produz, como o interpretador Rust (`src/interp.rs`) roda o seu. A saída, os erros de execução com as mesmas mensagens, os números e o código de saída são os mesmos. [`compiler/ki.krs`](../compiler/ki.krs) é o equivalente de `kairos run`:
 

@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.14.0**, com o roteiro M1–M14 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.15.0**, com o roteiro M1–M15 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -16,7 +16,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.14.0**, com 
 - M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs));
 - M12: o compilador escrito em Kairós ([`compiler/`](compiler)), que compila a si mesmo;
 - M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador;
-- M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador.
+- M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador;
+- M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -158,6 +159,6 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 
 | marco | entrega |
 |---|---|
-| M15 | o interpretador escrito em Kairós: roda o HIR do front-end em Kairós com a mesma saída, os mesmos erros e os mesmos números do interpretador Rust, e roda como WebAssembly, sem Rust. Junto, um alocador que reaproveita a memória entre tamanhos |
+| M16 | o comando `kairos` escrito em Kairós: os subcomandos (`check`, `tokens`, `ast`, `types`, `hir`, `ledger`) e o REPL, em WebAssembly, sem Rust; e um alocador que reaproveita a memória entre tamanhos |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

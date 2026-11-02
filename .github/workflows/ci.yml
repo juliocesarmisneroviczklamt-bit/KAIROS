@@ -11,6 +11,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# a new push replaces the run of the one before it on the same branch, so the queue does not pile up
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
