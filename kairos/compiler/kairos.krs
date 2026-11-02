@@ -1,0 +1,52 @@
+// The `kairos` command written in Kairós (M16): the subcommands of src/main.rs, with the standard
+// library carried in the program (std_embed.krs, made by gen_std.krs), as the Rust command carries
+// it. Compiled to WebAssembly (`kw.krs`), it is the whole command with no Rust at all:
+//
+//   wasmtime --dir=. kairos.wasm run program.krs
+import "cli.krs"
+import "std_embed.krs"
+
+fn cli_rest(a: List[str], from: i64) -> List[str] {
+    var out: List[str] = []
+    for i in from..len(a) { out.push(a[i]) }
+    out
+}
+
+// `kairos <command> ...`: the exit code
+fn cli_main(a: List[str]) -> i64 {
+    let cmd = if len(a) > 0 { a[0] } else { "repl" }
+    if cmd == "run" or cmd == "check" {
+        if len(a) < 2 {
+            eprint(cli_usage())
+            return 2
+        }
+        return cli_file(cli_checker("", std_embedded()), a[1], cli_rest(a, 2), cmd == "run")
+    }
+    if cmd == "tokens" or cmd == "ast" {
+        if len(a) < 2 {
+            eprint(cli_usage())
+            return 2
+        }
+        return if cmd == "tokens" { cli_tokens(a[1]) } else { cli_ast(a[1]) }
+    }
+    if cmd == "types" or cmd == "hir" {
+        if len(a) < 2 {
+            eprint(cli_usage())
+            return 2
+        }
+        return cli_dump(cli_checker("", std_embedded()), a[1], cmd == "hir")
+    }
+    if cmd == "--version" or cmd == "-V" {
+        print("kairos " + std_version())
+        return 0
+    }
+    // `kairos program.krs`, and scripts with `#!/usr/bin/env kairos` (any file name)
+    if ends_with(cmd, ".krs") or (file_exists(cmd) and file_size(cmd) >= 0) {
+        return cli_file(cli_checker("", std_embedded()), cmd, cli_rest(a, 1), true)
+    }
+    eprint(cli_usage())
+    2
+}
+
+let code = cli_main(args())
+if code != 0 { exit(code) }

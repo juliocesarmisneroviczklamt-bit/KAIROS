@@ -250,6 +250,10 @@ struct Checker {
     builtins: Map[str, bool],
     imported: Map[str, bool],
     std_dir: str,
+    // the standard library's text by its name ("<prelude>", "<std/sim.krs>"...) when the checker
+    // carries its own copy (the command written in Kairós, as the Rust one); else it is read
+    // from std_dir
+    std_srcs: Map[str, str],
     // the contexts being checked (innermost last), the top level between batches, the names
     // of top-level variables (for a hint), the slot types of each function's checked body
     ctxs: List[Ctx],
@@ -290,7 +294,7 @@ fn new_checker(std_dir: str) -> Checker {
     Checker {
         structs: [], struct_ids: [:], enums: [], enum_ids: [:], axes: axes, axis_ids: axis_ids, protocols: [],
         sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
-        builtins: b, imported: [:], std_dir: std_dir,
+        builtins: b, imported: [:], std_dir: std_dir, std_srcs: [:],
         ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [],
         fn_hir: [], fn_at: [], lambdas: [], tops: [], tmain: [], tlog: [], files: [], all_tops: [],
         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "", label: "", efile: -1,

@@ -4,50 +4,12 @@
 //
 //   kairos run kairos/compiler/ki.krs <std folder> program.krs [arguments...]
 //
-// Compiled to WebAssembly (`kw.krs`), it runs Kairós programs with no Rust at all.
-import "interp.krs"
+// Compiled to WebAssembly (`kw.krs`), it runs Kairós programs with no Rust at all. kairos.krs is
+// the whole command, with the standard library carried in it.
+import "cli.krs"
 
-// The source of each file the checker read (the standard library from its folder).
-fn ki_sources(ck: Checker, std_dir: str) -> List[str] {
-    var out: List[str] = []
-    for f in ck.files {
-        if f == "<prelude>" {
-            out.push(read_text(std_dir + "/prelude.krs"))
-        } else if starts_with(f, "<std/") {
-            out.push(read_text(std_dir + "/" + substr(f, 5, len(f) - 6)))
-        } else {
-            out.push(read_text(f))
-        }
-    }
-    out
-}
-
-// the text without its last line break (eprint adds one)
-fn ki_chomp(s: str) -> str {
-    if ends_with(s, from_codes([10])) { substr(s, 0, len(s) - 1) } else { s }
-}
-
-let std_dir = args()[0]
-let path = args()[1]
 var prog_args: List[str] = []
 for i in 2..len(args()) { prog_args.push(args()[i]) }
-var ck = new_checker(std_dir)
-check_file(inout ck, "<prelude>", read_text(std_dir + "/prelude.krs"))
-assert(not ck.failed, "the prelude does not check: " + ck.code + " " + ck.msg)
-ck.imported[norm_path(path)] = true
-check_file(inout ck, path, read_text(path))
-let srcs = ki_sources(ck, std_dir)
-if ck.failed {
-    let fi = if ck.efile >= 0 and ck.efile < len(srcs) { ck.efile } else { len(srcs) - 1 }
-    eprint(ki_chomp(render_diag_l(ck.code, ck.msg, ck.label, ck.hint, srcs[fi], ck.files[fi], ck.elo, ck.ehi)))
-    exit(1)
-}
-var st = ki_new(ck, srcs, prog_args)
-// the program's name (its file, without .krs): the registry's and the ledger's
-let base = split(replace(path, from_codes([92]), "/"), "/")
-let file = base[len(base) - 1]
-st.prog = if ends_with(file, ".krs") { substr(file, 0, len(file) - 4) } else { file }
-if not ki_run(inout st) {
-    eprint(ki_chomp(ki_render(st)))
-    exit(1)
-}
+let none: Map[str, str] = [:]
+let code = cli_file(cli_checker(args()[0], none), args()[1], prog_args, true)
+if code != 0 { exit(code) }

@@ -1,0 +1,165 @@
+// The `kairos` command written in Kairós (M16): what each subcommand does, as src/main.rs does it.
+// ki.krs (`run`, the standard library from a folder) and kairos.krs (every subcommand, the
+// standard library carried in the program) use it.
+import "interp.krs"
+
+fn cli_usage() -> str {
+    let lines_ = [
+        "Kairós — a language for financial research and AI",
+        "",
+        "usage:",
+        "  kairos run <file.krs> [args...]",
+        "                            check and run a program (`args()` gives the arguments)",
+        "  kairos check <file.krs>   type-check only",
+        "  kairos exec <file.kim> [args...]",
+        "                            run the image of a program compiled by the compiler written",
+        "                            in Kairós (`kairos run compiler/kc.krs <std> <out> file.krs`)",
+        "  kairos repl               interactive session (also: just `kairos`)",
+        "  kairos ledger             the holdout ledger: months seen, protocols, holdouts opened",
+        "  kairos ledger withdraw <protocol>",
+        "                            give up a protocol whose holdout was never opened",
+        "  kairos --version",
+    ]
+    join(lines_, from_codes([10]))
+}
+
+// the text without its last line break (eprint adds one)
+fn cli_chomp(s: str) -> str {
+    if ends_with(s, from_codes([10])) { substr(s, 0, len(s) - 1) } else { s }
+}
+
+// a file's name without its folder and without .krs: the program's name in the registry
+fn cli_stem(path: str) -> str {
+    let parts = split(replace(path, from_codes([92]), "/"), "/")
+    let file = parts[len(parts) - 1]
+    var last = -1
+    for i in 0..len(file) {
+        if substr(file, i, 1) == "." { last = i }
+    }
+    if last > 0 { substr(file, 0, last) } else { file }
+}
+
+// the text of a file of the standard library ("<prelude>", "<std/sim.krs>"): the checker's own
+// copy, or the file in its folder
+fn cli_std_text(ck: Checker, key: str) -> str {
+    if contains(ck.std_srcs, key) { return ck.std_srcs[key] }
+    if key == "<prelude>" { return read_text(ck.std_dir + "/prelude.krs") }
+    read_text(ck.std_dir + "/" + substr(key, 5, len(key) - 6))
+}
+
+// A checker with the prelude checked: the standard library from std_dir, or from `srcs` (its files
+// by the checker's names) when it is not empty.
+fn cli_checker(std_dir: str, srcs: Map[str, str]) -> Checker {
+    var ck = new_checker(std_dir)
+    ck.std_srcs = srcs
+    check_file(inout ck, "<prelude>", cli_std_text(ck, "<prelude>"))
+    assert(not ck.failed, "the prelude does not check: " + ck.code + " " + ck.msg)
+    ck
+}
+
+// The source of each file the checker read (`extra`: what was not read from a file, by its name).
+fn cli_sources(ck: Checker, extra: Map[str, str]) -> List[str] {
+    var out: List[str] = []
+    for f in ck.files {
+        if contains(extra, f) {
+            out.push(extra[f])
+        } else if f == "<prelude>" or starts_with(f, "<std/") {
+            out.push(cli_std_text(ck, f))
+        } else {
+            out.push(read_text(f))
+        }
+    }
+    out
+}
+
+// The first error of the checker, as `kairos` writes it.
+fn cli_check_error(ck: Checker, srcs: List[str]) -> str {
+    let fi = if ck.efile >= 0 and ck.efile < len(srcs) { ck.efile } else { len(srcs) - 1 }
+    render_diag_l(ck.code, ck.msg, ck.label, ck.hint, srcs[fi], ck.files[fi], ck.elo, ck.ehi)
+}
+
+// `kairos run <file> [args]` (run) and `kairos check <file>`: the exit code.
+fn cli_file(base: Checker, path: str, prog_args: List[str], run: bool) -> i64 {
+    let src = try_read_text(path)
+    if src.1 != "" {
+        eprint("cannot read " + path + ": " + src.1)
+        return 2
+    }
+    var ck = base
+    ck.imported[norm_path(path)] = true
+    check_file(inout ck, path, src.0)
+    let none: Map[str, str] = [:]
+    if ck.failed {
+        eprint(cli_chomp(cli_check_error(ck, cli_sources(ck, none))))
+        return 1
+    }
+    if not run {
+        print(path + ": ok")
+        return 0
+    }
+    var st = ki_new(ck, cli_sources(ck, none), prog_args)
+    st.prog = cli_stem(path)
+    if not ki_run(inout st) {
+        eprint(cli_chomp(ki_render(st)))
+        return 1
+    }
+    0
+}
+
+// `kairos tokens <file>`: the lexer's tokens, one per line.
+fn cli_tokens(path: str) -> i64 {
+    let src = try_read_text(path)
+    if src.1 != "" {
+        eprint("cannot read " + path + ": " + src.1)
+        return 2
+    }
+    let r = lex(src.0)
+    if r.0 {
+        for t in r.1 { print(token_line(t)) }
+    } else {
+        print("error " + r.2.code + " " + str(r.2.lo) + " " + str(r.2.hi) + " " + r.2.msg)
+        if r.2.hint != "" { print("hint " + r.2.hint) }
+    }
+    0
+}
+
+// `kairos ast <file>`: the syntax tree, one item per line.
+fn cli_ast(path: str) -> i64 {
+    let src = try_read_text(path)
+    if src.1 != "" {
+        eprint("cannot read " + path + ": " + src.1)
+        return 2
+    }
+    let r = parse_program(src.0)
+    if r.0 {
+        for it in r.1 { print(node_line(it)) }
+    } else {
+        print("error " + r.2.code + " " + str(r.2.elo) + " " + str(r.2.ehi) + " " + r.2.msg)
+        if r.2.hint != "" { print("hint " + r.2.hint) }
+    }
+    0
+}
+
+// `kairos types <file>` (and `hir`, with the HIR and what the temporal analysis knows).
+fn cli_dump(base: Checker, path: str, hir: bool) -> i64 {
+    let src = try_read_text(path)
+    if src.1 != "" {
+        eprint(cli_usage())
+        return 2
+    }
+    var ck = base
+    ck.imported[norm_path(path)] = true
+    let m = mark(ck)
+    check_file(inout ck, path, src.0)
+    if ck.failed {
+        print("error " + ck.code + " " + str(ck.elo) + " " + str(ck.ehi) + " " + ck.msg)
+        if ck.hint != "" { print("hint " + ck.hint) }
+        return 0
+    }
+    for l in declarations_since(ck, m) { print(l) }
+    if hir {
+        for l in hir_since(ck, m) { print(l) }
+        for l in temporal_since(ck, m) { print(l) }
+    }
+    0
+}

@@ -656,3 +656,21 @@ fn the_interpreter_written_in_kairos_runs_b3_programs() {
         let _ = std::fs::remove_dir_all(root.join(tmp));
     })
 }
+
+/// M16: compiler/std_embed.krs (the standard library and the version the command written in
+/// Kairós carries) is what compiler/gen_std.krs makes from kairos/std and Cargo.toml now: run it
+/// again after changing either.
+#[test]
+fn the_standard_library_the_command_in_kairos_carries_is_up_to_date() {
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out = std::env::temp_dir().join(format!("kairos-std-embed-{}.krs", std::process::id()));
+        let report = run_compiler("gen_std.krs", vec![root.to_string_lossy().into_owned(), out.to_string_lossy().into_owned()]);
+        assert!(report.starts_with("std_embed.krs: "), "{report}");
+        let made = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let kept = std::fs::read_to_string(root.join("compiler").join("std_embed.krs")).unwrap();
+        // (a checkout may keep the file with CR LF)
+        assert!(made.replace("\r\n", "\n") == kept.replace("\r\n", "\n"), "compiler/std_embed.krs is stale: `kairos run kairos/compiler/gen_std.krs kairos`");
+    })
+}

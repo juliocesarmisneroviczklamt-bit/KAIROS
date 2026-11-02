@@ -108,6 +108,13 @@ fn check_items(inout ck: Checker, items: List[Node], file: i64) {
     for t in done { ck.all_tops.push(t) }
 }
 
+// The text of an imported file: the standard library's from the checker's own copy when it has
+// one, else the file's.
+fn ck_text(ck: Checker, rp: (str, str)) -> str {
+    if contains(ck.std_srcs, rp.1) { return ck.std_srcs[rp.1] }
+    read_text(rp.0)
+}
+
 // Checks a file: its imports first (each file once), then its own items.
 fn check_file(inout ck: Checker, name: str, src: str) {
     let file = len(ck.files)
@@ -130,7 +137,7 @@ fn check_file_in(inout ck: Checker, name: str, src: str, file: i64) {
             if ck.failed { return }
             if contains(ck.imported, rp.1) { continue }
             ck.imported[rp.1] = true
-            check_file(inout ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, read_text(rp.0))
+            check_file(inout ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, ck_text(ck, rp))
             if ck.failed { return }
         } else {
             items.push(it)
