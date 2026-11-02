@@ -506,6 +506,19 @@ fn ki_at(inout st: KSt, inout v: KV, steps: List[KStep], k: i64, op: i64, arg: K
         remove(inout v.e.mp, ki_key(arg))
         return st.unit
     }
+    if op >= 10 and op <= 12 {
+        // the unsigned ones in their range (R0014)
+        let n = arg.n
+        let what = if op == 10 { "u8" } else if op == 11 { "u32" } else { "u64" }
+        let top = if op == 10 { 255 } else if op == 11 { 4294967295 } else { 9223372036854775807 }
+        if n < 0 or n > top { return ki_fail(inout st, at, "R0014", str(n) + " does not fit in " + what, "") }
+        if op == 10 { put_u8(inout v.e.by, n) } else if op == 11 { put_u32(inout v.e.by, n) } else { put_u64(inout v.e.by, n) }
+        return st.unit
+    }
+    if op == 13 { put_i64(inout v.e.by, arg.n) }
+    if op == 14 { put_f64(inout v.e.by, arg.x) }
+    if op == 15 { put_f32(inout v.e.by, arg.x) }
+    if op == 16 { put_str(inout v.e.by, arg.s) }
     st.unit
 }
 
@@ -1612,7 +1625,7 @@ fn ki_min_max(inout st: KSt, b: str, x: KV, y: KV, at: H) -> KV {
 fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
     let b = e.text
     // the ones that change a place: the value first, then the place
-    if b == "push" or b == "pop" or b == "sort" or b == "reverse" or b == "remove" {
+    if b == "push" or b == "pop" or b == "sort" or b == "reverse" or b == "remove" or starts_with(b, "put_") {
         var arg = st.unit
         if len(e.kids) > 1 {
             arg = ki_ev(inout st, inout f, e.kids[1].kids[0])
@@ -1621,7 +1634,11 @@ fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
         var steps: List[KStep] = []
         let root = ki_place(inout st, inout f, e.kids[0].kids[0], inout steps)
         if st.ctl != 0 { return st.unit }
-        let op = if b == "push" { 3 } else if b == "pop" { 4 } else if b == "sort" { 5 } else if b == "reverse" { 6 } else { 7 }
+        let puts = ["put_u8", "put_u32", "put_u64", "put_i64", "put_f64", "put_f32", "put_str"]
+        var op = if b == "push" { 3 } else if b == "pop" { 4 } else if b == "sort" { 5 } else if b == "reverse" { 6 } else { 7 }
+        for i in 0..len(puts) {
+            if b == puts[i] { op = 10 + i }
+        }
         return ki_at(inout st, inout f[root], steps, 0, op, arg, e)
     }
     var vs: List[KV] = []
@@ -1824,10 +1841,181 @@ fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
     if b == "is_whitespace" { return kv_b(st, is_whitespace(vs[0].n)) }
     if b == "is_uppercase" { return kv_b(st, is_uppercase(vs[0].n)) }
     if b == "from_bits" { return kv_f(st, from_bits(vs[0].n)) }
+    let io = ki_io_builtin(inout st, b, vs, e)
+    if st.ctl != 0 { return st.unit }
+    if io.0 { return io.1 }
     if b == "file_exists" { return kv_b(st, file_exists(vs[0].s)) }
     if b == "file_size" { return kv_i(st, file_size(vs[0].s)) }
     if b == "file_date" { return kv_i(st, file_date(vs[0].s)) }
     ki_fail(inout st, e, "K0001", "`" + b + "` is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ files, the network, Bytes
+
+fn kv_by(st: KSt, b: Bytes) -> KV {
+    KV { k: 11, n: 0, m: 0, x: 0.0, s: "", xs: st.no, e: KE { mp: st.e0.mp, by: b, t: st.e0.t } }
+}
+
+fn kv_pair(st: KSt, a: KV, b: KV) -> KV {
+    kv_l(st, 6, [a, b])
+}
+
+// an i64's bits as an unsigned number
+fn ki_u64_text(n: i64) -> str {
+    if n >= 0 { return str(n) }
+    let q = shr(n, 1) / 5
+    let r = wrapping_add(n, wrapping_mul(q, -10))
+    str(q) + str(r)
+}
+
+// Are the n bytes of b at `at` UTF-8 text (Rust's from_utf8)?
+fn ki_utf8_ok(b: Bytes, at: i64, n: i64) -> bool {
+    var i = at
+    let end = at + n
+    while i < end {
+        let c = get_u8(b, i)
+        if c < 128 {
+            i += 1
+            continue
+        }
+        var need = 0
+        var lo = 128
+        var hi = 191
+        if c >= 194 and c <= 223 {
+            need = 1
+        } else if c >= 224 and c <= 239 {
+            need = 2
+            if c == 224 { lo = 160 }
+            if c == 237 { hi = 159 }
+        } else if c >= 240 and c <= 244 {
+            need = 3
+            if c == 240 { lo = 144 }
+            if c == 244 { hi = 143 }
+        } else {
+            return false
+        }
+        if i + need >= end { return false }
+        for k in 1..need + 1 {
+            let d = get_u8(b, i + k)
+            if k == 1 {
+                if d < lo or d > hi { return false }
+            } else if d < 128 or d > 191 {
+                return false
+            }
+        }
+        i += need + 1
+    }
+    true
+}
+
+// R0001 unless n bytes of b at `at` exist (the interpreter's bytes_at)
+fn ki_bytes_ok(inout st: KSt, b: Bytes, at: i64, n: i64, e: H) -> bool {
+    if at < 0 or at > len(b) - n {
+        let _ = ki_fail(inout st, e, "R0001", "reading " + str(n) + " byte(s) at " + str(at) + ", out of bounds for " + str(len(b)) + " bytes", "")
+        return false
+    }
+    true
+}
+
+// The builtins of files, the network and Bytes: (handled, value). The try_ ones give the error the
+// program stops with.
+fn ki_io_builtin(inout st: KSt, b: str, vs: List[KV], e: H) -> (bool, KV) {
+    if b == "read_text" or b == "try_read_text" {
+        let r = try_read_text(vs[0].s)
+        if b == "try_read_text" { return (true, kv_pair(st, kv_s(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot read " + vs[0].s + ": " + r.1, "")) }
+        return (true, kv_s(st, r.0))
+    }
+    if b == "read_bytes" or b == "try_read_bytes" {
+        let r = try_read_bytes(vs[0].s)
+        if b == "try_read_bytes" { return (true, kv_pair(st, kv_by(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot read " + vs[0].s + ": " + r.1, "")) }
+        return (true, kv_by(st, r.0))
+    }
+    if b == "write_text" or b == "append_text" or b == "try_write_text" {
+        let r = try_write_text(vs[0].s, vs[1].s, if b == "try_write_text" { vs[2].n == 1 } else { b == "append_text" })
+        if b == "try_write_text" { return (true, kv_s(st, r)) }
+        if r != "" { return (true, ki_fail(inout st, e, "R0011", "cannot write " + vs[0].s + ": " + r, "")) }
+        return (true, st.unit)
+    }
+    if b == "write_bytes" or b == "try_write_bytes" {
+        let r = try_write_bytes(vs[0].s, vs[1].e.by)
+        if b == "try_write_bytes" { return (true, kv_s(st, r)) }
+        if r != "" { return (true, ki_fail(inout st, e, "R0011", "cannot write " + vs[0].s + ": " + r, "")) }
+        return (true, st.unit)
+    }
+    if b == "list_dir" or b == "try_list_dir" {
+        let r = try_list_dir(vs[0].s)
+        if b == "try_list_dir" { return (true, kv_pair(st, kv_str_list(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot list " + vs[0].s + ": " + r.1, "")) }
+        return (true, kv_str_list(st, r.0))
+    }
+    if b == "make_dir" or b == "try_make_dir" {
+        let r = try_make_dir(vs[0].s)
+        if b == "try_make_dir" { return (true, kv_s(st, r)) }
+        if r != "" { return (true, ki_fail(inout st, e, "R0011", "cannot create " + vs[0].s + ": " + r, "")) }
+        return (true, st.unit)
+    }
+    if b == "read_lines" or b == "try_read_lines" {
+        // a negative column first
+        var keep: List[(i64, str)] = []
+        for k in vs[1].xs {
+            if k.xs[0].n < 0 { return (true, ki_fail(inout st, e, "R0010", "column " + str(k.xs[0].n) + " is negative", "")) }
+            keep.push((k.xs[0].n, k.xs[1].s))
+        }
+        let r = try_read_lines(vs[0].s, keep)
+        if b == "try_read_lines" { return (true, kv_pair(st, kv_str_list(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0011", "cannot read " + vs[0].s + ": " + r.1, "")) }
+        return (true, kv_str_list(st, r.0))
+    }
+    if b == "http_get" or b == "try_http_get" {
+        let r = try_http_get(vs[0].s)
+        if b == "try_http_get" { return (true, kv_pair(st, kv_s(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0013", r.1, "")) }
+        return (true, kv_s(st, r.0))
+    }
+    if b == "download" or b == "try_download" {
+        let r = try_download(vs[0].s, vs[1].s)
+        if b == "try_download" { return (true, kv_pair(st, kv_i(st, r.0), kv_s(st, r.1))) }
+        if r.1 != "" { return (true, ki_fail(inout st, e, "R0013", r.1, "")) }
+        return (true, kv_i(st, r.0))
+    }
+    if b == "http_get_all" {
+        var urls: List[str] = []
+        for u in vs[0].xs { urls.push(u.s) }
+        // one after the other: the same results, in the same order, as the interpreter fetching in parallel
+        var out: List[KV] = []
+        for u in urls {
+            let r = try_http_get(u)
+            out.push(kv_pair(st, kv_b(st, r.1 == ""), kv_s(st, if r.1 == "" { r.0 } else { r.1 })))
+        }
+        return (true, kv_l(st, 5, out))
+    }
+    if b == "bytes" { return (true, kv_by(st, bytes())) }
+    if starts_with(b, "get_") {
+        let by = vs[0].e.by
+        let at = vs[1].n
+        if b == "get_str" {
+            let n = vs[2].n
+            if n < 0 { return (true, ki_fail(inout st, e, "R0001", str(n) + " bytes", "")) }
+            if not ki_bytes_ok(inout st, by, at, n, e) { return (true, st.unit) }
+            if not ki_utf8_ok(by, at, n) { return (true, ki_fail(inout st, e, "R0010", "the " + str(n) + " bytes at " + str(at) + " are not UTF-8 text", "")) }
+            return (true, kv_s(st, get_str(by, at, n)))
+        }
+        let n = if b == "get_u8" { 1 } else if b == "get_u32" or b == "get_f32" { 4 } else { 8 }
+        if not ki_bytes_ok(inout st, by, at, n, e) { return (true, st.unit) }
+        if b == "get_u8" { return (true, kv_i(st, get_u8(by, at))) }
+        if b == "get_u32" { return (true, kv_i(st, get_u32(by, at))) }
+        if b == "get_i64" { return (true, kv_i(st, get_i64(by, at))) }
+        if b == "get_f64" { return (true, kv_f(st, get_f64(by, at))) }
+        if b == "get_f32" { return (true, kv_f(st, get_f32(by, at))) }
+        if b == "get_u64" {
+            let u = get_i64(by, at)
+            if u < 0 { return (true, ki_fail(inout st, e, "R0014", ki_u64_text(u) + " does not fit in i64", "")) }
+            return (true, kv_i(st, u))
+        }
+    }
+    (false, st.unit)
 }
 
 // ------------------------------------------------------------------ a program

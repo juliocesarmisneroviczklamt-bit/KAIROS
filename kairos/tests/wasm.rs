@@ -592,10 +592,24 @@ fn the_interpreter_written_in_kairos_runs_like_the_rust_one() {
                 continue;
             }
             let r = run_interp(path, &src);
-            assert_eq!(k, r, "{path}: the interpreter written in Kairós and the Rust one differ");
+            // the text of a system's error (`cannot read p: ...`) is the host's: WASI writes POSIX's,
+            // Windows its own (in its own language)
+            let os = |s: &str| -> String {
+                s.lines()
+                    .map(|l| match l.find("]: cannot ") {
+                        Some(i) if l.starts_with("runtime error[R0011]") => match l[i..].find(": ").and_then(|j| l[i + j + 2..].find(": ").map(|q| i + j + 2 + q)) {
+                            Some(cut) => format!("{}: <the system's error>", &l[..cut]),
+                            None => l.to_string(),
+                        },
+                        _ => l.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            assert_eq!((k.0, os(&k.1), k.2), (r.0, os(&r.1), r.2), "{path}: the interpreter written in Kairós and the Rust one differ");
             same += 1;
         }
-        assert!(same >= 100, "{same} programs run the same, {later} not yet");
+        assert!(same >= 110, "{same} programs run the same, {later} not yet");
         println!("{same} programs run the same in the interpreter written in Kairós; {later} use what it does not run yet");
     })
 }

@@ -691,6 +691,78 @@ impl<'a> Interp<'a> {
                 let code = as_int(v[0].clone());
                 std::process::exit(i32::try_from(code).unwrap_or(1))
             }
+            // M15: what the plain builtins give, and the text of their error ("" when there is none)
+            Builtin::TryReadText | Builtin::TryReadBytes | Builtin::TryListDir | Builtin::TryReadLines | Builtin::TryHttpGet | Builtin::TryDownload => {
+                let p = str_of(&v[0]);
+                let pair = |a: Value, e: String| Value::Tuple(Rc::new(vec![a, Value::Str(e.into())]));
+                Ok(match b {
+                    Builtin::TryReadText => match std::fs::read(p) {
+                        Ok(bytes) => pair(Value::Str(decode_text(bytes).into()), String::new()),
+                        Err(e) => pair(Value::Str("".into()), e.to_string()),
+                    },
+                    Builtin::TryReadBytes => match std::fs::read(p) {
+                        Ok(bs) => pair(Value::Bytes(Rc::new(bs)), String::new()),
+                        Err(e) => pair(Value::Bytes(Rc::new(Vec::new())), e.to_string()),
+                    },
+                    Builtin::TryListDir => match std::fs::read_dir(p) {
+                        Ok(rd) => {
+                            let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+                            names.sort();
+                            pair(str_list(names), String::new())
+                        }
+                        Err(e) => pair(str_list(Vec::<String>::new()), e.to_string()),
+                    },
+                    Builtin::TryReadLines => {
+                        let Value::List(ks) = &v[1] else { unreachable!("try_read_lines without a list") };
+                        let mut keep = Vec::with_capacity(ks.len());
+                        for k in ks.iter() {
+                            let Value::Tuple(t) = k else { unreachable!("try_read_lines keeps (column, text)") };
+                            let at = as_int(t[0].clone());
+                            let Ok(at) = usize::try_from(at) else { return err("R0010", sp, format!("column {at} is negative")) };
+                            keep.push((at, str_of(&t[1]).as_bytes().to_vec()));
+                        }
+                        match read_lines_kept(p, &keep) {
+                            Ok(ls) => pair(str_list(ls), String::new()),
+                            Err(e) => pair(str_list(Vec::<String>::new()), e.to_string()),
+                        }
+                    }
+                    Builtin::TryHttpGet => match curl(p, None) {
+                        Ok(bytes) => pair(Value::Str(decode_text(bytes).into()), String::new()),
+                        Err(e) => pair(Value::Str("".into()), e),
+                    },
+                    _ => {
+                        let dest = str_of(&v[1]);
+                        let part = format!("{dest}.part");
+                        let res = curl(p, Some(&part)).and_then(|_| std::fs::rename(&part, dest).map_err(|e| format!("{dest}: {e}")));
+                        match res.and_then(|_| std::fs::metadata(dest).map_err(|e| e.to_string())) {
+                            Ok(m) => pair(Value::Int(m.len() as i64), String::new()),
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&part);
+                                pair(Value::Int(0), e)
+                            }
+                        }
+                    }
+                })
+            }
+            Builtin::TryWriteText | Builtin::TryWriteBytes | Builtin::TryMakeDir => {
+                let p = str_of(&v[0]);
+                let r = match b {
+                    Builtin::TryWriteText => {
+                        let s = str_of(&v[1]);
+                        if as_bool(v[2].clone()) {
+                            std::fs::OpenOptions::new().create(true).append(true).open(p).and_then(|mut fh| fh.write_all(s.as_bytes()))
+                        } else {
+                            std::fs::write(p, s.as_bytes())
+                        }
+                    }
+                    Builtin::TryWriteBytes => {
+                        let Value::Bytes(bs) = &v[1] else { unreachable!("try_write_bytes of non-bytes") };
+                        std::fs::write(p, &bs[..])
+                    }
+                    _ => std::fs::create_dir_all(p),
+                };
+                Ok(Value::Str(r.err().map(|e| e.to_string()).unwrap_or_default().into()))
+            }
             Builtin::Len => Ok(Value::Int(match &v[0] {
                 Value::List(xs) => xs.len() as i64,
                 Value::Bytes(b) => b.len() as i64,

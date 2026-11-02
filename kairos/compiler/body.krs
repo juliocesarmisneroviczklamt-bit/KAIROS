@@ -1626,6 +1626,14 @@ fn fixed_sig(name: str) -> (bool, List[Ty], Ty) {
     if contains(["is_alphabetic", "is_alphanumeric", "is_whitespace", "is_uppercase"], name) { return (true, [i], b) }
     if name == "to_bits" { return (true, [Ty.TFloat], i) }
     if name == "exit" { return (true, [i], u) }
+    if name == "try_read_text" or name == "try_http_get" { return (true, [s], Ty.TTuple([s, s])) }
+    if name == "try_read_bytes" { return (true, [s], Ty.TTuple([by, s])) }
+    if name == "try_write_text" { return (true, [s, s, b], s) }
+    if name == "try_write_bytes" { return (true, [s, by], s) }
+    if name == "try_list_dir" { return (true, [s], Ty.TTuple([ls, s])) }
+    if name == "try_make_dir" { return (true, [s], s) }
+    if name == "try_read_lines" { return (true, [s, Ty.TList(Ty.TTuple([i, s]))], Ty.TTuple([ls, s])) }
+    if name == "try_download" { return (true, [s, s], Ty.TTuple([i, s])) }
     if name == "from_bits" { return (true, [i], Ty.TFloat) }
     if name == "http_get_all" { return (true, [ls, i], Ty.TList(Ty.TTuple([b, s]))) }
     if name == "download" { return (true, [s, s], i) }

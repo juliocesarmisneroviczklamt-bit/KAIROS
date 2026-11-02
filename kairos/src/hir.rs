@@ -142,6 +142,17 @@ pub enum Builtin {
     /// program with that exit code (the standard output written first)
     Eprint,
     Exit,
+    /// M15: the file and network builtins that give their error instead of stopping the program:
+    /// `try_read_text(p) -> (str, str)` (the text and the error, "" when there is none), and so on
+    TryReadText,
+    TryReadBytes,
+    TryWriteText,
+    TryWriteBytes,
+    TryListDir,
+    TryMakeDir,
+    TryReadLines,
+    TryHttpGet,
+    TryDownload,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -201,6 +212,15 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("print", Builtin::Print),
     ("eprint", Builtin::Eprint),
     ("exit", Builtin::Exit),
+    ("try_read_text", Builtin::TryReadText),
+    ("try_read_bytes", Builtin::TryReadBytes),
+    ("try_write_text", Builtin::TryWriteText),
+    ("try_write_bytes", Builtin::TryWriteBytes),
+    ("try_list_dir", Builtin::TryListDir),
+    ("try_make_dir", Builtin::TryMakeDir),
+    ("try_read_lines", Builtin::TryReadLines),
+    ("try_http_get", Builtin::TryHttpGet),
+    ("try_download", Builtin::TryDownload),
     ("len", Builtin::Len),
     ("push", Builtin::Push),
     ("pop", Builtin::Pop),

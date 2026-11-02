@@ -2014,6 +2014,17 @@ impl Checker {
             Builtin::IsAlphabetic | Builtin::IsAlphanumeric | Builtin::IsWhitespace | Builtin::IsUppercase => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Bool),
             Builtin::ToBits => (self.fixed_args(&all, &[Ty::Float], sp, name)?, Ty::Int),
             Builtin::Exit => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Unit),
+            Builtin::TryReadText | Builtin::TryHttpGet => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Tuple(vec![Ty::Str, Ty::Str])),
+            Builtin::TryReadBytes => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Tuple(vec![Ty::Bytes, Ty::Str])),
+            Builtin::TryWriteText => (self.fixed_args(&all, &[Ty::Str, Ty::Str, Ty::Bool], sp, name)?, Ty::Str),
+            Builtin::TryWriteBytes => (self.fixed_args(&all, &[Ty::Str, Ty::Bytes], sp, name)?, Ty::Str),
+            Builtin::TryListDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Tuple(vec![Ty::List(Box::new(Ty::Str)), Ty::Str])),
+            Builtin::TryMakeDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Str),
+            Builtin::TryReadLines => {
+                let keep = Ty::List(Box::new(Ty::Tuple(vec![Ty::Int, Ty::Str])));
+                (self.fixed_args(&all, &[Ty::Str, keep], sp, name)?, Ty::Tuple(vec![Ty::List(Box::new(Ty::Str)), Ty::Str]))
+            }
+            Builtin::TryDownload => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Tuple(vec![Ty::Int, Ty::Str])),
             Builtin::FromBits => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Float),
             Builtin::HttpGetAll => (
                 self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Int], sp, name)?,

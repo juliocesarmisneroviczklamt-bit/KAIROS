@@ -1104,6 +1104,49 @@ fn rt_file_date(p: str) -> i64 {
 
 // append_text(p, s): the text at the end of the file, which is created if it is not there (WASI's
 // error code).
+// The try_ builtins: what the plain ones give, and the text of their error ("" when there is none).
+fn rt_try_read_text(p: str) -> (str, str) {
+    let r = rt_read_text(p)
+    if r.0 != 0 { return ("", rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
+fn rt_try_read_bytes(p: str) -> (Bytes, str) {
+    let r = rt_read_file(p)
+    if r.0 != 0 { return (bytes(), rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
+fn rt_try_write_text(p: str, s: str, append: bool) -> str {
+    let c = if append { rt_append_text(p, s) } else { rt_write_text(p, s) }
+    if c != 0 { rt_errno_text(c) } else { "" }
+}
+
+fn rt_try_write_bytes(p: str, b: Bytes) -> str {
+    let c = rt_write_bytes(p, b)
+    if c != 0 { rt_errno_text(c) } else { "" }
+}
+
+fn rt_try_list_dir(p: str) -> (List[str], str) {
+    let r = rt_list_dir(p)
+    if r.0 != 0 { return ([], rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
+fn rt_try_make_dir(p: str) -> str {
+    let c = rt_make_dir(p)
+    if c != 0 { rt_errno_text(c) } else { "" }
+}
+
+// WASI has no network
+fn rt_try_http_get(u: str) -> (str, str) {
+    ("", "there is no network under WebAssembly")
+}
+
+fn rt_try_download(u: str, d: str) -> (i64, str) {
+    (0, "there is no network under WebAssembly")
+}
+
 fn rt_append_text(p: str, s: str) -> i64 {
     let cell = rt_alloc(16)
     // oflags 1: create; fdflags 1: append

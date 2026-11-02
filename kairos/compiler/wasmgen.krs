@@ -1559,6 +1559,13 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "append_text" { return io_w(inout g, e, "rt_append_text", "write", Ty.TUnit) }
     if b == "list_dir" { return io_w(inout g, e, "rt_list_dir", "list", Ty.TList(Ty.TStr)) }
     if b == "read_lines" { return read_lines_w(inout g, e) }
+    if b == "try_read_lines" { return try_read_lines_w(inout g, e) }
+    let tries = [("try_read_text", "rt_try_read_text"), ("try_read_bytes", "rt_try_read_bytes"), ("try_write_text", "rt_try_write_text"),
+        ("try_write_bytes", "rt_try_write_bytes"), ("try_list_dir", "rt_try_list_dir"), ("try_make_dir", "rt_try_make_dir"),
+        ("try_http_get", "rt_try_http_get"), ("try_download", "rt_try_download")]
+    for t in tries {
+        if b == t.0 { return call_rt_borrowing(inout g, t.1, args) }
+    }
     if b == "minimum" or b == "maximum" {
         // the first of the smallest (largest); R0004 for an empty list
         let a0 = args[0].kids[0]
@@ -4419,6 +4426,33 @@ fn read_lines_w(inout g: WGen, e: H) {
     incref(inout g, Ty.TList(Ty.TStr))
     lget(inout g, t)
     drop_v(inout g, Ty.TTuple([Ty.TInt, Ty.TList(Ty.TStr)]))
+    drop_tmp(inout g, tp, pa.t)
+    drop_tmp(inout g, tk, ka.t)
+}
+
+// try_read_lines(path, keep): a negative column first (R0010), then the lines and the error (rt_zip.krs)
+fn try_read_lines_w(inout g: WGen, e: H) {
+    let pa = e.kids[0].kids[0]
+    let ka = e.kids[1].kids[0]
+    let tp = gen_borrow(inout g, pa, not changes(e.kids[1]))
+    let pl = new_local(inout g, wt_i32())
+    lset(inout g, pl)
+    let tk = gen_borrow(inout g, ka, true)
+    let kl = new_local(inout g, wt_i32())
+    lset(inout g, kl)
+    lget(inout g, kl)
+    call_f(inout g, rt_fn(inout g, "rt_neg_column"))
+    let c = new_local(inout g, wt_i64())
+    lset(inout g, c)
+    lget(inout g, c)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    open(inout g, 4, 0)
+    fail_dyn(inout g, e, "R0010", "column ", " is negative", c, "rt_str_i64")
+    close(inout g)
+    lget(inout g, pl)
+    lget(inout g, kl)
+    call_f(inout g, rt_fn(inout g, "rt_try_read_lines"))
     drop_tmp(inout g, tp, pa.t)
     drop_tmp(inout g, tk, ka.t)
 }

@@ -355,6 +355,13 @@ fn rt_zip_first(p: i64, n: i64) -> (i64, i64, i64, i64) {
 // read_lines(path, keep): the lines of the file (of the first entry of a ZIP archive, for a path
 // ending in .zip) with each text of `keep` at its column: (WASI's error code, or a negative one
 // of rt_errno_text, the lines).
+// try_read_lines: the lines and the text of the error ("" when there is none)
+fn rt_try_read_lines(path: str, keep: List[(i64, str)]) -> (List[str], str) {
+    let r = rt_read_lines(path, keep)
+    if r.0 != 0 { return ([], rt_errno_text(r.0)) }
+    (r.1, "")
+}
+
 fn rt_read_lines(path: str, keep: List[(i64, str)]) -> (i64, List[str]) {
     let r = rt_read_file(path)
     var z = RtZ {

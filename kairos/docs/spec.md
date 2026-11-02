@@ -909,8 +909,13 @@ kairos run kairos/compiler/ki.krs kairos/std programa.krs [argumentos...]
 - **Builtins novos na linguagem**, que o interpretador usa para reportar o erro de um programa:
   - `eprint(...)`: escreve como `print`, no stderr, depois do que já foi escrito no stdout;
   - `exit(código)`: termina o programa com esse código de saída.
+- **Arquivos e rede que devolvem o erro em vez de parar o programa**, que o interpretador usa para dar ao programa a mensagem exata do sistema (e que qualquer programa pode usar para tratar uma falha):
+  - `try_read_text(p) -> (str, str)` e `try_read_bytes(p) -> (Bytes, str)`: o conteúdo e o erro (`""` quando não há);
+  - `try_write_text(p, texto, acrescentar: bool) -> str`, `try_write_bytes(p, b) -> str` e `try_make_dir(p) -> str`: o erro;
+  - `try_list_dir(p) -> (List[str], str)` e `try_read_lines(p, colunas) -> (List[str], str)` (uma coluna negativa continua sendo R0010);
+  - `try_http_get(url) -> (str, str)` e `try_download(url, destino) -> (i64, str)`: no WebAssembly, o erro é que o WASI não tem rede.
 - **Conferido:** `cargo test --release -p kairos --test wasm the_interpreter_written` compila o interpretador para WebAssembly e roda cada programa de `tests/wasm`, `tests/programs` e `tests/temporal` pelos dois interpretadores. Exige a mesma saída, os mesmos erros e o mesmo código de saída.
 
 - **Tensores e `grad`** usam o runtime em Kairós do back-end WebAssembly: `rt_tensor.krs` para as operações (com as checagens e mensagens de `src/tensor.rs`) e a fita de `rt_diff.krs`, gravada nó a nó como a do interpretador Rust, com os mesmos gradientes, bit a bit. O `examples/mlp.krs` treina com as mesmas perdas.
 
-**Ainda não roda** (para com K0001, no ponto exato): a ponte `b3`, os protocolos e holdouts, `Bytes` e os arquivos.
+**Ainda não roda** (para com K0001, no ponto exato): a ponte `b3`, os protocolos e os holdouts.

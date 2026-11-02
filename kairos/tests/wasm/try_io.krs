@@ -1,0 +1,28 @@
+// the try_ builtins: what the plain ones give, and the error instead of stopping
+let d = "tests/wasm/tmp/try_dir"
+print(try_make_dir(d) == "", try_write_text(d + "/a.txt", "linha 1\nlinha 2\n", false) == "", try_write_text(d + "/a.txt", "linha 3\n", true) == "")
+let r = try_read_text(d + "/a.txt")
+print(r.0, r.1 == "")
+let missing = try_read_text(d + "/nada.txt")
+print(missing.0 == "", missing.1 != "")
+var b = bytes()
+put_u32(inout b, 7)
+put_str(inout b, "olá")
+print(try_write_bytes(d + "/b.bin", b), len(try_read_bytes(d + "/b.bin").0), try_read_bytes(d + "/nada.bin").1 != "")
+let ls = try_list_dir(d)
+print(ls.0, ls.1, try_list_dir(d + "/nada").1 != "")
+let lines = try_read_lines(d + "/a.txt", [(0, "linha")])
+print(lines.0, lines.1, try_read_lines(d + "/nada.txt", []).1 != "")
+let got = get_str(b, 4, 4)
+print(got, get_u32(b, 0), len(b))
+
+// out: true true true
+// out: linha 1
+// out: linha 2
+// out: linha 3
+// out:  true
+// out: true true
+// out:  8 true
+// out: ["a.txt", "b.bin"]  true
+// out: ["linha 1", "linha 2", "linha 3"]  true
+// out: olá 7 8
