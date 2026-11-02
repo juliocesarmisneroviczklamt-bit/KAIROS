@@ -111,6 +111,13 @@ fn the_lab_data_in_kairos_is_the_rust_one() {
 }
 
 fn run_data_check() {
+    lab_check("check_data.krs", &["monthly returns: the same", "eligible: the same", "cdi: the same", "nefin: the same"]);
+    // b3.evaluate written in Kairós (lab/bridge.krs): the momentum portfolio, number for number
+    lab_check("check_evaluate.krs", &["evaluate: the same"]);
+}
+
+/// Runs a check of kairos/lab with the data folder as its argument: its output must have each line.
+fn lab_check(program: &str, want: &[&str]) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let data_dir = root.join("data");
     if !data_dir.join("processed").join("panel.bin").is_file() {
@@ -118,8 +125,8 @@ fn run_data_check() {
         return;
     }
     let d = Rc::new(Data::load(&Paths::new(&data_dir, &root.join("results"))).expect("B3 data"));
-    let path = root.join("kairos").join("lab").join("check_data.krs");
-    let src = std::fs::read_to_string(&path).expect("lab/check_data.krs");
+    let path = root.join("kairos").join("lab").join(program);
+    let src = std::fs::read_to_string(&path).expect("a check of kairos/lab");
     let buf = Rc::new(RefCell::new(Vec::new()));
     let host = Host::with_data(d);
     host.set_args(vec![data_dir.to_string_lossy().into_owned()]);
@@ -128,7 +135,7 @@ fn run_data_check() {
         panic!("{}", s.render(&e));
     }
     let text = String::from_utf8(buf.borrow().clone()).expect("utf-8");
-    for what in ["monthly returns: the same", "eligible: the same", "cdi: the same", "nefin: the same"] {
+    for what in want {
         assert!(text.contains(what), "`{what}` missing from the output:\n{text}");
     }
 }

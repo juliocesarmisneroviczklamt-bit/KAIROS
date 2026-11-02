@@ -15,7 +15,8 @@ print("monthly returns:", if diff == 0.0 and gaps == 0.0 { "the same" } else { "
 let ee = b3.eligible()
 let me = data_eligible(d)[month: 0 .. n]
 print("eligible:", if count(ee != me) == 0.0 { "the same" } else { "DIFFERENT " + str(count(ee != me)) }, count(ee))
-let cdi = tensor(cdi_months(d.dates, d.cal, load_cdi(args()[0])), month)[month: 0 .. n]
+let cdi_d = cdi_days(d.dates, load_cdi(args()[0]))
+let cdi = tensor(cdi_months(d.cal, cdi_d), month)[month: 0 .. n]
 print("cdi:", if sum(abs(cdi - b3.cdi())) == 0.0 { "the same" } else { "DIFFERENT" })
 let vw = load_factors(args()[0] + "/raw/nefin/nefin_factors_monthly.csv")
 let ew = load_factors(args()[0] + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv")

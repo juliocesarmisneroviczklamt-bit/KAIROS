@@ -243,8 +243,8 @@ fn load_cdi(dir: str) -> Map[i64, f64] {
 }
 
 // The CDI between each session and the one before (the first: its own day), compounded in the
-// order of the days, and of each month (Data::build).
-fn cdi_months(dates: List[i64], cal: Cal, m: Map[i64, f64]) -> List[f64] {
+// order of the days (Data::build).
+fn cdi_days(dates: List[i64], m: Map[i64, f64]) -> List[f64] {
     var ks = keys(m)
     ks.sort()
     var by_day: List[f64] = []
@@ -264,6 +264,11 @@ fn cdi_months(dates: List[i64], cal: Cal, m: Map[i64, f64]) -> List[f64] {
         }
         by_day.push(g - 1.0)
     }
+    by_day
+}
+
+// ... and over each month
+fn cdi_months(cal: Cal, by_day: List[f64]) -> List[f64] {
     var out: List[f64] = []
     for k in 0..len(cal.months) {
         var p = 1.0

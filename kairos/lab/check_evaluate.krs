@@ -1,0 +1,35 @@
+// b3.evaluate written in Kairós (lab/bridge.krs) against the bridge's (Rust plans and inputs,
+// the simulator of std/sim.krs): the momentum portfolio of examples/momentum.krs, number for
+// number, bit for bit.
+//
+//   kairos run kairos/lab/check_evaluate.krs data        (from the quant-b3 folder)
+import "bridge.krs"
+
+let d = load_lab_data(args()[0])
+let cdi_d = cdi_days(d.dates, load_cdi(args()[0]))
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+let n = size(ret, month)
+var weights = zeros_like(ret)
+for m in max(12, b3.month_index(200101))..n {
+    let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+    let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m - 2], 0.0), over: month) - 1.0
+    let s = where(alive, signal, nan)
+    let cnt = int(nan_count(s, over: asset))
+    if cnt < 15 { continue }
+    let k = int(round(float(cnt) / 3.0))
+    weights[month: m] = where(top_k(s, k, over: asset), 1.0 / float(k), 0.0)
+}
+let ev = b3.evaluate(weights, cost_bps: 25.0, lag: 0)
+let mine = kairos_evaluate(d, cdi_d, weights, n, SimCfg { capital: 1000000.0, lag: 0, real_costs: false, cost_bps: 25.0, tax: false, cap_adv: 0.0 })
+let e = mine.2
+print("error", "[" + mine.0 + "]")
+var same = len(mine.1.ret) == ev.months
+for pair in [(e.cagr, ev.cagr), (e.vol, ev.vol), (e.sharpe, ev.sharpe), (e.max_dd, ev.max_dd), (e.beta, ev.beta), (e.alpha, ev.alpha), (e.t_alpha, ev.t_alpha), (e.turnover, ev.turnover), (e.cost_bps, ev.cost_bps)] {
+    if to_bits(pair.0) != to_bits(pair.1) {
+        same = false
+        print("differs:", pair.0, pair.1)
+    }
+}
+print("months", len(mine.1.ret), "cagr", e.cagr, "sharpe", e.sharpe, "alpha", e.alpha)
+print("evaluate:", if same { "the same" } else { "DIFFERENT" })
