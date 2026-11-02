@@ -331,3 +331,55 @@ for m in [b3.month_index(200201), b3.month_index(200301), b3.month_index(200401)
         assert_eq!(out, want);
     })
 }
+
+/// The registry report written in Kairós (lab/registry.krs: the CSV, the Deflated Sharpe Ratio,
+/// the normal CDF and its inverse) prints quant-b3's `registro` exactly.
+#[test]
+fn the_registry_report_in_kairos_is_the_rust_one() {
+    on_big_stack_with(|| {
+        use quant_b3::registry::{self, Trial};
+        // WASI has no temporary folder of its own (CI maps the host's root)
+        let tmp = if cfg!(target_family = "wasm") { std::path::PathBuf::from("/tmp") } else { std::env::temp_dir() };
+        let dir = tmp.join(format!("kairos_registry_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registro_testes.csv");
+        let _ = std::fs::remove_file(&path);
+        let run = |path: &std::path::Path| {
+            let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lab").join("registry.krs")).unwrap();
+            let buf = Rc::new(RefCell::new(Vec::new()));
+            let mut s = Session::new(Box::new(Buf(buf.clone())));
+            s.host().set_args(vec![path.to_string_lossy().into_owned()]);
+            let lab = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lab").join("registry.krs");
+            if let Err(e) = s.run(&lab.to_string_lossy(), &src) {
+                panic!("{}", s.render(&e));
+            }
+            String::from_utf8(buf.borrow().clone()).unwrap()
+        };
+        // the empty registry
+        assert_eq!(run(&path), registry::report(&path));
+        // trials of different lengths, drifts, skews and fat tails (one with a comma in its name)
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for (k, (study, name, n, drift)) in [
+            ("momentum", "WML long-short", 310, 0.012),
+            ("busca", "MOM, com custo", 216, 0.004),
+            ("busca", "BAIXA_VOL", 216, 0.002),
+            ("kairos", "tax_portfolio", 250, -0.001),
+            ("small-caps", "H1", 120, 0.006),
+            ("risco", "vol alvo", 48, 0.020),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let excess: Vec<f64> = (0..n)
+                .map(|i| {
+                    let u = rng.unit() - 0.5;
+                    let jump = if (i + k) % 37 == 0 { -0.15 } else { 0.0 };
+                    drift + 0.08 * u * u * u.signum() + jump
+                })
+                .collect();
+            registry::upsert(&path, &Trial::new(study, name, "params", "2001-2018", &excess)).unwrap();
+            assert_eq!(run(&path), registry::report(&path), "after {} trials", k + 1);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    })
+}

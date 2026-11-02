@@ -193,21 +193,26 @@ pub fn deflate(t: &Trial, all: &[Trial]) -> Deflated {
     Deflated { n_trials: n, sr0_ann: sr0 * 12f64.sqrt(), dsr: norm_cdf(z) }
 }
 
-/// Mostra todos os testes já feitos, descontados pelo número final de tentativas.
-pub fn print_all(path: &Path) -> Result<()> {
+/// O relatório de `registro`: todos os testes já feitos, descontados pelo número final de
+/// tentativas (o mesmo texto de `kairos/lab/registry.krs`).
+pub fn report(path: &Path) -> String {
+    use std::fmt::Write as _;
     let all = load(path);
+    let mut s = String::new();
     if all.is_empty() {
-        println!("Registro vazio ({}).", path.display());
-        return Ok(());
+        let _ = writeln!(s, "Registro vazio ({}).", path.display());
+        return s;
     }
-    println!("{} testes no registro ({}):", all.len(), path.display());
-    println!(
+    let _ = writeln!(s, "{} testes no registro ({}):", all.len(), path.display());
+    let _ = writeln!(
+        s,
         "{:<16} {:<31} {:<10} {:>6} {:>12} {:>8} {:>6}",
         "estudo", "teste", "período", "meses", "Sharpe a.a.", "acaso*", "DSR"
     );
     for t in &all {
         let d = deflate(t, &all);
-        println!(
+        let _ = writeln!(
+            s,
             "{:<16} {:<31} {:<10} {:>6} {:>12.2} {:>8.2} {:>5.0}%",
             t.estudo,
             t.nome,
@@ -218,7 +223,13 @@ pub fn print_all(path: &Path) -> Result<()> {
             100.0 * d.dsr
         );
     }
-    println!("* Sharpe que o melhor de N testes daria sem habilidade nenhuma. DSR = chance de o Sharpe verdadeiro superar isso.");
+    let _ = writeln!(s, "* Sharpe que o melhor de N testes daria sem habilidade nenhuma. DSR = chance de o Sharpe verdadeiro superar isso.");
+    s
+}
+
+/// Mostra todos os testes já feitos, descontados pelo número final de tentativas.
+pub fn print_all(path: &Path) -> Result<()> {
+    print!("{}", report(path));
     Ok(())
 }
 
