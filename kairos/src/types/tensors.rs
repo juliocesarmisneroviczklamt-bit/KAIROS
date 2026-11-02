@@ -11,6 +11,8 @@ use super::*;
 pub const AX_MONTH: u32 = 0;
 pub const AX_DAY: u32 = 1;
 pub const AX_ASSET: u32 = 2;
+/// the trading session within its month (M8: daily data is `Tensor[month, session, asset]`)
+pub const AX_SESSION: u32 = 3;
 
 fn expr_name(e: &Expr) -> Option<&str> {
     match &e.kind {
@@ -25,6 +27,7 @@ impl Checker {
             AxisDef { name: "month".into(), temporal: Some(Freq::Monthly) },
             AxisDef { name: "day".into(), temporal: Some(Freq::Daily) },
             AxisDef { name: "asset".into(), temporal: None },
+            AxisDef { name: "session".into(), temporal: None },
         ];
         let ids = axes.iter().enumerate().map(|(i, a)| (a.name.clone(), i as u32)).collect();
         (axes, ids)
@@ -895,7 +898,7 @@ impl Checker {
     /// `b3.f(...)`: the bridge to the quant-b3 lab (data and the realistic simulator).
     pub(super) fn b3_call(&mut self, method: &str, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
         let what = format!("`b3.{method}`");
-        if method != "evaluate" {
+        if method != "evaluate" && method != "nefin" {
             Self::no_named_args(args, &what)?;
         }
         if let Some(a) = args.iter().find(|a| a.inout) {
@@ -953,6 +956,48 @@ impl Checker {
                 let (sid, xs) = self.weights_and_options("b3.evaluate", &args[0].expr, false, &named, sp)?;
                 host(HostFn::Evaluate { result: sid }, xs, Ty::Struct(sid))
             }
+            "daily_returns" | "daily_volume" | "daily_price" => {
+                nargs(0)?;
+                let field = match method {
+                    "daily_returns" => 0,
+                    "daily_volume" => 1,
+                    _ => 2,
+                };
+                host(HostFn::Daily { field }, vec![], Ty::Tensor(vec![AX_MONTH, AX_SESSION, AX_ASSET], Box::new(Ty::Float)))
+            }
+            "sessions" => {
+                nargs(0)?;
+                host(HostFn::Sessions, vec![], Ty::Tensor(vec![AX_MONTH, AX_SESSION], Box::new(Ty::Bool)))
+            }
+            "issuers" | "classes" => {
+                nargs(0)?;
+                host(if method == "issuers" { HostFn::Issuers } else { HostFn::Classes }, vec![], Ty::List(Box::new(Ty::Str)))
+            }
+            "nefin" => {
+                nargs(1)?;
+                let names = ["rm_rf", "smb", "hml", "wml", "iml", "rf"];
+                let factor = match &args[0].expr.kind {
+                    ExprKind::Str(n) if args[0].name.is_none() => names.iter().position(|x| x == n),
+                    _ => None,
+                };
+                let Some(factor) = factor else {
+                    return Err(Diag::new("E0101", args[0].expr.span, "`b3.nefin` takes the factor's name in quotes")
+                        .hint("one of \"rm_rf\", \"smb\", \"hml\", \"wml\", \"iml\", \"rf\" (equally weighted; `vw: true` for value weighted)"));
+                };
+                let mut vw = HExpr::Lit(Value::Bool(false));
+                for a in &args[1..] {
+                    match &a.name {
+                        Some((n, _)) if n == "vw" => {
+                            let (h, t) = self.expr(&a.expr, Some(&Ty::Bool))?;
+                            self.expect_ty(&t, &Ty::Bool, a.expr.span)?;
+                            vw = h;
+                        }
+                        Some((n, nsp)) => return Err(Diag::new("E0120", *nsp, format!("`b3.nefin` has no option `{n}`")).hint("its only option is `vw: true`")),
+                        None => return Err(Diag::new("E0120", a.expr.span, "positional arguments must come before named ones")),
+                    }
+                }
+                host(HostFn::Nefin { factor: factor as u8 }, vec![vw], Ty::Tensor(vec![AX_MONTH], Box::new(Ty::Float)))
+            }
             "holdout" => {
                 nargs(1)?;
                 let ExprKind::Str(name) = &args[0].expr.kind else {
@@ -965,7 +1010,7 @@ impl Checker {
                 host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
             }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, issuers, classes, nefin")),
         }
     }
 

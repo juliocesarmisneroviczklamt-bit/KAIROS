@@ -138,6 +138,17 @@ impl Parser {
             Tok::Enum => Ok(Item::Enum(self.enum_decl()?)),
             Tok::Axis => Ok(Item::Axis(self.axis_decl()?)),
             Tok::Protocol => Ok(Item::Protocol(self.protocol_decl()?)),
+            Tok::Import => {
+                let start = self.span();
+                self.bump();
+                match self.peek().clone() {
+                    Tok::Str(path) => {
+                        self.bump();
+                        Ok(Item::Import(path, start.to(self.prev_span())))
+                    }
+                    _ => Err(self.err_expected("the file to import in quotes, e.g. `import \"lab/universe.krs\"`")),
+                }
+            }
             _ => {
                 let (s, block_like) = self.stmt()?;
                 if !(self.eat(&Tok::Semi) || *self.peek() == Tok::Eof || block_like) {
@@ -427,7 +438,7 @@ impl Parser {
                 let span = start.to(init.span);
                 Ok((Stmt::Let { mutable, pat, ty, init, span }, false))
             }
-            Tok::Fn | Tok::Struct | Tok::Enum | Tok::Axis | Tok::Protocol => {
+            Tok::Fn | Tok::Struct | Tok::Enum | Tok::Axis | Tok::Protocol | Tok::Import => {
                 Err(Diag::new("E0003", self.span(), "declarations are only allowed at the top level (for now)"))
             }
             _ => {

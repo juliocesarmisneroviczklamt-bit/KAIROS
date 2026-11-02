@@ -994,6 +994,9 @@ impl<'a> An<'a> {
                 TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown }
             }
             HostFn::Holdout { .. } => TV::ALWAYS,
+            // the sessions of month t are known at end(t); the calendar and the companies always
+            HostFn::Daily { .. } | HostFn::Nefin { .. } => data(0),
+            HostFn::Sessions | HostFn::Issuers | HostFn::Classes => TV::ALWAYS,
             HostFn::OpenOnce { .. } => {
                 // the holdout trades the same way: no look-ahead there either
                 self.check_weights(&vals[1], sp)?;

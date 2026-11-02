@@ -1,0 +1,9 @@
+// Acceptance: the NEFIN universe computed in Kairós (lab/universe.krs) is the one quant-b3
+// computes in Rust (`b3.eligible()`), month by month and asset by asset.
+import "universe.krs"
+
+let mine = nefin_universe(500000.0)
+let rust = b3.eligible()
+let differ = sum(where(where(mine, 1.0, 0.0) != where(rust, 1.0, 0.0), 1.0, 0.0))
+print("eligible (asset, month) pairs:", sum(where(mine, 1.0, 0.0)), "in Kairós,", sum(where(rust, 1.0, 0.0)), "in Rust")
+print("pairs that differ:", differ)

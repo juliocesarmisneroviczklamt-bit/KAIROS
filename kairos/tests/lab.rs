@@ -1,0 +1,166 @@
+//! M8: the lab in Kairós. Each rule ported from quant-b3 (Rust) to `kairos/lab/*.krs` must give
+//! exactly the same result as the Rust it replaces. These tests use a synthetic market built to
+//! hit the edge cases (so they run everywhere); the same checks run on the real B3 data with
+//! `kairos run kairos/lab/check_universe.krs`.
+
+use kairos::bridge::Host;
+use kairos::session::Session;
+use quant_b3::common::Data;
+use quant_b3::macrodata::Factors;
+use quant_b3::panel::{Day, Panel, Tk};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::rc::Rc;
+
+struct Buf(Rc<RefCell<Vec<u8>>>);
+
+impl Write for Buf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// 2001..2004, months of 19 to 22 sessions. The assets:
+/// - AAAA3/AAAA4: one company, the leading class changes from year to year;
+/// - BBBB3: liquid on about 85% of the days in 2001, 70% in 2002 (in, then out);
+/// - CCCC11: an ETF (class CI), very liquid, never eligible;
+/// - DDDD3: lists in July 2002 (its 2002 window starts there);
+/// - EEEE3: lists in December 2002 (not eligible in 2003);
+/// - FFFF3: stops trading in March 2002 (not eligible in 2003);
+/// - GGGG3/GGGG4: one company, the same volume every day (the first class wins);
+/// - 20 plain liquid stocks.
+fn market() -> Rc<Data> {
+    let mut dates = Vec::new();
+    for y in 2001..=2004u32 {
+        for m in 1..=12u32 {
+            let n = 19 + (m + y) % 4;
+            for d in 1..=n {
+                dates.push(y * 10000 + m * 100 + d);
+            }
+        }
+    }
+    let mut rng = Rng(0x0DDB_1A5E_5BAD_5EED);
+    let mut tks = Vec::new();
+    let mut add = |ticker: &str, class: &str, vol: &dyn Fn(u32, &mut Rng) -> Option<f64>, rng: &mut Rng| {
+        let mut days = Vec::new();
+        for (di, &date) in dates.iter().enumerate() {
+            if let Some(v) = vol(date, rng) {
+                days.push(Day { di: di as u32, r: 0.02 * (rng.unit() - 0.5), vol: v, div: 0.0, jcp: 0.0, spr: 0.002, px: 10.0 });
+            }
+        }
+        if days.is_empty() {
+            return;
+        }
+        let (first, last) = (dates[days[0].di as usize], dates[days[days.len() - 1].di as usize]);
+        tks.push(Tk { ticker: ticker.into(), issuer: ticker[..4].into(), class: class.into(), first, last, days });
+    };
+    // the leading class flips: AAAA4 leads in odd years, AAAA3 in even ones
+    add("AAAA3", "ON", &|d, _| Some(if (d / 10000) % 2 == 0 { 9e6 } else { 2e6 }), &mut rng);
+    add("AAAA4", "PN", &|d, _| Some(if (d / 10000) % 2 == 1 { 9e6 } else { 2e6 }), &mut rng);
+    add("BBBB3", "ON", &|d, r| {
+        let p = if d < 20020101 { 0.86 } else { 0.70 };
+        Some(if r.unit() < p { 800_000.0 } else { 200_000.0 })
+    }, &mut rng);
+    add("CCCC11", "CI", &|_, _| Some(5e7), &mut rng);
+    add("DDDD3", "ON", &|d, _| (d >= 20020710).then_some(3e6), &mut rng);
+    add("EEEE3", "ON", &|d, _| (d >= 20021205).then_some(3e6), &mut rng);
+    add("FFFF3", "ON", &|d, _| (d < 20020301).then_some(3e6), &mut rng);
+    add("GGGG3", "ON", &|_, _| Some(4e6), &mut rng);
+    add("GGGG4", "PN", &|_, _| Some(4e6), &mut rng);
+    for i in 0..20 {
+        let t = format!("P{i:03}3");
+        // a few days without trades
+        add(&t, "ON", &|_, r| (r.unit() > 0.03).then_some(1e6 + 1e5 * r.unit()), &mut rng);
+    }
+    let cdi: BTreeMap<u32, f64> = dates.iter().map(|&d| (d, 0.0004)).collect();
+    let mut ff = BTreeMap::new();
+    let mut ipca = BTreeMap::new();
+    for y in 2001..=2004u32 {
+        for m in 1..=12u32 {
+            ff.insert(y * 100 + m, Factors { rm_rf: 0.01, smb: 0.0, hml: 0.0, wml: 0.0, iml: 0.0, rf: 0.008 });
+            ipca.insert(y * 100 + m, 0.004);
+        }
+    }
+    Rc::new(Data::build(Panel { dates, tks }, &cdi, &ff, &ff.clone(), ipca))
+}
+
+fn run(d: &Rc<Data>, src: &str) -> String {
+    let buf = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Session::with_host(Box::new(Buf(buf.clone())), Host::with_data(d.clone()));
+    // a program in the lab folder: its imports resolve there
+    let name = concat!(env!("CARGO_MANIFEST_DIR"), "/lab/test.krs");
+    if let Err(e) = s.run(name, src) {
+        panic!("{}", s.render(&e));
+    }
+    String::from_utf8(buf.borrow().clone()).unwrap()
+}
+
+fn on_big_stack(f: fn()) {
+    use kairos::interp::STACK_BYTES;
+    use std::sync::atomic::Ordering;
+    let spawned = std::thread::Builder::new().stack_size(256 << 20).spawn(move || {
+        STACK_BYTES.store(256 << 20, Ordering::Relaxed);
+        f()
+    });
+    match spawned {
+        Ok(h) => {
+            if let Err(p) = h.join() {
+                std::panic::resume_unwind(p);
+            }
+        }
+        Err(_) => {
+            STACK_BYTES.store(4 << 20, Ordering::Relaxed);
+            f()
+        }
+    }
+}
+
+#[test]
+fn the_nefin_universe_in_kairos_is_the_rust_one() {
+    on_big_stack(|| {
+        let d = market();
+        let out = run(
+            &d,
+            r#"
+import "universe.krs"
+let mine = nefin_universe(500000.0)
+let rust = b3.eligible()
+print(sum(where(where(mine, 1.0, 0.0) != where(rust, 1.0, 0.0), 1.0, 0.0)))
+let t = b3.tickers()
+let jan = [b3.month_index(200201), b3.month_index(200301), b3.month_index(200401)]
+for m in jan {
+    var names = []
+    for a in 0..len(t) {
+        if mine[month: m, asset: a] and not (t[a] == "P0003" or t[a] == "P0013") {
+            names.push(t[a])
+        }
+    }
+    print(b3.months()[m], names)
+}
+"#,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "0.0", "the Kairós universe differs from the Rust one:\n{out}");
+        // 2002 (from 2001): AAAA4 leads, BBBB3 liquid, GGGG3 wins the tie; no ETF
+        assert!(lines[1].starts_with("200201 [\"AAAA4\", \"BBBB3\", \"FFFF3\", \"GGGG3\""), "{out}");
+        // 2003 (from 2002): AAAA3 leads, BBBB3 out, DDDD3 in (from its listing), EEEE3 and FFFF3 out
+        assert!(lines[2].starts_with("200301 [\"AAAA3\", \"DDDD3\", \"GGGG3\""), "{out}");
+        assert!(lines[3].starts_with("200401 [\"AAAA4\", \"DDDD3\", \"EEEE3\", \"GGGG3\""), "{out}");
+    })
+}

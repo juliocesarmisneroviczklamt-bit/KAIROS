@@ -9,6 +9,8 @@ pub enum Item {
     Enum(EnumDecl),
     Axis(AxisDecl),
     Protocol(ProtocolDecl),
+    /// `import "path.krs"`: the file's declarations become available (each file once)
+    Import(String, crate::diag::Span),
     Stmt(Stmt),
 }
 

@@ -1,0 +1,124 @@
+// The NEFIN liquid universe, written in Kairós: the rule of quant-b3's src/universe.rs, which
+// this file replaces. For the months of year y, using only year y - 1:
+//
+// - stocks only (class CI, the ETFs, is out), listed before December of y - 1, traded in y - 1;
+// - the most traded class of each company: the largest volume in y - 1 (a tie goes to the asset
+//   that comes first);
+// - liquid in more than 80% of its sessions of y - 1 (counted from its listing, if it listed in
+//   y - 1) with a traded volume above `min_vol` (NEFIN: R$ 500 thousand).
+//
+// The temporal checker proves that the universe of each month uses only earlier months.
+
+axis peer   // another asset, to compare the classes of a company
+
+struct Companies {
+    same: Tensor[asset, peer; bool],      // the two assets belong to the same company
+    earlier: Tensor[asset, peer; bool],   // the peer comes first (a tie goes to it)
+    etf: Tensor[asset; bool],
+}
+
+fn companies() -> Companies {
+    let iss = b3.issuers()
+    let cls = b3.classes()
+    let n = len(iss)
+    // one number per company (the assets come sorted by ticker, so a company's classes are
+    // usually next to each other; the search covers the rest)
+    var names = []
+    var ids = []
+    var etf = []
+    var pos = []
+    for t in 0..n {
+        var id = -1
+        if t > 0 and iss[t] == iss[t - 1] {
+            id = ids[t - 1]
+        } else {
+            for j in 0..len(names) {
+                if names[j] == iss[t] {
+                    id = j
+                    break
+                }
+            }
+            if id < 0 {
+                id = len(names)
+                names.push(iss[t])
+            }
+        }
+        ids.push(id)
+        etf.push(if cls[t] == "CI" { 1.0 } else { 0.0 })
+        pos.push(float(t))
+    }
+    var fids = []
+    for t in 0..n {
+        fids.push(float(ids[t]))
+    }
+    let grid = zeros(asset: n, peer: n)
+    Companies {
+        same: grid + tensor(fids, asset) == grid + tensor(fids, peer),
+        earlier: grid + tensor(pos, peer) < grid + tensor(pos, asset),
+        etf: tensor(etf, asset) > 0.5,
+    }
+}
+
+// The eligible assets for the year after `vol` (its 12 months: the year y - 1). `before`: the
+// assets that traded before y - 1.
+fn nefin_year(vol: Tensor[month, session, asset; f64], real: Tensor[month, session; bool], before: Tensor[asset; bool], co: Companies, min_vol: f64) -> Tensor[asset; bool] {
+    let na = size(vol, asset)
+    var started = before
+    var window = zeros(asset: na)    // sessions since the listing
+    var liquid = zeros(asset: na)    // sessions with volume above the minimum
+    var traded = zeros(asset: na)
+    var total = zeros(asset: na)     // volume, summed day by day (as quant-b3 does)
+    var by_nov = before              // traded before December
+    for j in 0..size(vol, month) {
+        for s in 0..size(vol, session) {
+            if real[month: j, session: s] {
+                let v = vol[month: j, session: s]
+                let has = not is_nan(v)
+                started = started or has
+                window = window + where(started, 1.0, 0.0)
+                liquid = liquid + where(v > min_vol, 1.0, 0.0)
+                traded = traded + where(has, 1.0, 0.0)
+                total = total + fill_nan(v, 0.0)
+                if j < 11 {
+                    by_nov = by_nov or has
+                }
+            }
+        }
+    }
+    let candidate = not co.etf and by_nov and traded > 0.0
+    // the leading class: no other candidate of the company traded more (or as much, first)
+    let grid = zeros(asset: na, peer: na)
+    let peer_total = grid + tensor(to_list(total), peer)
+    let peer_cand = grid + tensor(to_list(where(candidate, 1.0, 0.0)), peer) > 0.5
+    let mine = grid + total
+    let beaten = co.same and peer_cand and (peer_total > mine or (peer_total == mine and co.earlier))
+    let leader = candidate and sum(where(beaten, 1.0, 0.0), over: peer) == 0.0
+    leader and window > 0.0 and liquid / window > 0.8
+}
+
+// The universe of every month: `Tensor[month, asset; bool]`.
+fn nefin_universe(min_vol: f64) -> Tensor[month, asset; bool] {
+    let vol = b3.daily_volume()
+    let real = b3.sessions()
+    let months = b3.months()
+    let co = companies()
+    let na = size(vol, asset)
+    var out = zeros(month: size(vol, month), asset: na) > 1.0
+    let none = zeros(asset: na) > 1.0
+    var year = none
+    var seen = none            // traded in an earlier month
+    var at_last_jan = none     // `seen` at the previous January
+    for m in 0..size(vol, month) {
+        if months[m] % 100 == 1 {
+            if m >= 12 {
+                year = nefin_year(vol[month: m - 12 ..= m - 1], real[month: m - 12 ..= m - 1], at_last_jan, co, min_vol)
+            } else {
+                year = none
+            }
+            at_last_jan = seen
+        }
+        out[month: m] = year
+        seen = seen or nan_count(vol[month: m], over: session) > 0.0
+    }
+    out
+}

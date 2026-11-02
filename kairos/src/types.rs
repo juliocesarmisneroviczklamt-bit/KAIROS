@@ -12,7 +12,7 @@ use crate::value::Value;
 use std::collections::HashMap;
 
 mod tensors;
-pub use tensors::{AX_ASSET, AX_DAY, AX_MONTH};
+pub use tensors::{AX_ASSET, AX_DAY, AX_MONTH, AX_SESSION};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {

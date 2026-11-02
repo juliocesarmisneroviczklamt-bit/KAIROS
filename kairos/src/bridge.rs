@@ -13,7 +13,7 @@
 
 use crate::ledger::{self, Kind, Ledger, Row};
 use crate::tensor::TensorVal;
-use crate::types::{ProtocolDef, AX_ASSET, AX_MONTH};
+use crate::types::{ProtocolDef, AX_ASSET, AX_MONTH, AX_SESSION};
 use quant_b3::backtest::{self, Costs, Plan, SimCfg, SimOut};
 use quant_b3::common::{self, Data};
 use quant_b3::registry::{self, Trial};
@@ -84,6 +84,9 @@ pub struct Host {
     ret: OnceCell<Rc<TensorVal>>,
     elig: OnceCell<Rc<TensorVal>>,
     cdi: OnceCell<Rc<TensorVal>>,
+    /// daily returns, volumes and prices (M8)
+    daily: [OnceCell<Rc<TensorVal>>; 3],
+    sess: OnceCell<Rc<TensorVal>>,
     /// the same tensors cut at the last month the program may see: (which, months)
     views: RefCell<HashMap<(u8, usize), Rc<TensorVal>>>,
     /// folder of the ledger and of the registry; `None`: kept in memory (tests, embedding)
@@ -130,6 +133,11 @@ fn lab_seed(dir: &Path) -> Vec<Row> {
         .unwrap_or_else(|| util::ym(date));
     let note = format!("results/protocolo_busca.md: {why}");
     vec![Row::new(Kind::Opened, "busca-de-alpha (quant-b3)", &sha, search::SPLIT, until, date, &note)]
+}
+
+/// The most trading sessions in a month (the width of the daily tensors).
+fn sessions_per_month(d: &Data) -> usize {
+    d.cal.mrange.iter().map(|(a, b)| b - a).max().unwrap_or(1).max(1)
 }
 
 /// The first `n` months of a tensor whose first axis is `month`.
@@ -392,6 +400,79 @@ impl Host {
         let d = self.data()?;
         let full = Self::cached(&self.cdi, || TensorVal::new_f(vec![AX_MONTH], vec![d.cal.months.len()], d.cdi_m.clone()));
         Ok(self.view(2, n, full))
+    }
+
+    /// `Tensor[month, session, asset; f64]` (M8): one row per month, one column per trading session
+    /// of the month (B3 months have up to 23); NaN where the asset did not trade, and in the
+    /// sessions a month does not have. `field`: 0 total return since the previous trade (dividends
+    /// and corporate events included), 1 traded volume in R$, 2 unadjusted close price.
+    pub fn daily(&self, field: u8, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let k = field.min(2) as usize;
+        let full = Self::cached(&self.daily[k], || {
+            let (nm, nt, s) = (d.cal.months.len(), d.panel.tks.len(), sessions_per_month(d));
+            let mut v = vec![f64::NAN; nm * s * nt];
+            for (t, tk) in d.panel.tks.iter().enumerate() {
+                for day in &tk.days {
+                    let di = day.di as usize;
+                    let m = d.cal.date_month[di];
+                    let j = di - d.cal.mrange[m].0;
+                    v[(m * s + j) * nt + t] = match k {
+                        0 => day.r,
+                        1 => day.vol,
+                        _ => day.px as f64,
+                    };
+                }
+            }
+            TensorVal::new_f(vec![AX_MONTH, AX_SESSION, AX_ASSET], vec![nm, s, nt], v)
+        });
+        Ok(self.view(10 + k as u8, n, full))
+    }
+
+    /// `Tensor[month, session; bool]`: the trading sessions each month has.
+    pub fn sessions(&self, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let full = Self::cached(&self.sess, || {
+            let (nm, s) = (d.cal.months.len(), sessions_per_month(d));
+            let mut v = vec![false; nm * s];
+            for (m, &(a, b)) in d.cal.mrange.iter().enumerate() {
+                for j in 0..(b - a) {
+                    v[m * s + j] = true;
+                }
+            }
+            TensorVal::new_b(vec![AX_MONTH, AX_SESSION], vec![nm, s], v)
+        });
+        Ok(self.view(13, n, full))
+    }
+
+    /// The company (`issuers`) or the class (`classes`, e.g. ON, PN, UNT, CI for ETFs) of each asset.
+    pub fn asset_names(&self, issuers: bool) -> Result<Vec<String>, HostErr> {
+        Ok(self.data()?.panel.tks.iter().map(|t| if issuers { t.issuer.clone() } else { t.class.clone() }).collect())
+    }
+
+    /// `Tensor[month; f64]`: a NEFIN factor (equally weighted, or value weighted); NaN where NEFIN
+    /// has no value.
+    pub fn nefin(&self, factor: u8, vw: bool, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let src = if vw { &d.nef_vw } else { &d.nef };
+        let v = src[..n]
+            .iter()
+            .map(|f| match f {
+                Some(f) => match factor {
+                    0 => f.rm_rf,
+                    1 => f.smb,
+                    2 => f.hml,
+                    3 => f.wml,
+                    4 => f.iml,
+                    _ => f.rf,
+                },
+                None => f64::NAN,
+            })
+            .collect();
+        Ok(Rc::new(TensorVal::new_f(vec![AX_MONTH], vec![n], v)))
     }
 
     pub fn months(&self, protos: &[ProtocolDef]) -> Result<Vec<i64>, HostErr> {

@@ -446,6 +446,13 @@ impl Interp<'_> {
                 let ev = host.evaluate(tensor_of(&v[0]), &cfg_of(&v[1..]), protos).map_err(herr)?;
                 self.evaluation(result, &ev, sp)?
             }
+            HostFn::Daily { field } => Value::Tensor(host.daily(field, protos).map_err(herr)?),
+            HostFn::Sessions => Value::Tensor(host.sessions(protos).map_err(herr)?),
+            HostFn::Issuers | HostFn::Classes => {
+                let names = host.asset_names(matches!(hf, HostFn::Issuers)).map_err(herr)?;
+                Value::List(Rc::new(names.into_iter().map(|s| Value::Str(s.into())).collect()))
+            }
+            HostFn::Nefin { factor } => Value::Tensor(host.nefin(factor, as_bool(v[0].clone()), protos).map_err(herr)?),
             HostFn::Holdout { proto } => {
                 host.holdout(protos, proto as usize).map_err(herr)?;
                 Value::Holdout(proto)

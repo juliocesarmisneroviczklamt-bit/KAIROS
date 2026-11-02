@@ -160,6 +160,16 @@ pub enum HostFn {
     /// `open_once(h, weights, ...)`: args as `Evaluate`, then the protocol: name, research_until,
     /// holdout_from, rule
     OpenOnce { result: u32 },
+    /// M8, daily data as `Tensor[month, session, asset]`: 0 returns, 1 traded volume (R$),
+    /// 2 unadjusted close price
+    Daily { field: u8 },
+    /// `Tensor[month, session; bool]`: the sessions that exist
+    Sessions,
+    /// company and class of each asset
+    Issuers,
+    Classes,
+    /// a NEFIN factor (0 rm_rf, 1 smb, 2 hml, 3 wml, 4 iml, 5 rf); args: value-weighted?
+    Nefin { factor: u8 },
 }
 
 /// Selector of one tensor axis: `axis: i` (removes the axis) or `axis: a .. b` / `a ..= b`.

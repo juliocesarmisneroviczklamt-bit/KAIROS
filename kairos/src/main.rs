@@ -76,6 +76,7 @@ fn file_cmd(path: Option<&String>, run: bool) -> i32 {
     // the program's name in the registry of trials
     let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
     s.host().set_program(&stem);
+    s.mark_imported(path);
     let res = if run { s.run(path, &src).map(|_| ()) } else { s.check(path, &src) };
     match res {
         Ok(()) => {
