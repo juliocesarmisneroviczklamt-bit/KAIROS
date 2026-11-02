@@ -50,48 +50,224 @@ fn run_compiler(program: &str, args: Vec<String>) -> String {
     String::from_utf8(buf.borrow().clone()).unwrap()
 }
 
-/// What a WASI program wrote and how it ended.
+/// What a WASI program wrote, the files it has open, and the folder its paths start from.
 #[derive(Default)]
 struct Wasi {
     out: Vec<u8>,
     err: Vec<u8>,
+    root: PathBuf,
+    files: std::collections::HashMap<i32, std::fs::File>,
+    next_fd: i32,
 }
 
-/// Runs a module's `_start` with the two WASI calls it imports: (stdout, stderr, exit code).
+/// WASI's code for an error of the file system.
+fn errno(e: &std::io::Error) -> i32 {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => 44,
+        std::io::ErrorKind::PermissionDenied => 2,
+        std::io::ErrorKind::AlreadyExists => 20,
+        _ => 29,
+    }
+}
+
+type Caller<'a> = wasmi::Caller<'a, Wasi>;
+
+fn memory(c: &Caller<'_>) -> wasmi::Memory {
+    c.get_export("memory").and_then(|e| e.into_memory()).expect("the module's memory")
+}
+
+fn mem_read(c: &Caller<'_>, at: i32, n: i32) -> Vec<u8> {
+    let mut b = vec![0u8; n as u32 as usize];
+    memory(c).read(c, at as u32 as usize, &mut b).expect("memory to read");
+    b
+}
+
+fn mem_write(c: &mut Caller<'_>, at: i32, b: &[u8]) {
+    let m = memory(c);
+    m.write(c, at as u32 as usize, b).expect("memory to write");
+}
+
+fn u32_at(c: &Caller<'_>, at: i32) -> i32 {
+    i32::from_le_bytes(mem_read(c, at, 4).try_into().unwrap())
+}
+
+fn wasi_path(c: &Caller<'_>, at: i32, n: i32) -> PathBuf {
+    c.data().root.join(String::from_utf8(mem_read(c, at, n)).expect("a UTF-8 path"))
+}
+
+/// C strings for args_get and environ_get: (count, total bytes, the strings).
+fn c_strings(list: &[String]) -> (i32, i32, Vec<Vec<u8>>) {
+    let v: Vec<Vec<u8>> = list.iter().map(|s| [s.as_bytes(), &[0u8][..]].concat()).collect();
+    (v.len() as i32, v.iter().map(|x| x.len() as i32).sum(), v)
+}
+
+fn put_c_strings(c: &mut Caller<'_>, list: &[String], ptrs: i32, buf: i32) {
+    let (_, _, v) = c_strings(list);
+    let mut at = buf;
+    for (i, s) in v.iter().enumerate() {
+        mem_write(c, ptrs + 4 * i as i32, &at.to_le_bytes());
+        mem_write(c, at, s);
+        at += s.len() as i32;
+    }
+}
+
+fn wasi_args() -> Vec<String> {
+    vec!["program.wasm".to_string()]
+}
+
+fn wasi_environ() -> Vec<String> {
+    std::env::vars().map(|(k, v)| format!("{k}={v}")).collect()
+}
+
+/// Runs a module's `_start` with the WASI functions it imports: a minimal WASI, with the program's
+/// name as its only argument, the environment, and the files under the crate's folder (as
+/// `wasmtime --dir=.` gives them). The result: (stdout, stderr, exit code).
 fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
-    use wasmi::{Caller, Config, Engine, Linker, Module, Store};
+    use std::io::{Read, Write};
+    use wasmi::{Config, Engine, Linker, Module, Store};
     // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
     let mut config = Config::default();
     config.set_max_recursion_depth(100_000);
     let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
-    let mut store = Store::new(&engine, Wasi::default());
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, ..Wasi::default() });
     let mut linker = <Linker<Wasi>>::new(&engine);
+    let w = "wasi_snapshot_preview1";
     linker
-        .func_wrap("wasi_snapshot_preview1", "fd_write", |mut caller: Caller<'_, Wasi>, fd: i32, iovs: i32, n: i32, nw: i32| -> i32 {
-            let mem = caller.get_export("memory").and_then(|e| e.into_memory()).expect("the module's memory");
+        .func_wrap(w, "fd_write", |mut c: Caller<'_>, fd: i32, iovs: i32, n: i32, nw: i32| -> i32 {
             let mut total = 0usize;
-            for k in 0..n as usize {
-                let mut iov = [0u8; 8];
-                mem.read(&caller, iovs as usize + 8 * k, &mut iov).expect("an iovec");
-                let ptr = u32::from_le_bytes(iov[..4].try_into().unwrap()) as usize;
-                let len = u32::from_le_bytes(iov[4..].try_into().unwrap()) as usize;
-                let mut bytes = vec![0u8; len];
-                mem.read(&caller, ptr, &mut bytes).expect("the bytes to write");
-                if fd == 1 {
-                    caller.data_mut().out.extend_from_slice(&bytes);
-                } else {
-                    caller.data_mut().err.extend_from_slice(&bytes);
+            for k in 0..n {
+                let ptr = u32_at(&c, iovs + 8 * k);
+                let len = u32_at(&c, iovs + 8 * k + 4);
+                let bytes = mem_read(&c, ptr, len);
+                total += bytes.len();
+                match fd {
+                    1 => c.data_mut().out.extend_from_slice(&bytes),
+                    2 => c.data_mut().err.extend_from_slice(&bytes),
+                    _ => match c.data_mut().files.get_mut(&fd) {
+                        Some(f) => {
+                            if let Err(e) = f.write_all(&bytes) {
+                                return errno(&e);
+                            }
+                        }
+                        None => return 8,
+                    },
                 }
-                total += len;
             }
-            mem.write(&mut caller, nw as usize, &(total as u32).to_le_bytes()).expect("the count");
+            mem_write(&mut c, nw, &(total as u32).to_le_bytes());
+            0
+        })
+        .unwrap();
+    linker.func_wrap(w, "proc_exit", |_: Caller<'_>, code: i32| -> Result<(), wasmi::Error> { Err(wasmi::Error::i32_exit(code)) }).unwrap();
+    linker
+        .func_wrap(w, "args_sizes_get", |mut c: Caller<'_>, count: i32, size: i32| -> i32 {
+            let (n, total, _) = c_strings(&wasi_args());
+            mem_write(&mut c, count, &n.to_le_bytes());
+            mem_write(&mut c, size, &total.to_le_bytes());
             0
         })
         .unwrap();
     linker
-        .func_wrap("wasi_snapshot_preview1", "proc_exit", |_: Caller<'_, Wasi>, code: i32| -> Result<(), wasmi::Error> {
-            Err(wasmi::Error::i32_exit(code))
+        .func_wrap(w, "args_get", |mut c: Caller<'_>, ptrs: i32, buf: i32| -> i32 {
+            put_c_strings(&mut c, &wasi_args(), ptrs, buf);
+            0
+        })
+        .unwrap();
+    linker
+        .func_wrap(w, "environ_sizes_get", |mut c: Caller<'_>, count: i32, size: i32| -> i32 {
+            let (n, total, _) = c_strings(&wasi_environ());
+            mem_write(&mut c, count, &n.to_le_bytes());
+            mem_write(&mut c, size, &total.to_le_bytes());
+            0
+        })
+        .unwrap();
+    linker
+        .func_wrap(w, "environ_get", |mut c: Caller<'_>, ptrs: i32, buf: i32| -> i32 {
+            put_c_strings(&mut c, &wasi_environ(), ptrs, buf);
+            0
+        })
+        .unwrap();
+    linker
+        .func_wrap(
+            w,
+            "path_open",
+            |mut c: Caller<'_>, dir: i32, _flags: i32, at: i32, n: i32, oflags: i32, _rights: i64, _inherit: i64, _fdflags: i32, fd_out: i32| -> i32 {
+                if dir != 3 {
+                    return 8;
+                }
+                let p = wasi_path(&c, at, n);
+                // 1: create, 8: truncate
+                let r = if oflags & 1 != 0 {
+                    std::fs::OpenOptions::new().write(true).create(true).truncate(oflags & 8 != 0).open(&p)
+                } else {
+                    std::fs::File::open(&p)
+                };
+                match r {
+                    Ok(f) => {
+                        let fd = c.data().next_fd;
+                        c.data_mut().next_fd += 1;
+                        c.data_mut().files.insert(fd, f);
+                        mem_write(&mut c, fd_out, &fd.to_le_bytes());
+                        0
+                    }
+                    Err(e) => errno(&e),
+                }
+            },
+        )
+        .unwrap();
+    linker
+        .func_wrap(w, "fd_read", |mut c: Caller<'_>, fd: i32, iovs: i32, n: i32, nr: i32| -> i32 {
+            let mut total = 0usize;
+            for k in 0..n {
+                let ptr = u32_at(&c, iovs + 8 * k);
+                let len = u32_at(&c, iovs + 8 * k + 4);
+                let mut buf = vec![0u8; len as u32 as usize];
+                let got = match c.data_mut().files.get_mut(&fd) {
+                    Some(f) => match f.read(&mut buf) {
+                        Ok(g) => g,
+                        Err(e) => return errno(&e),
+                    },
+                    None => return 8,
+                };
+                mem_write(&mut c, ptr, &buf[..got]);
+                total += got;
+                if got < buf.len() {
+                    break;
+                }
+            }
+            mem_write(&mut c, nr, &(total as u32).to_le_bytes());
+            0
+        })
+        .unwrap();
+    linker.func_wrap(w, "fd_close", |mut c: Caller<'_>, fd: i32| -> i32 { if c.data_mut().files.remove(&fd).is_some() { 0 } else { 8 } }).unwrap();
+    linker
+        .func_wrap(w, "path_create_directory", |c: Caller<'_>, dir: i32, at: i32, n: i32| -> i32 {
+            if dir != 3 {
+                return 8;
+            }
+            match std::fs::create_dir(wasi_path(&c, at, n)) {
+                Ok(()) => 0,
+                Err(e) => errno(&e),
+            }
+        })
+        .unwrap();
+    linker
+        .func_wrap(w, "path_filestat_get", |mut c: Caller<'_>, dir: i32, _flags: i32, at: i32, n: i32, buf: i32| -> i32 {
+            if dir != 3 {
+                return 8;
+            }
+            match std::fs::metadata(wasi_path(&c, at, n)) {
+                Ok(m) => {
+                    // filestat: the file type at 16 (3 a folder, 4 a file), the size at 32
+                    let mut st = [0u8; 64];
+                    st[16] = if m.is_dir() { 3 } else { 4 };
+                    st[32..40].copy_from_slice(&m.len().to_le_bytes());
+                    mem_write(&mut c, buf, &st);
+                    0
+                }
+                Err(e) => errno(&e),
+            }
         })
         .unwrap();
     let instance = linker.instantiate_and_start(&mut store, &module).expect("instantiation");

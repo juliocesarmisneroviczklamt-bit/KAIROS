@@ -1,0 +1,48 @@
+// Files and bytes in WebAssembly, through WASI: paths are relative to the folder the runtime
+// opens for the program (`wasmtime --dir=. program.wasm`); texts are read as the interpreter reads
+// them (UTF-8, or else Latin-1; a byte order mark at the start is dropped).
+let dir = "tests/wasm/tmp"
+make_dir(dir + "/a/b")
+let p = dir + "/a/b/notes.txt"
+write_text(p, "ação, preço\nlinha 2\n")
+let t = read_text(p)
+print(join(split(t, from_codes([10])), "|"), len(t), utf8_len(t), file_exists(p), file_exists(dir + "/none"), file_size(p), file_size(dir + "/none"))
+var b = bytes()
+put_u8(inout b, 255)
+put_u32(inout b, 4000000000)
+put_i64(inout b, -2)
+put_u64(inout b, 9223372036854775807)
+put_f64(inout b, 3.25)
+put_f32(inout b, 0.1)
+put_str(inout b, "PETR4")
+let c = b
+put_u8(inout b, 7)
+print(b, c, len(b), len(c), b == c, [c])
+print(get_u8(b, 0), get_u32(b, 1), get_i64(b, 5), get_u64(b, 13), get_f64(b, 21), get_f32(b, 29), get_str(b, 33, 5), get_u8(b, 38))
+write_bytes(dir + "/data.bin", b)
+let back = read_bytes(dir + "/data.bin")
+print(back == b, len(back), args(), env("KAIROS_NO_SUCH_VARIABLE") == "")
+var latin = bytes()
+for x in [99, 231, 97, 111, 32, 233] { put_u8(inout latin, x) }
+write_bytes(dir + "/latin1.txt", latin)
+let lt = read_text(dir + "/latin1.txt")
+print(lt, len(lt), codes(lt))
+var bom = bytes()
+for x in [239, 187, 191] { put_u8(inout bom, x) }
+put_str(inout bom, "oi")
+write_bytes(dir + "/bom.txt", bom)
+print(read_text(dir + "/bom.txt"), len(read_text(dir + "/bom.txt")), file_size(dir + "/bom.txt"))
+var big = bytes()
+for i in 0..100000 { put_u32(inout big, i) }
+write_bytes(dir + "/big.bin", big)
+let rb = read_bytes(dir + "/big.bin")
+print(len(rb), get_u32(rb, 4 * 99999), rb == big)
+
+// the output, line by line:
+// out: ação, preço|linha 2| 20 23 true false 23 -1
+// out: <39 bytes> <38 bytes> 39 38 false [<38 bytes>]
+// out: 255 4000000000 -2 9223372036854775807 3.25 0.10000000149011612 PETR4 7
+// out: true 39 [] true
+// out: cçao é 6 [99, 231, 97, 111, 32, 233]
+// out: oi 2 5
+// out: 400000 99999 true

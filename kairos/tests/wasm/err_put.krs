@@ -1,0 +1,4 @@
+var b = bytes()
+put_u8(inout b, 255)
+print(len(b))           // out: 1
+put_u8(inout b, 256)    // error: R0014

@@ -1,0 +1,4 @@
+var b = bytes()
+put_u32(inout b, 7)
+print(get_u32(b, 0))    // out: 7
+print(get_u8(b, 4))     // error: R0001

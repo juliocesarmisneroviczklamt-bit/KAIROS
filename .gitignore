@@ -2,3 +2,6 @@
 /data
 /results
 /paper.cmd
+
+# files the WebAssembly tests write
+kairos/tests/wasm/tmp/

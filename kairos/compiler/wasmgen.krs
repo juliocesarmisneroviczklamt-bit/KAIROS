@@ -58,36 +58,37 @@ fn f_proc_exit() -> i64 {
     1
 }
 
+// after the 11 functions imported from WASI (wasi_imports)
 fn f_write() -> i64 {
-    2
+    11
 }
 
 fn f_fail() -> i64 {
-    3
+    12
 }
 
 fn f_print_i64() -> i64 {
-    4
+    13
 }
 
 fn f_alloc() -> i64 {
-    5
+    14
 }
 
 fn f_print_str() -> i64 {
-    6
+    15
 }
 
 fn f_incref() -> i64 {
-    7
+    16
 }
 
 fn f_start() -> i64 {
-    8
+    17
 }
 
 fn first_user_fn() -> i64 {
-    9
+    18
 }
 
 // The function index of a Kairós function, which is compiled once its index is asked for.
@@ -343,6 +344,7 @@ fn vt(t: Ty) -> i64 {
         TList(_) => wt_i32(),
         TEnum(_) => wt_i32(),
         TMap(_, _) => wt_i32(),
+        TBytes => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -358,6 +360,7 @@ fn heap(t: Ty) -> bool {
         TList(_) => true,
         TEnum(_) => true,
         TMap(_, _) => true,
+        TBytes => true,
         _ => false,
     }
 }
@@ -1192,6 +1195,7 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "push" { return push_w(inout g, e) }
     if b == "pop" { return pop_w(inout g, e) }
     if b == "remove" { return remove_w(inout g, e) }
+    if starts_with(b, "put_") { return put_w(inout g, e) }
     for a in args {
         if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
     }
@@ -1356,7 +1360,25 @@ fn builtin_w(inout g: WGen, e: H) {
     }
     if b == "keys" or b == "values" or b == "items" { return map_list(inout g, e, b) }
     if b == "get" { return get_w(inout g, e) }
-    if b == "len" and (is_list(args[0].kids[0].t) or is_map(args[0].kids[0].t)) {
+    if starts_with(b, "get_") { return get_bytes_w(inout g, e) }
+    if b == "bytes" {
+        i64c(inout g, 0)
+        call_f(inout g, rt_fn(inout g, "rt_bytes_new"))
+        return op(inout g, 167)
+    }
+    if b == "utf8_len" {
+        let ts = gen_borrow(inout g, args[0].kids[0], true)
+        load_at(inout g, wt_i32(), 4)
+        op(inout g, 173)
+        return drop_tmp(inout g, ts, Ty.TStr)
+    }
+    if b == "read_text" { return io_w(inout g, e, "rt_read_text", "read", Ty.TStr) }
+    if b == "read_bytes" { return io_w(inout g, e, "rt_read_file", "read", Ty.TBytes) }
+    if b == "write_text" { return io_w(inout g, e, "rt_write_text", "write", Ty.TUnit) }
+    if b == "write_bytes" { return io_w(inout g, e, "rt_write_bytes", "write", Ty.TUnit) }
+    if b == "make_dir" { return io_w(inout g, e, "rt_make_dir", "create", Ty.TUnit) }
+    if b == "args" { return call_f(inout g, rt_fn(inout g, "rt_args")) }
+    if b == "len" and (is_list(args[0].kids[0].t) or is_map(args[0].kids[0].t) or args[0].kids[0].t == Ty.TBytes) {
         let tl = gen_borrow(inout g, args[0].kids[0], true)
         load_at(inout g, wt_i32(), 4)
         op(inout g, 173)
@@ -1364,7 +1386,7 @@ fn builtin_w(inout g: WGen, e: H) {
     }
     // functions of the runtime on texts and lists, which borrow their arguments
     let on_rt = [("join", "rt_join"), ("codes", "rt_codes"), ("starts_with", "rt_starts_with"), ("ends_with", "rt_ends_with"),
-        ("find", "rt_find")]
+        ("find", "rt_find"), ("file_exists", "rt_file_exists"), ("file_size", "rt_file_size"), ("env", "rt_env")]
     for r in on_rt {
         if b == r.0 { return call_rt_borrowing(inout g, r.1, args) }
     }
@@ -1589,6 +1611,9 @@ fn call_rt_borrowing(inout g: WGen, name: str, args: List[H]) {
 
 // The instructions behind the runtime's `wasm_*` functions (their arguments are on the stack).
 fn intrinsic(inout g: WGen, name: str, e: H) {
+    if starts_with(name, "wasm_wasi_") { return wasi_call(inout g, substr(name, 10, len(name) - 10), e) }
+    if name == "wasm_bytes_addr" { return op(inout g, 173) }
+    if name == "wasm_bytes_at" { return op(inout g, 167) }
     if name == "wasm_load64" {
         op(inout g, 167)
         return load_at(inout g, wt_i64(), 0)
@@ -2572,6 +2597,307 @@ fn glue_eq_map(inout g: WGen, t: Ty) {
     i32c(inout g, 1)
 }
 
+// ------------------------------------------------------------------ bytes and files
+
+// The functions the module imports from WASI: (name, parameters, results). `fd_write` is 0 and
+// `proc_exit` 1; a call of the runtime's `wasm_wasi_<name>` is a call of `<name>`.
+fn wasi_imports() -> List[(str, List[i64], List[i64])] {
+    let i = wt_i32()
+    let l = wt_i64()
+    [("fd_write", [i, i, i, i], [i]), ("proc_exit", [i], []), ("args_sizes_get", [i, i], [i]), ("args_get", [i, i], [i]),
+        ("environ_sizes_get", [i, i], [i]), ("environ_get", [i, i], [i]), ("path_open", [i, i, i, i, i, l, l, i, i], [i]),
+        ("fd_read", [i, i, i, i], [i]), ("fd_close", [i], [i]), ("path_create_directory", [i, i, i], [i]),
+        ("path_filestat_get", [i, i, i, i, i], [i])]
+}
+
+// `wasm_wasi_<name>(...)`: the arguments (i64 in Kairós) as WASI takes them, the result as an i64.
+fn wasi_call(inout g: WGen, name: str, e: H) {
+    let ims = wasi_imports()
+    var k = -1
+    for j in 0..len(ims) {
+        if ims[j].0 == name { k = j }
+    }
+    if k < 0 { return wg_fail(inout g, e, "the WASI function `" + name + "`") }
+    let ps = ims[k].1
+    var ls: List[i64] = []
+    for p in ps { ls.push(new_local(inout g, wt_i64())) }
+    var j = len(ps) - 1
+    while j >= 0 {
+        lset(inout g, ls[j])
+        j -= 1
+    }
+    for q in 0..len(ps) {
+        lget(inout g, ls[q])
+        if ps[q] == wt_i32() { op(inout g, 167) }
+    }
+    call_f(inout g, k)
+    if len(ims[k].2) > 0 { op(inout g, 172) } else { i64c(inout g, 0) }
+}
+
+// A memory access of the bytes at an address that need not be aligned.
+fn op_mem(inout g: WGen, opcode: i64, off: i64) {
+    op_u(inout g, opcode, 0)
+    uleb(inout g.code, off)
+}
+
+// `put_u8(inout b, x)` and the others: the value first (checked), then the bytes (made unique,
+// with room), where it goes at the end.
+fn put_w(inout g: WGen, e: H) {
+    let b = e.text
+    let x = e.kids[1].kids[0]
+    let w = vt_of(inout g, x)
+    var tx = -1
+    let v = new_local(inout g, if w > 0 { w } else { wt_i32() })
+    if b == "put_str" {
+        tx = gen_borrow(inout g, x, true)
+    } else {
+        gen(inout g, x)
+    }
+    lset(inout g, v)
+    let limit = if b == "put_u8" { "u8" } else if b == "put_u32" { "u32" } else if b == "put_u64" { "u64" } else { "" }
+    if limit != "" {
+        lget(inout g, v)
+        if limit == "u64" {
+            i64c(inout g, 0)
+            op(inout g, 83)
+        } else {
+            i64c(inout g, if limit == "u8" { 255 } else { 4294967295 })
+            op(inout g, 86)
+        }
+        open(inout g, 4, 0)
+        fail_dyn(inout g, e, "R0014", "", " does not fit in " + limit, v, "rt_str_i64")
+        close(inout g)
+    }
+    let c = place_cell(inout g, e.kids[0].kids[0], false)
+    if g.failed { return }
+    // how many bytes
+    let n = new_local(inout g, wt_i64())
+    if b == "put_str" {
+        lget(inout g, v)
+        load_at(inout g, wt_i32(), 4)
+        op(inout g, 173)
+    } else {
+        i64c(inout g, if b == "put_u8" { 1 } else if b == "put_u32" or b == "put_f32" { 4 } else { 8 })
+    }
+    lset(inout g, n)
+    cell_load(inout g, c)
+    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    op(inout g, 173)
+    lget(inout g, n)
+    call_f(inout g, rt_fn(inout g, "rt_bytes_room"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    cell_store(inout g, c)
+    // the address of the end
+    let at = new_local(inout g, wt_i32())
+    lget(inout g, o)
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 4)
+    op(inout g, 106)
+    lset(inout g, at)
+    if b == "put_str" {
+        lget(inout g, at)
+        op(inout g, 173)
+        i64c(inout g, 16)
+        op(inout g, 124)
+        lget(inout g, v)
+        op(inout g, 173)
+        i64c(inout g, 8)
+        op(inout g, 124)
+        lget(inout g, n)
+        call_f(inout g, rt_fn(inout g, "rt_copy"))
+    } else {
+        lget(inout g, at)
+        lget(inout g, v)
+        if b == "put_u8" {
+            op_mem(inout g, 60, 16)
+        } else if b == "put_u32" {
+            op_mem(inout g, 62, 16)
+        } else if b == "put_f64" {
+            op_mem(inout g, 57, 16)
+        } else if b == "put_f32" {
+            op(inout g, 182)
+            op_mem(inout g, 56, 16)
+        } else {
+            op_mem(inout g, 55, 16)
+        }
+    }
+    // the length grows
+    lget(inout g, o)
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 4)
+    lget(inout g, n)
+    op(inout g, 167)
+    op(inout g, 106)
+    store_at(inout g, wt_i32(), 4)
+    drop_tmp(inout g, tx, x.t)
+}
+
+// R0001 unless the n bytes at `at` (locals, i64) are inside the bytes in local o.
+fn check_bytes(inout g: WGen, e: H, o: i64, at: i64, n: i64, n_known: i64) {
+    let ln = new_local(inout g, wt_i64())
+    list_len(inout g, o)
+    lset(inout g, ln)
+    lget(inout g, at)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    lget(inout g, at)
+    lget(inout g, ln)
+    lget(inout g, n)
+    op(inout g, 125)
+    op(inout g, 85)
+    op(inout g, 114)
+    open(inout g, 4, 0)
+    if n_known >= 0 {
+        fail_dyn2(inout g, e, "R0001", ["reading " + str(n_known) + " byte(s) at ", ", out of bounds for ", " bytes"], [(at, "rt_str_i64"), (ln, "rt_str_i64")])
+    } else {
+        fail_dyn2(inout g, e, "R0001", ["reading ", " byte(s) at ", ", out of bounds for ", " bytes"], [(n, "rt_str_i64"), (at, "rt_str_i64"), (ln, "rt_str_i64")])
+    }
+    close(inout g)
+}
+
+// `get_u8(b, at)` and the others
+fn get_bytes_w(inout g: WGen, e: H) {
+    let b = e.text
+    let bx = e.kids[0].kids[0]
+    let ax = e.kids[1].kids[0]
+    var rest_changes = changes(e.kids[1])
+    if len(e.kids) > 2 { rest_changes = rest_changes or changes(e.kids[2]) }
+    let tb = gen_borrow(inout g, bx, not rest_changes)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    gen(inout g, ax)
+    let at = new_local(inout g, wt_i64())
+    lset(inout g, at)
+    let n = new_local(inout g, wt_i64())
+    if b == "get_str" {
+        gen(inout g, e.kids[2].kids[0])
+        lset(inout g, n)
+        // a negative count
+        lget(inout g, n)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        fail_dyn(inout g, e, "R0001", "", " bytes", n, "rt_str_i64")
+        close(inout g)
+        check_bytes(inout g, e, o, at, n, -1)
+        lget(inout g, o)
+        lget(inout g, at)
+        lget(inout g, n)
+        call_f(inout g, rt_fn(inout g, "rt_get_str"))
+        let t = new_local(inout g, wt_i32())
+        lset(inout g, t)
+        lget(inout g, t)
+        load_at(inout g, wt_i32(), 8)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        fail_dyn2(inout g, e, "R0010", ["the ", " bytes at ", " are not UTF-8 text"], [(n, "rt_str_i64"), (at, "rt_str_i64")])
+        close(inout g)
+        lget(inout g, t)
+        load_at(inout g, wt_i32(), 16)
+        incref(inout g, Ty.TStr)
+        lget(inout g, t)
+        drop_v(inout g, Ty.TTuple([Ty.TBool, Ty.TStr]))
+        return drop_tmp(inout g, tb, bx.t)
+    }
+    let size = if b == "get_u8" { 1 } else if b == "get_u32" or b == "get_f32" { 4 } else { 8 }
+    i64c(inout g, size)
+    lset(inout g, n)
+    check_bytes(inout g, e, o, at, n, size)
+    lget(inout g, o)
+    lget(inout g, at)
+    op(inout g, 167)
+    op(inout g, 106)
+    if b == "get_u8" {
+        op_mem(inout g, 49, 16)
+    } else if b == "get_u32" {
+        op_mem(inout g, 53, 16)
+    } else if b == "get_f64" {
+        op_mem(inout g, 43, 16)
+    } else if b == "get_f32" {
+        op_mem(inout g, 42, 16)
+        op(inout g, 187)
+    } else {
+        op_mem(inout g, 41, 16)
+    }
+    if b == "get_u64" {
+        // beyond i64: R0014, with the number as an unsigned one
+        let u = new_local(inout g, wt_i64())
+        op_u(inout g, 34, u)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        fail_dyn(inout g, e, "R0014", "", " does not fit in i64", u, "rt_str_u64")
+        close(inout g)
+        lget(inout g, u)
+    }
+    drop_tmp(inout g, tb, bx.t)
+}
+
+// A builtin on files (its first argument the path): the runtime gives WASI's error code (and
+// the value, in a tuple, when `vty` has one); an error stops the program (R0011).
+fn io_w(inout g: WGen, e: H, rt: str, verb: str, vty: Ty) {
+    var tmps: List[(i64, Ty)] = []
+    let pl = new_local(inout g, wt_i32())
+    for i in 0..len(e.kids) {
+        var safe = true
+        for j in i + 1..len(e.kids) {
+            if changes(e.kids[j]) { safe = false }
+        }
+        let a = e.kids[i].kids[0]
+        tmps.push((gen_borrow(inout g, a, safe), a.t))
+        if i == 0 { op_u(inout g, 34, pl) }
+    }
+    call_f(inout g, rt_fn(inout g, rt))
+    let has = vt(vty) > 0
+    let t = new_local(inout g, wt_i32())
+    let code = new_local(inout g, wt_i64())
+    if has {
+        lset(inout g, t)
+        lget(inout g, t)
+        load_at(inout g, wt_i64(), 8)
+    }
+    lset(inout g, code)
+    lget(inout g, code)
+    op(inout g, 80)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    fail_dyn2(inout g, e, "R0011", ["cannot " + verb + " ", ": ", ""], [(pl, "rt_str_same"), (code, "rt_errno_text")])
+    close(inout g)
+    if has {
+        lget(inout g, t)
+        load_at(inout g, vt(vty), 16)
+        incref(inout g, vty)
+        lget(inout g, t)
+        drop_v(inout g, Ty.TTuple([Ty.TInt, vty]))
+    }
+    for x in tmps { drop_tmp(inout g, x.0, x.1) }
+}
+
+fn glue_drop_bytes(inout g: WGen) {
+    lget(inout g, 0)
+    op(inout g, 173)
+    lget(inout g, 0)
+    load_at(inout g, wt_i32(), 8)
+    i32c(inout g, 16)
+    op(inout g, 106)
+    op(inout g, 173)
+    call_f(inout g, rt_fn(inout g, "rt_free"))
+}
+
+fn glue_unique_bytes(inout g: WGen) {
+    lget(inout g, 0)
+    op(inout g, 173)
+    call_f(inout g, rt_fn(inout g, "rt_bytes_copy"))
+    op(inout g, 167)
+    let q = new_local(inout g, wt_i32())
+    lset(inout g, q)
+    lget(inout g, 0)
+    drop_v(inout g, Ty.TBytes)
+    lget(inout g, q)
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -2601,6 +2927,9 @@ fn gen_glue(inout g: WGen, j: i64) {
     } else if what == "show" {
         if is_list(t) {
             glue_show_list(inout g, t)
+        } else if t == Ty.TBytes {
+            lget(inout g, 0)
+            call_f(inout g, rt_fn(inout g, "rt_bytes_show"))
         } else if is_map(t) {
             glue_show_map(inout g, t)
         } else if is_enum(t) {
@@ -2619,6 +2948,10 @@ fn gen_glue(inout g: WGen, j: i64) {
         let q = new_local(inout g, i32t)
         if is_list(t) {
             glue_eq_list(inout g, t)
+        } else if t == Ty.TBytes {
+            lget(inout g, 0)
+            lget(inout g, 1)
+            call_f(inout g, rt_fn(inout g, "rt_bytes_eq"))
         } else if is_map(t) {
             glue_eq_map(inout g, t)
         } else if is_enum(t) {
@@ -2820,6 +3153,7 @@ fn glue_drop(inout g: WGen, t: Ty) {
     // the last reference: the children, then the block
     if is_list(t) { return glue_drop_list(inout g, t) }
     if is_map(t) { return glue_drop_map(inout g, t) }
+    if t == Ty.TBytes { return glue_drop_bytes(inout g) }
     if is_enum(t) {
         glue_drop_enum(inout g, t)
         return op(inout g, 0)
@@ -2858,6 +3192,7 @@ fn glue_unique(inout g: WGen, t: Ty) {
     close(inout g)
     if is_list(t) { return glue_unique_list(inout g, t) }
     if is_map(t) { return glue_unique_map(inout g, t) }
+    if t == Ty.TBytes { return glue_unique_bytes(inout g) }
     // a copy: the same fields, each child with one more reference
     let fts = field_tys(g, t)
     let q = new_local(inout g, wt_i32())
@@ -3223,8 +3558,7 @@ fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
         efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()
-    g.m.imports.push(("wasi_snapshot_preview1", "fd_write", wtype(inout g.m, [i32t, i32t, i32t, i32t], [i32t])))
-    g.m.imports.push(("wasi_snapshot_preview1", "proc_exit", wtype(inout g.m, [i32t], [])))
+    for im in wasi_imports() { g.m.imports.push(("wasi_snapshot_preview1", im.0, wtype(inout g.m, im.1, im.2))) }
     runtime_fns(inout g)
     // _start: the top-level statements, the top-level variables as its locals; the functions
     // they call are compiled after it, each one when first called
