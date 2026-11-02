@@ -258,6 +258,11 @@ fn same_report(study: &'static str, report: &'static str) {
 fn on_big_stack_with(f: impl FnOnce() + Send + 'static) {
     use kairos::interp::STACK_BYTES;
     use std::sync::atomic::Ordering;
+    // WebAssembly has no threads: the main one, with the stack CI gives wasmtime (4 MiB)
+    if cfg!(target_family = "wasm") {
+        STACK_BYTES.store(4 << 20, Ordering::Relaxed);
+        return f();
+    }
     let h = std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(move || {
@@ -340,7 +345,9 @@ fn the_registry_report_in_kairos_is_the_rust_one() {
         use quant_b3::registry::{self, Trial};
         // WASI has no temporary folder of its own (CI maps the host's root)
         let tmp = if cfg!(target_family = "wasm") { std::path::PathBuf::from("/tmp") } else { std::env::temp_dir() };
-        let dir = tmp.join(format!("kairos_registry_{}", std::process::id()));
+        // (and no process ids: one test process at a time there)
+        let pid = if cfg!(target_family = "wasm") { 0 } else { std::process::id() };
+        let dir = tmp.join(format!("kairos_registry_{pid}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registro_testes.csv");
         let _ = std::fs::remove_file(&path);
