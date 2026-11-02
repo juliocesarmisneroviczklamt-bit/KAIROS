@@ -1,0 +1,55 @@
+// Functions as values in WebAssembly: lambdas copy the values they use when they are made,
+// named functions can be passed around, and map and filter call them on each element.
+struct Rule {
+    name: str,
+    test: fn(f64) -> bool,
+}
+
+fn twice(f: fn(i64) -> i64, x: i64) -> i64 {
+    f(f(x))
+}
+
+fn adder(k: i64) -> fn(i64) -> i64 {
+    |x| x + k
+}
+
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 {
+    |x| g(f(x))
+}
+
+var base = 10
+let add_base = |x: i64| x + base
+base = 1000
+print(add_base(1), twice(add_base, 1), twice(adder(5), 0), twice(square, 3))
+let sq = square
+let inc = adder(1)
+print(compose(inc, sq)(4), compose(sq, inc)(4), map([1, 2, 3], compose(sq, adder(100))))
+let names = ["PETR4", "VALE3", "ITUB4", "BBDC4"]
+let suffix = "!"
+print(map(names, |n: str| n + suffix), filter(names, |n: str| ends_with(n, "4")))
+let rules = [Rule { name: "positive", test: |x: f64| x > 0.0 }, Rule { name: "small", test: |x: f64| abs(x) < 1.0 }]
+for r in rules { print(r.name, (r.test)(0.5), (r.test)(-2.0)) }
+print(sq, inc, [sq], (1, inc))
+var fs: List[fn(i64) -> i64] = []
+for i in 0..5 { fs.push(adder(i * 10)) }
+print(map(fs, |f: fn(i64) -> i64| f(1)))
+var count = 0
+for i in 0..20000 {
+    let f = adder(i)
+    count += f(1) - i
+}
+print(count, filter([5, 8, 13, 21], |x: i64| x % 2 == 1))
+
+// the output, line by line:
+// out: 11 21 10 81
+// out: 25 17 [101, 104, 109]
+// out: ["PETR4!", "VALE3!", "ITUB4!", "BBDC4!"] ["PETR4", "ITUB4", "BBDC4"]
+// out: positive true false
+// out: small true false
+// out: <fn square> <closure> [<fn square>] (1, <closure>)
+// out: [1, 11, 21, 31, 41]
+// out: 20000 [5, 13, 21]

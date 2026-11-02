@@ -375,6 +375,7 @@ fn vt(t: Ty) -> i64 {
         TEnum(_) => wt_i32(),
         TMap(_, _) => wt_i32(),
         TBytes => wt_i32(),
+        TFn(_, _) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -391,6 +392,7 @@ fn heap(t: Ty) -> bool {
         TEnum(_) => true,
         TMap(_, _) => true,
         TBytes => true,
+        TFn(_, _) => true,
         _ => false,
     }
 }
@@ -725,6 +727,9 @@ fn gen(inout g: WGen, e: H) {
     if k == "list" { return list_lit(inout g, e) }
     if k == "variant" { return variant_lit(inout g, e) }
     if k == "map" { return map_lit(inout g, e) }
+    if k == "lambda" { return lambda_w(inout g, e) }
+    if k == "fnref" { return fnref_w(inout g, e) }
+    if k == "callv" { return callv_w(inout g, e) }
     if k == "index" {
         if is_list(e.kids[0].t) { return index_list(inout g, e) }
         return index_map(inout g, e)
@@ -1425,6 +1430,7 @@ fn builtin_w(inout g: WGen, e: H) {
         return wg_fail(inout g, x, "`str` of values of type `" + show(g.ck, x.t) + "`")
     }
     if b == "keys" or b == "values" or b == "items" { return map_list(inout g, e, b) }
+    if b == "map" or b == "filter" { return map_filter_w(inout g, e, b) }
     if b == "get" { return get_w(inout g, e) }
     if starts_with(b, "get_") { return get_bytes_w(inout g, e) }
     if b == "bytes" {
@@ -3062,6 +3068,280 @@ fn sort_w(inout g: WGen, e: H) {
     }
 }
 
+// ------------------------------------------------------------------ closures
+//
+// A function as a value: an object with the count, the index (in the module's table) of the
+// function that runs it, the index of the one that frees it, the address of its text
+// ("<closure>" or "<fn name>"), then the values it captured, 8 bytes each from offset 16. A call
+// passes the object first, then the arguments (call_indirect).
+
+fn is_fn(t: Ty) -> bool {
+    match t {
+        TFn(_, _) => true,
+        _ => false,
+    }
+}
+
+fn fn_parts(g: WGen, t: Ty) -> (List[Ty], Ty) {
+    match t {
+        TFn(ps, r) => {
+            var out: List[Ty] = []
+            for p in ps { out.push(fin_ty(g.ck, p)) }
+            (out, fin_ty(g.ck, r))
+        },
+        _ => ([], Ty.TUnit),
+    }
+}
+
+// The index of function f in the table (added when new).
+fn table_index(inout g: WGen, f: i64) -> i64 {
+    for i in 0..len(g.m.table) {
+        if g.m.table[i] == f { return i }
+    }
+    g.m.table.push(f)
+    len(g.m.table) - 1
+}
+
+// The type of the functions the table calls for values of type fn(ps) -> r.
+fn closure_type(inout g: WGen, ps: List[Ty], r: Ty) -> i64 {
+    var params = [wt_i32()]
+    for p in ps {
+        let w = vt(p)
+        if w > 0 { params.push(w) }
+    }
+    let w = vt(r)
+    wtype(inout g.m, params, if w > 0 { [w] } else { [] })
+}
+
+// A new function object, in a new local.
+fn new_closure(inout g: WGen, ncap: i64, run: i64, free: i64, text: str) -> i64 {
+    i64c(inout g, 16 + 8 * ncap)
+    call_f(inout g, rt_fn(inout g, "rt_alloc"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    lget(inout g, o)
+    i32c(inout g, 1)
+    store_at(inout g, wt_i32(), 0)
+    lget(inout g, o)
+    i32c(inout g, table_index(inout g, run))
+    store_at(inout g, wt_i32(), 4)
+    lget(inout g, o)
+    i32c(inout g, table_index(inout g, free))
+    store_at(inout g, wt_i32(), 8)
+    lget(inout g, o)
+    i32c(inout g, intern_obj(inout g, text))
+    store_at(inout g, wt_i32(), 12)
+    o
+}
+
+// `fn(x) => ...`: the values of the variables it uses are copied in, as they are now
+fn lambda_w(inout g: WGen, e: H) {
+    let def = e.n
+    var outer: List[i64] = []
+    if e.text != "" {
+        for s in split(e.text, " ") { outer.push(parse_int(s)) }
+    }
+    let o = new_closure(inout g, len(outer), glue_fn(inout g, "lambda " + str(def), Ty.TUnit), glue_fn(inout g, "lfree " + str(def), Ty.TUnit), "<closure>")
+    for k in 0..len(outer) {
+        let s = outer[k]
+        let t = g.slot_ty[s]
+        let w = vt(t)
+        let l = g.slot_local[s]
+        if w > 0 and l >= 0 {
+            lget(inout g, o)
+            lget(inout g, l)
+            incref(inout g, t)
+            store_at(inout g, w, 16 + 8 * k)
+        }
+    }
+    lget(inout g, o)
+}
+
+// a function by its name, as a value (a new object each time, as in the interpreter)
+fn fnref_w(inout g: WGen, e: H) {
+    let o = new_closure(inout g, 0, glue_fn(inout g, "wrap " + str(e.n), Ty.TUnit), glue_fn(inout g, "free16", Ty.TUnit), "<fn " + g.ck.sigs[e.n].name + ">")
+    lget(inout g, o)
+}
+
+// `f(a, b)` on a function value: the function and the arguments are borrowed
+fn callv_w(inout g: WGen, e: H) {
+    let c = e.kids[0]
+    var safe = true
+    for j in 1..len(e.kids) {
+        if changes(e.kids[j]) { safe = false }
+    }
+    let tc = gen_borrow(inout g, c, safe)
+    let env = new_local(inout g, wt_i32())
+    lset(inout g, env)
+    lget(inout g, env)
+    var tmps: List[(i64, Ty)] = []
+    for i in 1..len(e.kids) {
+        var s2 = true
+        for j in i + 1..len(e.kids) {
+            if changes(e.kids[j]) { s2 = false }
+        }
+        tmps.push((gen_borrow(inout g, e.kids[i], s2), e.kids[i].t))
+    }
+    lget(inout g, env)
+    load_at(inout g, wt_i32(), 4)
+    let ft = fn_parts(g, c.t)
+    op_u(inout g, 17, closure_type(inout g, ft.0, ft.1))
+    uleb(inout g.code, 0)
+    for x in tmps { drop_tmp(inout g, x.0, x.1) }
+    drop_tmp(inout g, tc, c.t)
+}
+
+// map(xs, f) and filter(xs, f): f called on each element, in order
+fn map_filter_w(inout g: WGen, e: H, b: str) {
+    let xs = e.kids[0].kids[0]
+    let f = e.kids[1].kids[0]
+    let tl = gen_borrow(inout g, xs, not changes(e.kids[1]))
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    let tf = gen_borrow(inout g, f, true)
+    let env = new_local(inout g, wt_i32())
+    lset(inout g, env)
+    let et = elem_ty(g, xs.t)
+    let w = vt(et)
+    let ft = fn_parts(g, f.t)
+    let ty = closure_type(inout g, ft.0, ft.1)
+    let rw = vt(ft.1)
+    if b == "map" { list_len(inout g, o) } else { i64c(inout g, 0) }
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let q = new_local(inout g, wt_i32())
+    lset(inout g, q)
+    let lp = loop_begin(inout g, o)
+    if b == "map" and rw > 0 { elem_addr(inout g, q, lp.0) }
+    lget(inout g, env)
+    if w > 0 {
+        elem_addr(inout g, o, lp.0)
+        load_at(inout g, w, 16)
+    }
+    lget(inout g, env)
+    load_at(inout g, wt_i32(), 4)
+    op_u(inout g, 17, ty)
+    uleb(inout g.code, 0)
+    if b == "map" {
+        if rw > 0 { store_at(inout g, rw, 16) }
+    } else {
+        // kept: one more reference, at the end of the new list
+        open(inout g, 4, 0)
+        lget(inout g, q)
+        op(inout g, 173)
+        call_f(inout g, rt_fn(inout g, "rt_list_room"))
+        op(inout g, 167)
+        lset(inout g, q)
+        let n = new_local(inout g, wt_i64())
+        list_len(inout g, q)
+        lset(inout g, n)
+        if w > 0 {
+            elem_addr(inout g, q, n)
+            elem_addr(inout g, o, lp.0)
+            load_at(inout g, w, 16)
+            incref(inout g, et)
+            store_at(inout g, w, 16)
+        }
+        lget(inout g, q)
+        lget(inout g, n)
+        op(inout g, 167)
+        i32c(inout g, 1)
+        op(inout g, 106)
+        store_at(inout g, wt_i32(), 4)
+        close(inout g)
+    }
+    loop_end(inout g, lp)
+    lget(inout g, q)
+    drop_tmp(inout g, tl, xs.t)
+    drop_tmp(inout g, tf, f.t)
+}
+
+// The function of lambda `def`: its object, then its parameters; the values it captured go to
+// their slots (each with a reference of its own, dropped at the end like any variable's).
+fn gen_lambda_fn(inout g: WGen, def: i64) {
+    let lam = g.ck.lambdas[def]
+    g.unchecked = false
+    let params = frame(inout g, lam.slot_tys, lam.n_params, lam.body, true)
+    if g.failed { return }
+    for k in 0..len(lam.caps) {
+        let s = lam.caps[k]
+        let t = g.slot_ty[s]
+        let w = vt(t)
+        let l = g.slot_local[s]
+        if w > 0 and l >= 0 {
+            lget(inout g, 0)
+            load_at(inout g, w, 16 + 8 * k)
+            incref(inout g, t)
+            lset(inout g, l)
+        }
+    }
+    let r = vt(fin_ty(g.ck, lam.body.t))
+    var ps = [wt_i32()]
+    for p in params { ps.push(p) }
+    let tidx = wtype(inout g.m, ps, if r > 0 { [r] } else { [] })
+    gen(inout g, lam.body)
+    epilogue(inout g)
+    g.m.funcs.push(finish(inout g, len(ps), tidx))
+}
+
+// The other functions of function values: a lambda's freeing, a named function's call through an
+// object, the freeing of that object.
+fn gen_closure_glue(inout g: WGen, what: str) {
+    g.code = []
+    g.ltypes = []
+    g.slot_local = []
+    g.slot_ty = []
+    g.live = []
+    g.pool = []
+    g.inout_slots = []
+    g.nparams = 0
+    g.depth = 0
+    g.loops = []
+    g.unchecked = true
+    let i32t = wt_i32()
+    let env = new_local(inout g, i32t)
+    if starts_with(what, "lfree ") {
+        let lam = g.ck.lambdas[parse_int(substr(what, 6, len(what) - 6))]
+        for k in 0..len(lam.caps) {
+            let t = fin_ty(g.ck, lam.slot_tys[lam.caps[k]])
+            if heap(t) {
+                lget(inout g, 0)
+                load_at(inout g, i32t, 16 + 8 * k)
+                drop_v(inout g, t)
+            }
+        }
+        lget(inout g, 0)
+        op(inout g, 173)
+        i64c(inout g, 16 + 8 * len(lam.caps))
+        call_f(inout g, rt_fn(inout g, "rt_free"))
+        return g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [])))
+    }
+    if what == "free16" {
+        lget(inout g, 0)
+        op(inout g, 173)
+        i64c(inout g, 16)
+        call_f(inout g, rt_fn(inout g, "rt_free"))
+        return g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [])))
+    }
+    // "wrap id": the function, called with the arguments after the object
+    let id = parse_int(substr(what, 5, len(what) - 5))
+    let sig = g.ck.sigs[id]
+    var ps = [i32t]
+    for p in sig.params {
+        if p.2 { return wg_fail(inout g, g.ck.fn_hir[id], "functions with `inout` parameters as values") }
+        let w = vt(fin_ty(g.ck, p.1))
+        if w > 0 {
+            let l = new_local(inout g, w)
+            ps.push(w)
+            lget(inout g, l)
+        }
+    }
+    call_f(inout g, fn_index(inout g, id))
+    let r = vt(fin_ty(g.ck, sig.ret))
+    g.m.funcs.push(finish(inout g, len(ps), wtype(inout g.m, ps, if r > 0 { [r] } else { [] })))
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -3071,6 +3351,8 @@ fn sort_w(inout g: WGen, e: H) {
 fn gen_glue(inout g: WGen, j: i64) {
     let what = g.glue[j].0
     let t = g.glue[j].1
+    if starts_with(what, "lambda ") { return gen_lambda_fn(inout g, parse_int(substr(what, 7, len(what) - 7))) }
+    if starts_with(what, "lfree ") or what == "free16" or starts_with(what, "wrap ") { return gen_closure_glue(inout g, what) }
     g.code = []
     g.ltypes = []
     g.slot_local = []
@@ -3096,6 +3378,9 @@ fn gen_glue(inout g: WGen, j: i64) {
         } else if t == Ty.TBytes {
             lget(inout g, 0)
             call_f(inout g, rt_fn(inout g, "rt_bytes_show"))
+        } else if is_fn(t) {
+            lget(inout g, 0)
+            load_at(inout g, wt_i32(), 12)
         } else if is_map(t) {
             glue_show_map(inout g, t)
         } else if is_enum(t) {
@@ -3118,6 +3403,11 @@ fn gen_glue(inout g: WGen, j: i64) {
             lget(inout g, 0)
             lget(inout g, 1)
             call_f(inout g, rt_fn(inout g, "rt_bytes_eq"))
+        } else if is_fn(t) {
+            // the same object (as Rc::ptr_eq)
+            lget(inout g, 0)
+            lget(inout g, 1)
+            op(inout g, 70)
         } else if is_map(t) {
             glue_eq_map(inout g, t)
         } else if is_enum(t) {
@@ -3169,6 +3459,7 @@ fn eq_values(inout g: WGen, t: Ty) {
     if t == Ty.TFloat { return op(inout g, 97) }
     if t == Ty.TBool { return op(inout g, 70) }
     if t == Ty.TStr { return call_f(inout g, rt_fn(inout g, "rt_str_eq")) }
+    if is_fn(t) { return op(inout g, 70) }
     if heap(t) { return call_f(inout g, glue_fn(inout g, "eq", t)) }
     if vt(t) == 0 { return i32c(inout g, 1) }
     wg_fail(inout g, h_none(), "comparing values of type `" + show(g.ck, t) + "`")
@@ -3319,6 +3610,14 @@ fn glue_drop(inout g: WGen, t: Ty) {
     // the last reference: the children, then the block
     if is_list(t) { return glue_drop_list(inout g, t) }
     if is_map(t) { return glue_drop_map(inout g, t) }
+    if is_fn(t) {
+        // the function the object came with frees it (and what it captured)
+        lget(inout g, 0)
+        lget(inout g, 0)
+        load_at(inout g, wt_i32(), 8)
+        op_u(inout g, 17, wtype(inout g.m, [wt_i32()], []))
+        return uleb(inout g.code, 0)
+    }
     if t == Ty.TBytes { return glue_drop_bytes(inout g) }
     if is_enum(t) {
         glue_drop_enum(inout g, t)
@@ -3497,7 +3796,8 @@ fn glue_eq(inout g: WGen, t: Ty) {
 // ------------------------------------------------------------------ functions and the module
 
 // Sets up the locals of a frame: the slots' types, the first `np` of them parameters.
-fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
+// (With `env`, the function's first parameter is the object of a closure, before the slots.)
+fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H, env: bool) -> List[i64] {
     g.code = []
     g.ltypes = []
     g.slot_local = []
@@ -3508,6 +3808,7 @@ fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
     g.nparams = np
     g.depth = 0
     g.loops = []
+    if env { let _ = new_local(inout g, wt_i32()) }
     var params: List[i64] = []
     for i in 0..len(tys) {
         let ti = fin_ty(g.ck, tys[i])
@@ -3540,7 +3841,7 @@ fn gen_fn(inout g: WGen, id: i64) {
     let body = g.ck.fn_hir[id]
     g.unchecked = starts_with(sig.name, "rt_")
     let np = len(sig.params)
-    let params = frame(inout g, g.ck.bodies[id], np, body)
+    let params = frame(inout g, g.ck.bodies[id], np, body, false)
     if g.failed { return }
     // the `inout` parameters come back after the result
     var outs: List[i64] = []
@@ -3731,7 +4032,7 @@ fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     // _start: the top-level statements, the top-level variables as its locals; the functions
     // they call are compiled after it, each one when first called
     let none: List[H] = []
-    let params = frame(inout g, ck.main.slot_tys, 0, if len(ck.all_tops) > 0 { ck.all_tops[0] } else { hk("-", none) })
+    let params = frame(inout g, ck.main.slot_tys, 0, if len(ck.all_tops) > 0 { ck.all_tops[0] } else { hk("-", none) }, false)
     for t in ck.all_tops { gen_stmt(inout g, t) }
     let empty: List[i64] = []
     let start = finish(inout g, 0, wtype(inout g.m, params, empty))

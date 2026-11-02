@@ -1072,7 +1072,7 @@ fn ck_lambda(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
         outer.push(str(cp.0))
         inner.push(cp.1)
     }
-    ck.lambdas.push(LambdaH { caps: inner, n_params: len(params), n_slots: done.n_slots, body: rb.h })
+    ck.lambdas.push(LambdaH { caps: inner, n_params: len(params), n_slots: done.n_slots, body: rb.h, slot_tys: done.slot_tys })
     typed(hn("lambda", join(outer, " "), def, -1, [], -1, -1), Ty.TFn(ptys, ret))
 }
 

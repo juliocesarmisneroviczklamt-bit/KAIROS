@@ -101,10 +101,11 @@ struct WMod {
     data_at: i64,                       // where the data is placed in memory
     data: List[i64],
     pages: i64,                         // 64 KiB each
+    table: List[i64],                   // the functions a closure can call (call_indirect), in order
 }
 
 fn wmod_new(data_at: i64) -> WMod {
-    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], globals: [], data_at: data_at, data: [], pages: 1 }
+    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], globals: [], data_at: data_at, data: [], pages: 1, table: [] }
 }
 
 // The index of a function type, added when new.
@@ -160,6 +161,13 @@ fn module_bytes(m: WMod) -> Bytes {
     uleb(inout fns, len(m.funcs))
     for f in m.funcs { uleb(inout fns, f.tidx) }
     section(inout out, 3, fns)
+    if len(m.table) > 0 {
+        // one table of functions, of exactly their number
+        var tb: List[i64] = [1, 112, 1]
+        uleb(inout tb, len(m.table))
+        uleb(inout tb, len(m.table))
+        section(inout out, 4, tb)
+    }
     var mem: List[i64] = [1, 0]
     uleb(inout mem, m.pages)
     section(inout out, 5, mem)
@@ -183,6 +191,13 @@ fn module_bytes(m: WMod) -> Bytes {
         uleb(inout exps, x.2)
     }
     section(inout out, 7, exps)
+    if len(m.table) > 0 {
+        // the functions of the table, from its start
+        var el: List[i64] = [1, 0, 65, 0, 11]
+        uleb(inout el, len(m.table))
+        for f in m.table { uleb(inout el, f) }
+        section(inout out, 9, el)
+    }
     var codes_: List[i64] = []
     uleb(inout codes_, len(m.funcs))
     for f in m.funcs {

@@ -147,6 +147,7 @@ struct LambdaH {
     n_params: i64,
     n_slots: i64,
     body: H,
+    slot_tys: List[Ty],     // the type of each slot of its frame (for the WebAssembly back end)
 }
 
 // ------------------------------------------------------------------ what the temporal analysis knows
