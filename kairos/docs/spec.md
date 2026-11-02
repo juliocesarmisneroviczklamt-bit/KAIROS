@@ -918,4 +918,9 @@ kairos run kairos/compiler/ki.krs kairos/std programa.krs [argumentos...]
 
 - **Tensores e `grad`** usam o runtime em Kairós do back-end WebAssembly: `rt_tensor.krs` para as operações (com as checagens e mensagens de `src/tensor.rs`) e a fita de `rt_diff.krs`, gravada nó a nó como a do interpretador Rust, com os mesmos gradientes, bit a bit. O `examples/mlp.krs` treina com as mesmas perdas.
 
-**Ainda não roda** (para com K0001, no ponto exato): a ponte `b3`, os protocolos e os holdouts.
+- **A ponte `b3`, os protocolos e os holdouts** usam a ponte em Kairós do back-end WebAssembly (`rt_b3.krs`). O núcleo dela passou a receber o estado explicitamente (`inout B3State`, com os protocolos e o nome do programa), e o interpretador guarda o seu. As funções que o back-end chama viraram invólucros que guardam o estado na memória do módulo.
+  - O `open_once` foi dividido em abertura, fechamento e falha, para o interpretador chamar a função dos pesos do programa entre os dois. Um erro ali gasta o holdout, e a dica do erro diz isso, como no interpretador Rust.
+  - As estatísticas do simulador recebem as séries do mercado (CDI e NEFIN) do estado da ponte (`sim_eval_on`), em vez de chamar `b3` por dentro. O `sim_eval` continua lendo-as por `b3`.
+- **Conferido:** os 55 programas de teste que usam `b3` (os de `tests/wasm_b3`, `tests/temporal`, `tests/programs` e `examples`) dão, pelo `ki.wasm`, a mesma saída, as mesmas notas e erros, o mesmo registro de testes e o mesmo livro-razão do interpretador Rust. O `cargo test --release -p kairos --test wasm the_interpreter_written_in_kairos_runs_b3` confere quatro deles quando os dados existem.
+
+O interpretador escrito em Kairós roda tudo o que as suítes de teste cobrem. As únicas diferenças vêm do hospedeiro WebAssembly: o texto de um erro do sistema, e o `list_dir`, que o node no Windows não implementa.

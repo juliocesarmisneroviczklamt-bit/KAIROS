@@ -112,23 +112,53 @@ fn sim_calendar(d: LabData, cdi_d: List[f64], n: i64, end: i64) -> Calendar {
     c
 }
 
+// The market's series the statistics of an evaluation use (std/sim.krs sim_eval_on): the CDI and
+// NEFIN's, over the months, from the first. `has`: false to read them through `b3` (sim_eval).
+struct SimMarket {
+    has: bool,
+    cdi: Tensor[month; f64],
+    rm: Tensor[month; f64],
+    rf: Tensor[month; f64],
+    rf_ew: Tensor[month; f64],
+}
+
+// what `b3.cdi()` and `b3.nefin(...)` give over the first n months
+fn sim_market(d: LabData, cdi_m: List[f64], nef: Map[i64, List[f64]], nef_vw: Map[i64, List[f64]], n: i64) -> SimMarket {
+    SimMarket {
+        has: true, cdi: tensor(cdi_m, month)[month: 0 .. n], rm: data_nefin(d.cal, nef_vw, 0)[month: 0 .. n],
+        rf: data_nefin(d.cal, nef_vw, 5)[month: 0 .. n], rf_ew: data_nefin(d.cal, nef, 5)[month: 0 .. n],
+    }
+}
+
+fn no_market() -> SimMarket {
+    SimMarket { has: false, cdi: zeros(month: 0), rm: zeros(month: 0), rf: zeros(month: 0), rf_ew: zeros(month: 0) }
+}
+
 // The evaluation of weights w over the first n months: (R0102's message or "", the run, its
 // statistics).
 fn kairos_evaluate(d: LabData, cdi_d: List[f64], w: Tensor[month, asset; f64], n: i64, cfg: SimCfg) -> (str, SimRun, SimEval) {
+    kairos_evaluate_on(d, cdi_d, w, n, cfg, no_market())
+}
+
+fn kairos_evaluate_on(d: LabData, cdi_d: List[f64], w: Tensor[month, asset; f64], n: i64, cfg: SimCfg, mk: SimMarket) -> (str, SimRun, SimEval) {
     var p = make_plans(d, w, n, cfg)
     if p.err == "" and not (cfg.cap_adv >= 0.0 and abs(cfg.cap_adv) != inf) { p.err = "`cap_adv` must be >= 0 (0: no limit), got " + str(cfg.cap_adv) }
-    simulate_plans(d, cdi_d, p, n, cfg)
+    simulate_plans_on(d, cdi_d, p, n, cfg, mk)
 }
 
 // The simulation of the plans over the first n months, and its statistics.
 fn simulate_plans(d: LabData, cdi_d: List[f64], p: Plans, n: i64, cfg: SimCfg) -> (str, SimRun, SimEval) {
+    simulate_plans_on(d, cdi_d, p, n, cfg, no_market())
+}
+
+fn simulate_plans_on(d: LabData, cdi_d: List[f64], p: Plans, n: i64, cfg: SimCfg, mk: SimMarket) -> (str, SimRun, SimEval) {
     let end = if n < len(d.cal.months) { d.cal.mfrom[n] } else { len(d.dates) }
     let none = SimRun { mi: [], ret: [], turnover: [], exposure: [], cost_paid: 0.0, traded: 0.0, tax_paid: 0.0, jcp_withheld: 0.0, final_value: 0.0, liq_value: 0.0, exempt_months: 0, taxed_months: 0, capped_frac: 0.0 }
     let zero = SimEval { cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan }
     if p.err != "" { return (p.err, none, zero) }
     let run = sim_run(sim_panel(d, end), sim_calendar(d, cdi_d, n, end), p.m, p.t, p.w, cfg)
     if len(run.ret) == 0 { return ("the simulation produced no months", run, zero) }
-    ("", run, sim_eval(run))
+    ("", run, if mk.has { sim_eval_on(run, mk.cdi, mk.rm, mk.rf, mk.rf_ew) } else { sim_eval(run) })
 }
 
 // The name of a strategy: the first 12 digits of the SHA-256 of its weights over the months seen

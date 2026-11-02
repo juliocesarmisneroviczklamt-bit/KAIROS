@@ -7,6 +7,7 @@
 // it, which is the language's own value semantics.
 import "front.krs"
 import "rt.krs"
+import "rt_b3.krs"
 
 // A value of the program. `k`: 0 (), 1 i64 (n), 2 f64 (x), 3 bool (n: 1 true), 4 str (s), 5 a list
 // (xs), 6 a tuple (xs), 7 a struct (n: which, xs: its fields), 8 an enum (n: which, m: the variant,
@@ -61,6 +62,9 @@ struct KSt {
     unit: KV,
     tape: RtDTape,
     tracking: bool,
+    prog: str,          // the program's name (its file, without .krs): the registry's and the ledger's
+    b3: B3State,        // the bridge to the lab (rt_b3.krs), made at the first `b3` call
+    b3_ready: bool,
 }
 
 fn ki_new(ck: Checker, srcs: List[str], prog_args: List[str]) -> KSt {
@@ -68,7 +72,8 @@ fn ki_new(ck: Checker, srcs: List[str], prog_args: List[str]) -> KSt {
     let no: List[KV] = []
     let unit = KV { k: 0, n: 0, m: 0, x: 0.0, s: "", xs: no, e: e0 }
     KSt { ck: ck, srcs: srcs, args: prog_args, ctl: 0, ret: unit, code: "", msg: "", hint: "", lo: 0, hi: 0, file: 0,
-        depth: 0, uid: 0, e0: e0, no: no, unit: unit, tape: rt_d_new(), tracking: false }
+        depth: 0, uid: 0, e0: e0, no: no, unit: unit, tape: rt_d_new(), tracking: false,
+        prog: "", b3: rt_b3_new("", [], ""), b3_ready: false }
 }
 
 // ------------------------------------------------------------------ values
@@ -860,6 +865,7 @@ fn ki_ev(inout st: KSt, inout f: List[KV], e: H) -> KV {
         }
         return ki_call_value(inout st, fv, vs, e)
     }
+    if k == "host" { return ki_host(inout st, inout f, e) }
     if k == "tindex" { return ki_tindex(inout st, inout f, e) }
     if k == "tassign" { return ki_tassign(inout st, inout f, e) }
     if k == "-" { return st.unit }
@@ -2016,6 +2022,239 @@ fn ki_io_builtin(inout st: KSt, b: str, vs: List[KV], e: H) -> (bool, KV) {
         }
     }
     (false, st.unit)
+}
+
+// ------------------------------------------------------------------ the bridge to the lab (b3)
+
+// the state of the bridge, made at the first call: the program's protocols and name
+fn ki_b3_init(inout st: KSt) {
+    if st.b3_ready { return }
+    var protos: List[RtProto] = []
+    for p in st.ck.protocols { protos.push(RtProto { name: p.name, research_until: p.research_until, holdout_from: p.holdout_from, min_months: p.min_months, rule: p.rule }) }
+    st.b3 = rt_b3_fresh(protos, st.prog)
+    st.b3_ready = true
+}
+
+// the bridge's notes to the standard error (as the interpreter writes them, at once)
+fn ki_b3_notes(inout st: KSt) {
+    if st.b3.notes == "" { return }
+    let n = st.b3.notes
+    st.b3.notes = ""
+    eprint(if ends_with(n, from_codes([10])) { substr(n, 0, len(n) - 1) } else { n })
+}
+
+// an error of the bridge, with the hint the interpreter gives
+fn ki_b3_fail(inout st: KSt, e: H, code: str, msg: str) -> KV {
+    ki_fail(inout st, e, code, msg, rt_b3_hint(code, msg))
+}
+
+// a tensor of the program (the lab's) as the interpreter's, axis by axis
+fn ki_t_ma(x: Tensor[month, asset; f64]) -> RtT {
+    let nm = size(x, month)
+    let na = size(x, asset)
+    var d: List[f64] = []
+    for m in 0..nm {
+        for v in to_list(x[month: m]) { d.push(v) }
+    }
+    RtT { axes: [0, 2], shape: [nm, na], data: d, boolean: false }
+}
+
+fn ki_t_ma_bool(x: Tensor[month, asset; bool]) -> RtT {
+    let nm = size(x, month)
+    let na = size(x, asset)
+    var d: List[f64] = []
+    for m in 0..nm {
+        for v in to_list(x[month: m]) { d.push(if v { 1.0 } else { 0.0 }) }
+    }
+    RtT { axes: [0, 2], shape: [nm, na], data: d, boolean: true }
+}
+
+fn ki_t_m(x: Tensor[month; f64]) -> RtT {
+    RtT { axes: [0], shape: [size(x, month)], data: to_list(x), boolean: false }
+}
+
+// the interpreter's tensor of weights (its axes in any order) as the lab's
+fn ki_ma_of(t: RtT) -> Tensor[month, asset; f64] {
+    let pm = rt_t_pos(t, 0)
+    let pa = rt_t_pos(t, 2)
+    let nm = t.shape[pm]
+    let na = t.shape[pa]
+    let sts = rt_t_strides(t.shape)
+    var w = zeros(month: nm, asset: na)
+    for m in 0..nm {
+        var row: List[f64] = []
+        for a in 0..na { row.push(t.data[m * sts[pm] + a * sts[pa]]) }
+        w[month: m] = tensor(row, asset)
+    }
+    w
+}
+
+fn ki_floats_of(v: KV) -> List[f64] {
+    var out: List[f64] = []
+    for x in v.xs { out.push(ki_float(x)) }
+    out
+}
+
+// The prelude's Evaluation, field by field (src/interp/tensors.rs evaluation).
+fn kv_evaluation(st: KSt, id: i64, ev: Evaluation) -> KV {
+    var by: Map[str, KV] = [:]
+    by["months"] = kv_i(st, ev.months)
+    by["cagr"] = kv_f(st, ev.cagr)
+    by["vol"] = kv_f(st, ev.vol)
+    by["sharpe"] = kv_f(st, ev.sharpe)
+    by["max_dd"] = kv_f(st, ev.max_dd)
+    by["beta"] = kv_f(st, ev.beta)
+    by["alpha"] = kv_f(st, ev.alpha)
+    by["t_alpha"] = kv_f(st, ev.t_alpha)
+    by["turnover"] = kv_f(st, ev.turnover)
+    by["cost_bps"] = kv_f(st, ev.cost_bps)
+    by["trials"] = kv_i(st, ev.trials)
+    by["dsr"] = kv_f(st, ev.dsr)
+    kv_fields(st, id, by)
+}
+
+fn kv_simulation(st: KSt, id: i64, sim: Simulation) -> KV {
+    var by: Map[str, KV] = [:]
+    by["ret"] = kv_t(st, ki_t_m(sim.ret))
+    by["exposure"] = kv_t(st, ki_t_m(sim.exposure))
+    by["turnover"] = kv_t(st, ki_t_m(sim.turnover))
+    by["cost_bps"] = kv_f(st, sim.cost_bps)
+    by["tax_paid"] = kv_f(st, sim.tax_paid)
+    by["final_value"] = kv_f(st, sim.final_value)
+    by["liq_value"] = kv_f(st, sim.liq_value)
+    by["capped"] = kv_f(st, sim.capped)
+    by["exempt_months"] = kv_i(st, sim.exempt_months)
+    by["taxed_months"] = kv_i(st, sim.taxed_months)
+    by["trials"] = kv_i(st, sim.trials)
+    by["dsr"] = kv_f(st, sim.dsr)
+    kv_fields(st, id, by)
+}
+
+// the struct `id` with its fields from `by`, in its order
+fn kv_fields(st: KSt, id: i64, by: Map[str, KV]) -> KV {
+    var xs: List[KV] = []
+    for fd in st.ck.structs[id].fields { xs.push(by[fd.0]) }
+    var v = kv_l(st, 7, xs)
+    v.n = id
+    v
+}
+
+// b3.f(...) (src/interp/tensors.rs host_call): the arguments first, plain values for the
+// simulator; then the bridge written in Kairós, with the program's own state.
+fn ki_host(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    var vs: List[KV] = []
+    for x in e.kids {
+        vs.push(ki_ev(inout st, inout f, x))
+        if st.ctl != 0 { return st.unit }
+    }
+    if st.tracking {
+        var plain: List[KV] = []
+        for v in vs { plain.push(ki_deep_fwd(st, v)) }
+        vs = plain
+    }
+    let parts = split(e.text, " ")
+    let what = parts[0]
+    let p1 = if len(parts) > 1 { parse_int(parts[1]) } else { -1 }
+    ki_b3_init(inout st)
+    if what == "open_once" { return ki_open_once(inout st, vs, p1, e) }
+    var code = ""
+    var msg = ""
+    var out = st.unit
+    if what == "monthly_returns" {
+        let r = rt_b3_monthly_returns_s(inout st.b3)
+        code = r.0
+        msg = r.1
+        if code == "" { out = kv_t(st, ki_t_ma(r.2)) }
+    } else if what == "eligible" {
+        let r = rt_b3_eligible_s(inout st.b3)
+        code = r.0
+        msg = r.1
+        if code == "" { out = kv_t(st, ki_t_ma_bool(r.2)) }
+    } else if what == "cdi" or what == "ipca" or what == "nefin" {
+        let r = if what == "cdi" { rt_b3_cdi_s(inout st.b3) } else if what == "ipca" { rt_b3_ipca_s(inout st.b3) } else { rt_b3_nefin_s(inout st.b3, p1, vs[0].n == 1) }
+        code = r.0
+        msg = r.1
+        if code == "" { out = kv_t(st, ki_t_m(r.2)) }
+    } else if what == "daily" or what == "sessions" or what == "session_dates" or what == "nefin_daily" {
+        let r = if what == "daily" { rt_b3_daily_s(inout st.b3, p1) } else if what == "sessions" { rt_b3_sessions_s(inout st.b3) } else if what == "session_dates" { rt_b3_session_dates_s(inout st.b3) } else { rt_b3_nefin_daily_s(inout st.b3, p1, vs[0].n == 1) }
+        code = r.0
+        msg = r.1
+        if code == "" { out = kv_t(st, r.2) }
+    } else if what == "months" {
+        let r = rt_b3_months_s(inout st.b3)
+        code = r.0
+        msg = r.1
+        var xs: List[KV] = []
+        for m in r.2 { xs.push(kv_i(st, m)) }
+        out = kv_l(st, 5, xs)
+    } else if what == "month_index" {
+        let r = rt_b3_month_index_s(inout st.b3, vs[0].n)
+        code = r.0
+        msg = r.1
+        out = kv_i(st, r.2)
+    } else if what == "tickers" or what == "issuers" or what == "classes" {
+        let r = rt_b3_names_s(inout st.b3, if what == "tickers" { 0 } else if what == "issuers" { 1 } else { 2 })
+        code = r.0
+        msg = r.1
+        out = kv_str_list(st, r.2)
+    } else if what == "evaluate" or what == "simulate" {
+        let w = ki_ma_of(vs[0].e.t)
+        if what == "evaluate" {
+            let r = rt_b3_evaluate_s(inout st.b3, w, vs[1].x, vs[2].n, vs[3].x, vs[4].n == 1, vs[5].n == 1, vs[6].x, vs[7].n == 1)
+            code = r.0
+            msg = r.1
+            if code == "" { out = kv_evaluation(st, p1, r.2) }
+        } else {
+            let r = rt_b3_simulate_s(inout st.b3, w, vs[1].x, vs[2].n, vs[3].x, vs[4].n == 1, vs[5].n == 1, vs[6].x, vs[7].n == 1)
+            code = r.0
+            msg = r.1
+            if code == "" { out = kv_simulation(st, p1, r.2) }
+        }
+    } else if what == "deflate_trial" {
+        let r = rt_b3_deflate_trial_s(inout st.b3, ki_floats_of(vs[0]))
+        var xs: List[KV] = []
+        for x in r.2 { xs.push(kv_f(st, x)) }
+        out = kv_l(st, 5, xs)
+    } else if what == "record_trial" {
+        let r = rt_b3_record_trial_s(inout st.b3, vs[0].s, vs[1].s, vs[2].s, vs[3].s, ki_floats_of(vs[4]))
+        code = r.0
+        msg = r.1
+        out = kv_s(st, r.2)
+    } else if what == "results_sha256" {
+        let r = rt_b3_results_sha256_s(inout st.b3, vs[0].s)
+        out = kv_s(st, r.2)
+    } else if what == "holdout" {
+        let r = rt_b3_holdout_s(inout st.b3, p1)
+        code = r.0
+        msg = r.1
+        out = KV { k: 13, n: p1, m: 0, x: 0.0, s: "", xs: st.no, e: st.e0 }
+    } else {
+        return ki_fail(inout st, e, "K0001", "`b3." + what + "` is not in the interpreter written in Kairós yet", "")
+    }
+    ki_b3_notes(inout st)
+    if code != "" { return ki_b3_fail(inout st, e, code, msg) }
+    out
+}
+
+// open_once(h, || weights(), ...): the opening recorded before the weights function runs; the
+// program sees all the data while it runs; an error there spends the holdout, and its hint says so.
+fn ki_open_once(inout st: KSt, vs: List[KV], id: i64, e: H) -> KV {
+    let k = vs[0].n
+    let b = rt_b3_open_begin_s(inout st.b3, k)
+    ki_b3_notes(inout st)
+    if b.0 != "" { return ki_b3_fail(inout st, e, b.0, b.1) }
+    let w0 = ki_call_value(inout st, vs[1], [], e)
+    if st.ctl == 4 {
+        let spent = rt_b3_open_failed_s(inout st.b3, "the weights function failed while the holdout was open: " + st.code + " " + st.msg)
+        st.hint = if st.hint != "" { st.hint + from_codes([10]) + spent } else { spent }
+        return st.unit
+    }
+    if st.ctl != 0 { return st.unit }
+    let w = ki_deep_fwd(st, w0)
+    let r = rt_b3_open_end_s(inout st.b3, k, ki_ma_of(w.e.t), vs[2].x, vs[3].n, vs[4].x, vs[5].n == 1, vs[6].n == 1, vs[7].x, vs[8].n == 1)
+    ki_b3_notes(inout st)
+    if r.0 != "" { return ki_b3_fail(inout st, e, r.0, r.1) }
+    kv_evaluation(st, id, r.2)
 }
 
 // ------------------------------------------------------------------ a program

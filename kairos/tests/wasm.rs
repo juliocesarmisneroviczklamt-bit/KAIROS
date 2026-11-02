@@ -613,3 +613,46 @@ fn the_interpreter_written_in_kairos_runs_like_the_rust_one() {
         println!("{same} programs run the same in the interpreter written in Kairós; {later} use what it does not run yet");
     })
 }
+
+/// M15: the interpreter written in Kairós, compiled to WebAssembly, runs programs that use `b3`
+/// (the lab's data, protocols, holdouts) as the `kairos` command does: the same output, notes and
+/// errors, the same registry of trials and ledger. Skipped without the B3 data and in a debug
+/// build (slow): `cargo test --release -p kairos --test wasm the_interpreter_written_in_kairos_runs_b3`.
+#[test]
+fn the_interpreter_written_in_kairos_runs_b3_programs() {
+    if cfg!(target_family = "wasm") || cfg!(debug_assertions) {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if !root.join("..").join("data").join("processed").join("panel.bin").is_file() {
+            eprintln!("skipped: no B3 data");
+            return;
+        }
+        let tmp = "tests/wasm/tmp/kib3";
+        let _ = std::fs::remove_dir_all(root.join(tmp));
+        let out = root.join(tmp).join("modules");
+        let report = run_compiler("kw.krs", vec!["std".to_string(), out.to_string_lossy().into_owned(), "compiler/ki.krs".to_string()]);
+        assert_eq!(report, "", "the interpreter compiles to WebAssembly");
+        let ki = std::fs::read(out.join("ki.wasm")).unwrap();
+        let progs = ["examples/momentum.krs", "tests/wasm_b3/protocol.krs", "tests/wasm_b3/err_open_fail.krs", "tests/wasm_b3/err_weights.krs"];
+        for path in progs {
+            let name = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+            let (wdir, idir) = (format!("{tmp}/{name}-ki"), format!("{tmp}/{name}-interp"));
+            for d in [&wdir, &idir] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let interp = run_kairos_b3(path, &idir);
+            let t = std::time::Instant::now();
+            let got = run_wasm_env(&ki, vec!["ki.wasm".to_string(), "std".to_string(), path.to_string()], &[("KAIROS_RESULTS", wdir.as_str())]);
+            assert_eq!(got, interp, "{path}: the interpreter written in Kairós and the Rust one differ");
+            for f in ["registro_testes.csv", "holdout_ledger.csv"] {
+                let a = std::fs::read(root.join(&wdir).join(f)).ok();
+                let b = std::fs::read(root.join(&idir).join(f)).ok();
+                assert!(a == b, "{path}: {f} differs between the interpreter written in Kairós and the Rust one");
+            }
+            println!("{name}: the same in the interpreter written in Kairós ({:.1} s in wasmi)", t.elapsed().as_secs_f64());
+        }
+        let _ = std::fs::remove_dir_all(root.join(tmp));
+    })
+}

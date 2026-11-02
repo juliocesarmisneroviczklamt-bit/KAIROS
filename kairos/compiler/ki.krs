@@ -43,6 +43,10 @@ if ck.failed {
     exit(1)
 }
 var st = ki_new(ck, srcs, prog_args)
+// the program's name (its file, without .krs): the registry's and the ledger's
+let base = split(replace(path, from_codes([92]), "/"), "/")
+let file = base[len(base) - 1]
+st.prog = if ends_with(file, ".krs") { substr(file, 0, len(file) - 4) } else { file }
 if not ki_run(inout st) {
     eprint(ki_chomp(ki_render(st)))
     exit(1)

@@ -156,7 +156,7 @@ fn cash_file(text: str) -> (bool, str, List[Map[str, Json]]) {
 
 // ------------------------------------------------------------------ the events
 
-fn bump(inout m: Map[str, i64], k: str) {
+fn count_up(inout m: Map[str, i64], k: str) {
     m[k] = get(m, k, 0) + 1
 }
 
@@ -165,7 +165,7 @@ fn stock_events(companies: List[Map[str, Json]], by_isin: Map[str, List[i64]], i
         for sd in records(c, "stockDividends") {
             st.stock_total += 1
             let label = upper(trim(text_of(sd, "label")))
-            bump(inout st.labels, label)
+            count_up(inout st.labels, label)
             let dc = parse_ddmmyyyy(text_of(sd, "lastDatePrior"))
             if dc == 0 { continue }
             let f = parse_br_num(text_of(sd, "factor"))
@@ -181,7 +181,7 @@ fn stock_events(companies: List[Map[str, Json]], by_isin: Map[str, List[i64]], i
             } else if (starts_with(label, "CIS") or label == "REST CAP ACOES") and other_class and f > 0.0 {
                 ev = Ev.SpinOff(asset, f / 100.0)
             } else {
-                bump(inout st.ignored, label)
+                count_up(inout st.ignored, label)
                 continue
             }
             if contains(by_isin, isin) {
@@ -288,7 +288,7 @@ fn cash_events(name: str, rs: List[Map[str, Json]], file_id: i64, series: List[S
         } else {
             seen[key] = file_id
         }
-        bump(inout st.cash_kinds, kind)
+        count_up(inout st.cash_kinds, kind)
         st.cash_mapped += 1
         let jcp = contains(kind, "JRS") or contains(kind, "JUROS")
         evs[pick].push(Event { datacom: dc, ev: Ev.Cash(y, jcp), label: kind })

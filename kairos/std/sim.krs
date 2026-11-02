@@ -320,13 +320,16 @@ struct SimEval {
 
 // The statistics of a simulation, as the lab computes them.
 fn sim_eval(run: SimRun) -> SimEval {
-    let cdi = b3.cdi()
+    sim_eval_on(run, b3.cdi(), b3.nefin("rm_rf", vw: true), b3.nefin("rf", vw: true), b3.nefin("rf"))
+}
+
+// The same with the market's series given (each over the months, from the first): the CDI,
+// NEFIN's value-weighted market over the risk-free rate and its risk-free rate, and the equally
+// weighted series' risk-free rate.
+fn sim_eval_on(run: SimRun, cdi: Tensor[month; f64], rm: Tensor[month; f64], rf: Tensor[month; f64], rf_ew: Tensor[month; f64]) -> SimEval {
     var ex = []
     for k in 0..len(run.mi) { ex.push(run.ret[k] - cdi[month: run.mi[k]]) }
     // CAPM: the months with both of NEFIN's series
-    let rm = b3.nefin("rm_rf", vw: true)
-    let rf = b3.nefin("rf", vw: true)
-    let rf_ew = b3.nefin("rf")
     var y = []
     var x = []
     for k in 0..len(run.mi) {

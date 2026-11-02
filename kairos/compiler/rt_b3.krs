@@ -1,16 +1,18 @@
-// The bridge `b3.*` of programs compiled to WebAssembly (M14), written in Kairós: the lab's data
-// (lab/data.krs), the fence of the holdout ledger and its record of who saw the data
-// (lab/ledger.krs), the evaluation and the registry of trials (lab/bridge.krs), with the rules of
-// the Rust bridge (src/bridge.rs). The back end checks this file with a program that uses `b3`.
+// The bridge `b3.*` written in Kairós: the lab's data (lab/data.krs), the fence of the holdout
+// ledger and its record of who saw the data (lab/ledger.krs), the evaluation and the registry of
+// trials (lab/bridge.krs), with the rules of the Rust bridge (src/bridge.rs). Programs compiled
+// to WebAssembly use it (M14: the back end checks this file with a program that uses `b3`), and
+// so does the interpreter written in Kairós (M15).
 //
 // The data folder: KAIROS_DATA, else `data` or `../data` (relative to the folder the WASI runtime
 // opens: `wasmtime --dir=. program.wasm`); the results: KAIROS_RESULTS, else `results` next to
-// the data (without either, the registry of trials stays in memory). The state lives in the
-// module's memory (wasm_b3_*): the data is read once, and the months the program sees are
-// worked out once, when a function first needs them.
+// the data (without either, the registry of trials stays in memory). The data is read once, and
+// the months the program sees are worked out once, when a function first needs them.
 //
-// Each `rt_b3_*` function the back end calls gives (an error's code or "", its message, the
-// value); the back end stops the program on an error, as the interpreter does (rt_b3_fail).
+// Each function gives (an error's code or "", its message, the value). The `_s` ones take the
+// state (B3State) explicitly: the interpreter keeps its own. The others are what the back end
+// calls: they keep the state in the module's memory (wasm_b3_*), write its notes to the standard
+// error, and the back end stops the program on an error, as the interpreter does (rt_b3_fail).
 import "../lab/bridge.krs"
 import "../lab/ledger.krs"
 
@@ -35,6 +37,8 @@ struct B3State {
     synced: bool,               // they are registered in the ledger
     opening: i64,               // the protocol whose holdout `open_once` has open (-1: none)
     err: str,                   // what went to the standard error while a holdout was open
+    program: str,               // the program's name (its file, without .krs)
+    notes: str,                 // notes for the standard error, for whoever called to write
 }
 
 // A protocol of the program (the checker's ProtoDef).
@@ -62,7 +66,7 @@ fn wasm_b3_has() -> bool {
 }
 
 fn wasm_b3_get() -> B3State {
-    rt_b3_new("")
+    rt_b3_new("", [], "")
 }
 
 fn wasm_b3_set(s: B3State) {
@@ -80,9 +84,12 @@ fn wasm_eprint(s: str) {
 fn wasm_fail(s: str) {
 }
 
-// a float rounded to 32 bits (as Rust's `as f32`), back as a float
+// a float rounded to 32 bits (as Rust's `as f32`), back as a float (an instruction of the back
+// end; elsewhere, through 4 bytes)
 fn wasm_f32(x: f64) -> f64 {
-    x
+    var b = bytes()
+    put_f32(inout b, x)
+    get_f32(b, 0)
 }
 
 // a tensor of the runtime (rt_tensor.krs) as a tensor of the program: the same object
@@ -126,12 +133,13 @@ fn rt_b3_fail(code: str, msg: str, loc: str, pad: str) {
     wasm_fail(s)
 }
 
-fn rt_b3_new(results: str) -> B3State {
+fn rt_b3_new(results: str, protos: List[RtProto], program: str) -> B3State {
     let cal = Cal { months: [], mfrom: [], mto: [], date_month: [] }
     let d = LabData { dates: [], tks: [], cal: cal, mret: [], traded: [] }
     B3State {
         results: results, loaded: false, d: d, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: -1, seen: [], trials: [], ipca: [:], ipca_read: false,
-        nefd: [[:], [:]], nefd_state: [0, 0], rows: [], rows_read: false, protos: rt_b3_parse_protos(wasm_b3_protocols()), synced: false, opening: -1, err: "",
+        nefd: [[:], [:]], nefd_state: [0, 0], rows: [], rows_read: false, protos: protos, synced: false, opening: -1, err: "",
+        program: program, notes: "",
     }
 }
 
@@ -169,53 +177,59 @@ fn rt_b3_results(dir: str) -> str {
     if last < 0 { "results" } else { substr(p, 0, last + 1) + "results" }
 }
 
-// The state (made at the first call: its results folder).
-fn rt_b3_get() -> B3State {
-    if wasm_b3_has() { return wasm_b3_get() }
+// A new state for a program (its protocols, its name), with its results folder.
+fn rt_b3_fresh(protos: List[RtProto], program: str) -> B3State {
     var results = env("KAIROS_RESULTS")
     if results == "" {
         let dir = rt_b3_dir()
         if dir != "" { results = rt_b3_results(dir) }
     }
-    let s = rt_b3_new(results)
+    rt_b3_new(results, protos, program)
+}
+
+// The state of a program compiled to WebAssembly (made at the first call).
+fn rt_b3_get() -> B3State {
+    if wasm_b3_has() { return wasm_b3_get() }
+    let s = rt_b3_fresh(rt_b3_parse_protos(wasm_b3_protocols()), wasm_program())
     wasm_b3_set(s)
     s
 }
 
-// The state with the data read (once).
-fn rt_b3_data() -> (str, str, B3State) {
-    var s = rt_b3_get()
-    if s.loaded { return ("", "", s) }
+// The state back in the module's memory, its notes written.
+fn rt_b3_put(s0: B3State) {
+    var s = s0
+    if s.notes != "" {
+        wasm_eprint(s.notes)
+        s.notes = ""
+    }
+    wasm_b3_set(s)
+}
+
+// The data, read once.
+fn rt_b3_data_s(inout s: B3State) -> (str, str) {
+    if s.loaded { return ("", "") }
     let dir = rt_b3_dir()
-    if dir == "" { return ("R0100", "B3 data not found", s) }
+    if dir == "" { return ("R0100", "B3 data not found") }
     s.d = load_lab_data(dir)
     s.cdi_d = cdi_days(s.d.dates, load_cdi(dir))
     s.cdi_m = cdi_months(s.d.cal, s.cdi_d)
     s.nef = load_factors(dir + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv")
     s.nef_vw = load_factors(dir + "/raw/nefin/nefin_factors_monthly.csv")
     s.loaded = true
-    wasm_b3_set(s)
-    ("", "", s)
+    ("", "")
 }
 
-// The state with the months the program sees: up to the end of its protocols' research period,
-// and never into a holdout a pending protocol reserves (the ledger's fence), with a note when
-// they are cut; the ledger records that the program saw them. While `open_once` has a holdout
-// open, the program sees all the data.
-fn rt_b3_visible() -> (str, str, B3State) {
-    let r = rt_b3_data()
+// The months the program sees: up to the end of its protocols' research period, and never into a
+// holdout a pending protocol reserves (the ledger's fence), with a note when they are cut; the
+// ledger records that the program saw them. While `open_once` has a holdout open, the program sees
+// all the data.
+fn rt_b3_visible_s(inout s: B3State) -> (str, str) {
+    let r = rt_b3_data_s(inout s)
     if r.0 != "" { return r }
-    var s = r.2
-    if s.opening >= 0 {
-        s.n = len(s.d.cal.months)
-        return ("", "", s)
-    }
-    if s.n >= 0 { return r }
+    if s.opening >= 0 { return ("", "") }
+    if s.n >= 0 { return ("", "") }
     let y = rt_b3_sync(inout s)
-    if y.0 != "" {
-        wasm_b3_set(s)
-        return (y.0, y.1, s)
-    }
+    if y.0 != "" { return y }
     let q = from_codes([34])
     var lim = -1
     var why = ""
@@ -226,10 +240,7 @@ fn rt_b3_visible() -> (str, str, B3State) {
         }
     }
     let e = rt_b3_ledger(inout s)
-    if e != "" {
-        wasm_b3_set(s)
-        return ("R0500", e, s)
-    }
+    if e != "" { return ("R0500", e) }
     let f = fence(s.rows)
     if f.0 > 0 and (lim < 0 or f.0 < lim) {
         lim = f.0
@@ -237,14 +248,25 @@ fn rt_b3_visible() -> (str, str, B3State) {
     }
     let nm = len(s.d.cal.months)
     let n = if lim >= 0 { cal_idx_from(s.d.cal, next_ym(lim)) } else { nm }
-    if n > 0 and s.results != "" { ledger_saw(s.results, inout s.rows, s.d.cal.months[n - 1], "program " + wasm_program()) }
+    if n > 0 and s.results != "" { ledger_saw(s.results, inout s.rows, s.d.cal.months[n - 1], "program " + s.program) }
     if n < nm {
         let last = if n > 0 { fmt_ym(s.d.cal.months[n - 1]) } else { "before the first month" }
-        wasm_eprint("note: this program sees the data up to " + last + ": " + why + from_codes([10]))
+        s.notes = s.notes + "note: this program sees the data up to " + last + ": " + why + from_codes([10])
     }
     s.n = n
-    wasm_b3_set(s)
-    ("", "", s)
+    ("", "")
+}
+
+// The months the program sees, once rt_b3_visible_s has worked them out: all of them while
+// `open_once` has a holdout open (the state keeps the research's).
+fn rt_b3_n(s: B3State) -> i64 {
+    if s.opening >= 0 { len(s.d.cal.months) } else { s.n }
+}
+
+// The market's series over the months the program sees, from the state: what `b3.cdi()` and
+// `b3.nefin(...)` give it (the simulator's statistics read them).
+fn rt_b3_market(s: B3State) -> SimMarket {
+    sim_market(s.d, s.cdi_m, s.nef, s.nef_vw, rt_b3_n(s))
 }
 
 // ------------------------------------------------------------------ protocols and holdouts (M5)
@@ -299,80 +321,68 @@ fn rt_b3_openable(rows: List[LRow], p: RtProto) -> (str, str) {
 
 // b3.holdout("name"): fails right away if that holdout can no longer be opened, so a long research
 // run does not end in R0502.
-fn rt_b3_holdout(k: i64) -> (str, str, i64) {
-    var s = rt_b3_get()
+fn rt_b3_holdout_s(inout s: B3State, k: i64) -> (str, str, i64) {
     let y = rt_b3_sync(inout s)
-    if y.0 != "" {
-        wasm_b3_set(s)
-        return (y.0, y.1, k)
-    }
+    if y.0 != "" { return (y.0, y.1, k) }
     let e = rt_b3_ledger(inout s)
-    wasm_b3_set(s)
     if e != "" { return ("R0500", e, k) }
     let o = rt_b3_openable(s.rows, s.protos[k])
     if o.0 != "" { return ("R0502", o.0, k) }
     ("", "", k)
 }
 
-// open_once(h, || weights(), ...): records the opening before any month of the holdout is seen,
-// lets the program see all the data while the weights function runs, evaluates the weights on
-// the holdout's months (a fresh portfolio from its first month: a single trial, whose DSR is its
-// PSR) and writes the result in the ledger. An error in the weights function spends the holdout
-// all the same (rt_b3_failed).
-fn rt_b3_open_once(k: i64, f: fn() -> Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
-    let none = Evaluation { months: 0, cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan, trials: 0, dsr: nan }
-    let q = from_codes([34])
+fn rt_b3_holdout(k: i64) -> (str, str, i64) {
     var s = rt_b3_get()
-    if s.opening >= 0 { return ("R0504", "the holdout of protocol " + q + s.protos[s.opening].name + q + " is already open: holdouts are not opened inside one another", none) }
+    let r = rt_b3_holdout_s(inout s, k)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_no_eval() -> Evaluation {
+    Evaluation { months: 0, cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan, trials: 0, dsr: nan }
+}
+
+// open_once, before the weights function runs: the opening is recorded before any month of the
+// holdout is seen, and the program sees all the data until rt_b3_open_end_s.
+fn rt_b3_open_begin_s(inout s: B3State, k: i64) -> (str, str) {
+    let q = from_codes([34])
+    if s.opening >= 0 { return ("R0504", "the holdout of protocol " + q + s.protos[s.opening].name + q + " is already open: holdouts are not opened inside one another") }
     let y = rt_b3_sync(inout s)
-    wasm_b3_set(s)
-    if y.0 != "" { return (y.0, y.1, none) }
-    let dr = rt_b3_data()
-    if dr.0 != "" { return (dr.0, dr.1, none) }
-    s = dr.2
+    if y.0 != "" { return y }
+    let dr = rt_b3_data_s(inout s)
+    if dr.0 != "" { return dr }
     let e = rt_b3_ledger(inout s)
-    if e != "" {
-        wasm_b3_set(s)
-        return ("R0500", e, none)
-    }
+    if e != "" { return ("R0500", e) }
     let p = s.protos[k]
     let o = rt_b3_openable(s.rows, p)
-    if o.0 != "" {
-        wasm_b3_set(s)
-        return ("R0502", o.0, none)
-    }
+    if o.0 != "" { return ("R0502", o.0) }
     let h = p.holdout_from
     let nm = len(s.d.cal.months)
     let have = nm - min(cal_idx_from(s.d.cal, h), nm)
     let last = if nm > 0 { s.d.cal.months[nm - 1] } else { 0 }
-    if have == 0 or have < p.min_months {
-        wasm_b3_set(s)
-        if have == 0 { return ("R0503", "the holdout of protocol " + q + p.name + q + " starts in " + ledger_ym(h) + ", but the data ends in " + ledger_ym(last) + ": there is nothing to open yet", none) }
-        return ("R0503", "the holdout of protocol " + q + p.name + q + " has " + str(have) + " month(s) of data (" + ledger_ym(h) + ".." + ledger_ym(last) + "), and the protocol asks for at least " + str(p.min_months) + " before opening", none)
-    }
+    if have == 0 { return ("R0503", "the holdout of protocol " + q + p.name + q + " starts in " + ledger_ym(h) + ", but the data ends in " + ledger_ym(last) + ": there is nothing to open yet") }
+    if have < p.min_months { return ("R0503", "the holdout of protocol " + q + p.name + q + " has " + str(have) + " month(s) of data (" + ledger_ym(h) + ".." + ledger_ym(last) + "), and the protocol asks for at least " + str(p.min_months) + " before opening") }
     s.rows.push(LRow { kind: "opened", proto: p.name, sha256: o.1, holdout_from: h, data_until: last, date: today(), note: "opening: the weights function is running" })
     if s.results != "" { ledger_save(s.results, s.rows) }
     s.opening = k
     s.err = ""
-    wasm_b3_set(s)
-    // the holdout's months exist only while the weights function runs
-    wasm_b3_capture(true)
-    let w = f()
-    wasm_b3_capture(false)
-    s = rt_b3_get()
-    if s.err != "" {
-        wasm_eprint(s.err)
-        s.err = ""
-        wasm_b3_set(s)
-    }
+    ("", "")
+}
+
+// open_once, with the weights: evaluated on the holdout's months (a fresh portfolio from its first
+// month: a single trial, whose DSR is its PSR), and the result written in the ledger.
+fn rt_b3_open_end_s(inout s: B3State, k: i64, w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    let p = s.protos[k]
+    let h = p.holdout_from
+    let nm = len(s.d.cal.months)
     // the weights on the holdout's months (the program still sees them: the statistics read them)
     let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
-    let r = simulate_plans(s.d, s.cdi_d, plans_from(s.d, w, nm, cal_idx_from(s.d.cal, h), cfg, " (inside `open_once` the program sees all the data)"), nm, cfg)
+    let r = simulate_plans_on(s.d, s.cdi_d, plans_from(s.d, w, nm, cal_idx_from(s.d.cal, h), cfg, " (inside `open_once` the program sees all the data)"), nm, cfg, rt_b3_market(s))
     var note = ""
-    var res = ("", "", none)
+    var res = ("", "", rt_b3_no_eval())
     if r.0 != "" {
         note = "failed: R0102 " + r.0
-        res = ("R0102", r.0, none)
+        res = ("R0102", r.0, rt_b3_no_eval())
     } else {
         var excess: List[f64] = []
         for i in 0..len(r.1.ret) { excess.push(r.1.ret[i] - s.cdi_m[r.1.mi[i]]) }
@@ -383,11 +393,40 @@ fn rt_b3_open_once(k: i64, f: fn() -> Tensor[month, asset; f64], cost_bps: f64, 
         note = str(ev.months) + " months; CAGR " + format_fixed(100.0 * x.cagr, 2) + "%; Sharpe " + format_fixed(x.sharpe, 2) + "; alpha " + format_fixed(100.0 * x.alpha, 2) + "% a.a. (t " + format_fixed(x.t_alpha, 2) + "); PSR " + format_fixed(100.0 * psr, 0) + "%"
         res = ("", "", ev)
     }
-    s = rt_b3_get()
     s.opening = -1
-    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, o.1, note) }
-    wasm_b3_set(s)
+    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, rt_b3_proto_sha(p), note) }
     res
+}
+
+// open_once, when the weights function failed with the holdout open: the opening is recorded as
+// failed (`why`: the error), and the sentence the error's hint gets.
+fn rt_b3_open_failed_s(inout s: B3State, why: str) -> str {
+    let q = from_codes([34])
+    let p = s.protos[s.opening]
+    s.opening = -1
+    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, rt_b3_proto_sha(p), "failed: R0505 " + why) }
+    "the holdout of protocol " + q + p.name + q + " was open, so it is spent: the failure is recorded in the ledger"
+}
+
+// open_once(h, || weights(), ...) of a program compiled to WebAssembly. An error in the weights
+// function spends the holdout all the same (rt_b3_failed).
+fn rt_b3_open_once(k: i64, f: fn() -> Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    var s = rt_b3_get()
+    let b = rt_b3_open_begin_s(inout s, k)
+    rt_b3_put(s)
+    if b.0 != "" { return (b.0, b.1, rt_b3_no_eval()) }
+    // the holdout's months exist only while the weights function runs
+    wasm_b3_capture(true)
+    let w = f()
+    wasm_b3_capture(false)
+    s = rt_b3_get()
+    if s.err != "" {
+        wasm_eprint(s.err)
+        s.err = ""
+    }
+    let r = rt_b3_open_end_s(inout s, k, w, cost_bps, lag, capital, real_costs, tax, cap_adv, trial)
+    rt_b3_put(s)
+    r
 }
 
 // What the program writes to the standard error while a holdout is open is held: an error there
@@ -406,18 +445,14 @@ fn rt_b3_failed(addr: i64, n: i64) {
     let text = s.err + rt_text_of(addr, n)
     s.err = ""
     let nl = from_codes([10])
-    let q = from_codes([34])
     // "runtime error[CODE]: MSG", then where, then the hint, if any
     let first = substr(text, 0, find(text, nl))
     let a = find(first, "[")
     let b = find(first, "]: ")
     let code = substr(first, a + 1, b - a - 1)
     let msg = substr(first, b + 3, len(first) - b - 3)
-    let p = s.protos[s.opening]
-    s.opening = -1
-    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, rt_b3_proto_sha(p), "failed: R0505 the weights function failed while the holdout was open: " + code + " " + msg) }
+    let spent = rt_b3_open_failed_s(inout s, "the weights function failed while the holdout was open: " + code + " " + msg)
     wasm_b3_set(s)
-    let spent = "the holdout of protocol " + q + p.name + q + " was open, so it is spent: the failure is recorded in the ledger"
     let rest = substr(text, len(first) + 1, len(text) - len(first) - 1)
     let pad = substr(rest, 0, max(find(rest, "-->"), 0))
     // a hint goes on in a line of its own; without one, the hint is that
@@ -430,52 +465,101 @@ fn rt_b3_failed(addr: i64, n: i64) {
 
 // ------------------------------------------------------------------ data
 
+fn rt_b3_monthly_returns_s(inout s: B3State) -> (str, str, Tensor[month, asset; f64]) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, asset: 0)) }
+    ("", "", data_monthly_returns(s.d)[month: 0 .. rt_b3_n(s)])
+}
+
 fn rt_b3_monthly_returns() -> (str, str, Tensor[month, asset; f64]) {
-    let s = rt_b3_visible()
-    if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0)) }
-    ("", "", data_monthly_returns(s.2.d)[month: 0 .. s.2.n])
+    var s = rt_b3_get()
+    let r = rt_b3_monthly_returns_s(inout s)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_eligible_s(inout s: B3State) -> (str, str, Tensor[month, asset; bool]) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0, asset: 0) > 0.0) }
+    ("", "", data_eligible(s.d)[month: 0 .. rt_b3_n(s)])
 }
 
 fn rt_b3_eligible() -> (str, str, Tensor[month, asset; bool]) {
-    let s = rt_b3_visible()
-    if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0) > 0.0) }
-    ("", "", data_eligible(s.2.d)[month: 0 .. s.2.n])
+    var s = rt_b3_get()
+    let r = rt_b3_eligible_s(inout s)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_cdi_s(inout s: B3State) -> (str, str, Tensor[month; f64]) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0)) }
+    ("", "", tensor(s.cdi_m, month)[month: 0 .. rt_b3_n(s)])
 }
 
 fn rt_b3_cdi() -> (str, str, Tensor[month; f64]) {
-    let s = rt_b3_visible()
-    if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
-    ("", "", tensor(s.2.cdi_m, month)[month: 0 .. s.2.n])
+    var s = rt_b3_get()
+    let r = rt_b3_cdi_s(inout s)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_nefin_s(inout s: B3State, k: i64, vw: bool) -> (str, str, Tensor[month; f64]) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, zeros(month: 0)) }
+    ("", "", data_nefin(s.d.cal, if vw { s.nef_vw } else { s.nef }, k)[month: 0 .. rt_b3_n(s)])
 }
 
 fn rt_b3_nefin(k: i64, vw: bool) -> (str, str, Tensor[month; f64]) {
-    let s = rt_b3_visible()
-    if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
-    ("", "", data_nefin(s.2.d.cal, if vw { s.2.nef_vw } else { s.2.nef }, k)[month: 0 .. s.2.n])
+    var s = rt_b3_get()
+    let r = rt_b3_nefin_s(inout s, k, vw)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_months_s(inout s: B3State) -> (str, str, List[i64]) {
+    let r = rt_b3_visible_s(inout s)
+    var out: List[i64] = []
+    if r.0 != "" { return (r.0, r.1, out) }
+    for i in 0..rt_b3_n(s) { out.push(s.d.cal.months[i]) }
+    ("", "", out)
 }
 
 fn rt_b3_months() -> (str, str, List[i64]) {
-    let s = rt_b3_visible()
-    var out: List[i64] = []
-    if s.0 != "" { return (s.0, s.1, out) }
-    for i in 0..s.2.n { out.push(s.2.d.cal.months[i]) }
-    ("", "", out)
+    var s = rt_b3_get()
+    let r = rt_b3_months_s(inout s)
+    rt_b3_put(s)
+    r
+}
+
+fn rt_b3_month_index_s(inout s: B3State, ym: i64) -> (str, str, i64) {
+    if ym < 100001 or ym > 999912 or ym % 100 < 1 or ym % 100 > 12 { return ("R0101", "`" + str(ym) + "` is not a month in YYYYMM form", 0) }
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, 0) }
+    ("", "", min(cal_idx_from(s.d.cal, ym), rt_b3_n(s)))
 }
 
 fn rt_b3_month_index(ym: i64) -> (str, str, i64) {
-    if ym < 100001 or ym > 999912 or ym % 100 < 1 or ym % 100 > 12 { return ("R0101", "`" + str(ym) + "` is not a month in YYYYMM form", 0) }
-    let s = rt_b3_visible()
-    if s.0 != "" { return (s.0, s.1, 0) }
-    ("", "", min(cal_idx_from(s.2.d.cal, ym), s.2.n))
+    var s = rt_b3_get()
+    let r = rt_b3_month_index_s(inout s, ym)
+    rt_b3_put(s)
+    r
 }
 
 // the assets' tickers, companies (issuers) or classes: all of them (the data, not the months)
-fn rt_b3_names(what: i64) -> (str, str, List[str]) {
-    let s = rt_b3_data()
+fn rt_b3_names_s(inout s: B3State, what: i64) -> (str, str, List[str]) {
+    let r = rt_b3_data_s(inout s)
     var out: List[str] = []
-    if s.0 != "" { return (s.0, s.1, out) }
-    for tk in s.2.d.tks { out.push(if what == 0 { tk.ticker } else if what == 1 { tk.issuer } else { tk.class }) }
+    if r.0 != "" { return (r.0, r.1, out) }
+    for tk in s.d.tks { out.push(if what == 0 { tk.ticker } else if what == 1 { tk.issuer } else { tk.class }) }
     ("", "", out)
+}
+
+fn rt_b3_names(what: i64) -> (str, str, List[str]) {
+    var s = rt_b3_get()
+    let r = rt_b3_names_s(inout s, what)
+    rt_b3_put(s)
+    r
 }
 
 fn rt_b3_tickers() -> (str, str, List[str]) {
@@ -491,10 +575,9 @@ fn rt_b3_classes() -> (str, str, List[str]) {
 }
 
 // The IPCA of each month the program sees (NaN where it is not published yet).
-fn rt_b3_ipca() -> (str, str, Tensor[month; f64]) {
-    let r = rt_b3_visible()
+fn rt_b3_ipca_s(inout s: B3State) -> (str, str, Tensor[month; f64]) {
+    let r = rt_b3_visible_s(inout s)
     if r.0 != "" { return (r.0, r.1, zeros(month: 0)) }
-    var s = r.2
     if not s.ipca_read {
         // raw/bcb/ipca.csv: AAAAMM, the month's inflation in percent
         let path = rt_b3_dir() + "/raw/bcb/ipca.csv"
@@ -509,20 +592,27 @@ fn rt_b3_ipca() -> (str, str, Tensor[month; f64]) {
             }
         }
         s.ipca_read = true
-        wasm_b3_set(s)
     }
     var v: List[f64] = []
-    for i in 0..s.n {
+    for i in 0..rt_b3_n(s) {
         let m = s.d.cal.months[i]
         v.push(if contains(s.ipca, m) { s.ipca[m] } else { nan })
     }
     ("", "", tensor(v, month))
 }
 
+fn rt_b3_ipca() -> (str, str, Tensor[month; f64]) {
+    var s = rt_b3_get()
+    let r = rt_b3_ipca_s(inout s)
+    rt_b3_put(s)
+    r
+}
+
 // ------------------------------------------------------------------ the daily tensors
 //
 // One row per month, one column per session of the month (the width: the most sessions a month
-// has), NaN where the asset did not trade and in the sessions a month does not have.
+// has), NaN where the asset did not trade and in the sessions a month does not have. The `_s`
+// functions give the runtime's tensor (rt_tensor.krs).
 
 fn rt_b3_width(d: LabData) -> i64 {
     var s = 1
@@ -532,50 +622,71 @@ fn rt_b3_width(d: LabData) -> i64 {
 
 // field: 0 the return since the previous trade, 1 the volume in R$, 2 the close price, 3 the
 // dividends and interest on capital (added in 32 bits, as the lab does)
-fn rt_b3_daily(field: i64) -> (str, str, Tensor[month, session, asset; f64]) {
-    let r = rt_b3_visible()
-    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0, asset: 0)) }
-    let d = r.2.d
-    let n = r.2.n
-    let s = rt_b3_width(d)
+fn rt_b3_daily_s(inout s: B3State, field: i64) -> (str, str, RtT) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, rt_t_full([0, 3, 2], [0, 0, 0], 0.0, false)) }
+    let d = s.d
+    let n = rt_b3_n(s)
+    let w = rt_b3_width(d)
     let nt = len(d.tks)
     let end = if n < len(d.cal.months) { d.cal.mfrom[n] } else { len(d.dates) }
     var v: List[f64] = []
-    for i in 0..n * s * nt { v.push(nan) }
+    for i in 0..n * w * nt { v.push(nan) }
     for t in 0..nt {
         for day in d.tks[t].days {
             if day.di >= end { break }
             let m = d.cal.date_month[day.di]
             let x = if field == 0 { day.r } else if field == 1 { day.vol } else if field == 2 { day.px } else { wasm_f32(day.div + day.jcp) }
-            v[(m * s + day.di - d.cal.mfrom[m]) * nt + t] = x
+            v[(m * w + day.di - d.cal.mfrom[m]) * nt + t] = x
         }
     }
-    ("", "", wasm_t_msa(RtT { axes: [0, 3, 2], shape: [n, s, nt], data: v, boolean: false }))
+    ("", "", RtT { axes: [0, 3, 2], shape: [n, w, nt], data: v, boolean: false })
+}
+
+fn rt_b3_daily(field: i64) -> (str, str, Tensor[month, session, asset; f64]) {
+    var s = rt_b3_get()
+    let r = rt_b3_daily_s(inout s, field)
+    rt_b3_put(s)
+    (r.0, r.1, wasm_t_msa(r.2))
+}
+
+fn rt_b3_sessions_s(inout s: B3State) -> (str, str, RtT) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, rt_t_full([0, 3], [0, 0], 0.0, true)) }
+    let d = s.d
+    let w = rt_b3_width(d)
+    var v: List[f64] = []
+    for m in 0..rt_b3_n(s) {
+        for j in 0..w { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { 1.0 } else { 0.0 }) }
+    }
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: true })
 }
 
 fn rt_b3_sessions() -> (str, str, Tensor[month, session; bool]) {
-    let r = rt_b3_visible()
-    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0) > 0.0) }
-    let d = r.2.d
-    let s = rt_b3_width(d)
-    var v: List[f64] = []
-    for m in 0..r.2.n {
-        for j in 0..s { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { 1.0 } else { 0.0 }) }
-    }
-    ("", "", wasm_t_ms_bool(RtT { axes: [0, 3], shape: [r.2.n, s], data: v, boolean: true }))
+    var s = rt_b3_get()
+    let r = rt_b3_sessions_s(inout s)
+    rt_b3_put(s)
+    (r.0, r.1, wasm_t_ms_bool(r.2))
 }
 
 // the date of each session (YYYYMMDD)
-fn rt_b3_session_dates() -> (str, str, Tensor[month, session; f64]) {
-    let r = rt_b3_visible()
-    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0)) }
-    let d = r.2.d
-    let s = rt_b3_width(d)
+fn rt_b3_session_dates_s(inout s: B3State) -> (str, str, RtT) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, rt_t_full([0, 3], [0, 0], 0.0, false)) }
+    let d = s.d
+    let w = rt_b3_width(d)
     var v: List[f64] = []
-    for m in 0..r.2.n {
-        for j in 0..s { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { float(d.dates[d.cal.mfrom[m] + j]) } else { nan }) }
+    for m in 0..rt_b3_n(s) {
+        for j in 0..w { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { float(d.dates[d.cal.mfrom[m] + j]) } else { nan }) }
     }
-    ("", "", wasm_t_ms(RtT { axes: [0, 3], shape: [r.2.n, s], data: v, boolean: false }))
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: false })
+}
+
+fn rt_b3_session_dates() -> (str, str, Tensor[month, session; f64]) {
+    var s = rt_b3_get()
+    let r = rt_b3_session_dates_s(inout s)
+    rt_b3_put(s)
+    (r.0, r.1, wasm_t_ms(r.2))
 }
 
 // A natural number as Rust's u32 reads it (an optional +), or -1.
@@ -631,26 +742,24 @@ fn rt_b3_daily_factors(path: str) -> (bool, Map[i64, List[f64]]) {
 }
 
 // a daily NEFIN factor (equally weighted, or value weighted), NaN on the days NEFIN does not have
-fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]) {
-    let r = rt_b3_visible()
-    if r.0 != "" { return (r.0, r.1, zeros(month: 0, session: 0)) }
-    var st = r.2
+fn rt_b3_nefin_daily_s(inout s: B3State, k: i64, vw: bool) -> (str, str, RtT) {
+    let r = rt_b3_visible_s(inout s)
+    if r.0 != "" { return (r.0, r.1, rt_t_full([0, 3], [0, 0], 0.0, false)) }
     let w = if vw { 1 } else { 0 }
-    if st.nefd_state[w] == 0 {
+    if s.nefd_state[w] == 0 {
         let file = if vw { "nefin_factors.csv" } else { "nefin_factors_equally_weighted.csv" }
         let t = rt_b3_daily_factors(rt_b3_dir() + "/raw/nefin/" + file)
-        st.nefd[w] = t.1
-        st.nefd_state[w] = if t.0 { 1 } else { -1 }
-        wasm_b3_set(st)
+        s.nefd[w] = t.1
+        s.nefd_state[w] = if t.0 { 1 } else { -1 }
     }
-    if st.nefd_state[w] < 0 { return ("R0100", "the daily NEFIN factors are not available", zeros(month: 0, session: 0)) }
-    let table = st.nefd[w]
-    let d = st.d
-    let s = rt_b3_width(d)
+    if s.nefd_state[w] < 0 { return ("R0100", "the daily NEFIN factors are not available", rt_t_full([0, 3], [0, 0], 0.0, false)) }
+    let table = s.nefd[w]
+    let d = s.d
+    let wd = rt_b3_width(d)
     var v: List[f64] = []
-    for m in 0..st.n {
+    for m in 0..rt_b3_n(s) {
         let a = d.cal.mfrom[m]
-        for j in 0..s {
+        for j in 0..wd {
             var x = nan
             if j < d.cal.mto[m] - a {
                 if contains(table, d.dates[a + j]) { x = table[d.dates[a + j]][k] }
@@ -658,46 +767,57 @@ fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]
             v.push(x)
         }
     }
-    ("", "", wasm_t_ms(RtT { axes: [0, 3], shape: [st.n, s], data: v, boolean: false }))
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), wd], data: v, boolean: false })
+}
+
+fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]) {
+    var s = rt_b3_get()
+    let r = rt_b3_nefin_daily_s(inout s, k, vw)
+    rt_b3_put(s)
+    (r.0, r.1, wasm_t_ms(r.2))
 }
 
 // ------------------------------------------------------------------ evaluation
 
 // The simulation of the weights over the months the program sees, its statistics, and its trial
 // in the registry (trials, DSR).
-fn rt_b3_run(w: Tensor[month, asset; f64], cfg: SimCfg, trial: bool) -> (str, str, SimRun, SimEval, (i64, f64), i64) {
+fn rt_b3_run_s(inout s: B3State, w: Tensor[month, asset; f64], cfg: SimCfg, trial: bool) -> (str, str, SimRun, SimEval, (i64, f64), i64) {
     let none = SimRun { mi: [], ret: [], turnover: [], exposure: [], cost_paid: 0.0, traded: 0.0, tax_paid: 0.0, jcp_withheld: 0.0, final_value: 0.0, liq_value: 0.0, exempt_months: 0, taxed_months: 0, capped_frac: 0.0 }
     let zero = SimEval { cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan }
-    let g = rt_b3_get()
-    if g.opening >= 0 {
+    if s.opening >= 0 {
         let q = from_codes([34])
-        return ("R0504", "`b3.evaluate` cannot run while the holdout of protocol " + q + g.protos[g.opening].name + q + " is open", none, zero, (0, nan), 0)
+        return ("R0504", "`b3.evaluate` cannot run while the holdout of protocol " + q + s.protos[s.opening].name + q + " is open", none, zero, (0, nan), 0)
     }
-    let s0 = rt_b3_visible()
-    if s0.0 != "" { return (s0.0, s0.1, none, zero, (0, nan), 0) }
-    var s = s0.2
-    let r = kairos_evaluate(s.d, s.cdi_d, w, s.n, cfg)
+    let v = rt_b3_visible_s(inout s)
+    if v.0 != "" { return (v.0, v.1, none, zero, (0, nan), 0) }
+    let r = kairos_evaluate_on(s.d, s.cdi_d, w, rt_b3_n(s), cfg, rt_b3_market(s))
     if r.0 != "" { return ("R0102", r.0, none, zero, (0, nan), 0) }
-    let sha = weights_sha(w, s.n)
-    let t = evaluation_trial(s.d, s.cdi_m, r.1, sha, cfg, wasm_program())
+    let sha = weights_sha(w, rt_b3_n(s))
+    let t = evaluation_trial(s.d, s.cdi_m, r.1, sha, cfg, s.program)
     let rec = record_evaluation(s.results, t, sha, inout s.seen, trial)
-    wasm_b3_set(s)
-    ("", "", r.1, r.2, rec, s.n)
+    ("", "", r.1, r.2, rec, rt_b3_n(s))
 }
 
-fn rt_b3_evaluate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+fn rt_b3_evaluate_s(inout s: B3State, w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
     let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
-    let r = rt_b3_run(w, cfg, trial)
+    let r = rt_b3_run_s(inout s, w, cfg, trial)
     let e = r.3
     let rec = r.4
     let ev = Evaluation { months: len(r.2.ret), cagr: e.cagr, vol: e.vol, sharpe: e.sharpe, max_dd: e.max_dd, beta: e.beta, alpha: e.alpha, t_alpha: e.t_alpha, turnover: e.turnover, cost_bps: e.cost_bps, trials: rec.0, dsr: rec.1 }
     (r.0, r.1, ev)
 }
 
+fn rt_b3_evaluate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    var s = rt_b3_get()
+    let r = rt_b3_evaluate_s(inout s, w, cost_bps, lag, capital, real_costs, tax, cap_adv, trial)
+    rt_b3_put(s)
+    r
+}
+
 // b3.simulate: the evaluation month by month (NaN in the months it did not simulate)
-fn rt_b3_simulate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Simulation) {
+fn rt_b3_simulate_s(inout s: B3State, w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Simulation) {
     let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
-    let r = rt_b3_run(w, cfg, trial)
+    let r = rt_b3_run_s(inout s, w, cfg, trial)
     let run = r.2
     let rec = r.4
     var ret: List[f64] = []
@@ -721,6 +841,13 @@ fn rt_b3_simulate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital
     (r.0, r.1, sim)
 }
 
+fn rt_b3_simulate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Simulation) {
+    var s = rt_b3_get()
+    let r = rt_b3_simulate_s(inout s, w, cost_bps, lag, capital, real_costs, tax, cap_adv, trial)
+    rt_b3_put(s)
+    r
+}
+
 // ------------------------------------------------------------------ the registry of trials
 
 fn rt_b3_registry(s: B3State) -> List[Trial] {
@@ -729,18 +856,23 @@ fn rt_b3_registry(s: B3State) -> List[Trial] {
 
 // b3.deflate_trial(excess): [the trials in the registry, the Sharpe the best of them gives by
 // chance (a year), the DSR], against the registry as it is (nothing recorded)
-fn rt_b3_deflate_trial(excess: List[f64]) -> (str, str, List[f64]) {
-    let s = rt_b3_get()
+fn rt_b3_deflate_trial_s(inout s: B3State, excess: List[f64]) -> (str, str, List[f64]) {
     let t = new_trial("kairos", "deflate", "", "", excess)
     let all = rt_b3_registry(s)
     let df = if len(all) == 0 { deflate(t, [t]) } else { deflate(t, all) }
     ("", "", [float(max(len(all), 1)), df.0, df.1])
 }
 
+fn rt_b3_deflate_trial(excess: List[f64]) -> (str, str, List[f64]) {
+    var s = rt_b3_get()
+    let r = rt_b3_deflate_trial_s(inout s, excess)
+    rt_b3_put(s)
+    r
+}
+
 // b3.record_trial(study, name, params, period, excess): a trial in the registry (the same study,
 // name, params and period replaced), and the lab's line about it
-fn rt_b3_record_trial(study: str, name: str, params: str, period: str, excess: List[f64]) -> (str, str, str) {
-    var s = rt_b3_get()
+fn rt_b3_record_trial_s(inout s: B3State, study: str, name: str, params: str, period: str, excess: List[f64]) -> (str, str, str) {
     let t = new_trial(study, name, params, period, excess)
     var all: List[Trial] = []
     if s.results != "" {
@@ -752,18 +884,30 @@ fn rt_b3_record_trial(study: str, name: str, params: str, period: str, excess: L
         }
         all.push(t)
         s.trials = all
-        wasm_b3_set(s)
     }
     let df = deflate(t, all)
     let line = t.name + ": Sharpe " + format_fixed(t.sr_m * sqrt(12.0), 2) + " a.a. | " + str(max(len(all), 1)) + " testes no registro; o melhor deles daria ~" + format_fixed(df.0, 2) + " por acaso | DSR " + format_fixed(100.0 * df.1, 0) + "%"
     ("", "", line)
 }
 
+fn rt_b3_record_trial(study: str, name: str, params: str, period: str, excess: List[f64]) -> (str, str, str) {
+    var s = rt_b3_get()
+    let r = rt_b3_record_trial_s(inout s, study, name, params, period, excess)
+    rt_b3_put(s)
+    r
+}
+
 // b3.results_sha256(name): the SHA-256 of a file of the results folder ("" without it)
-fn rt_b3_results_sha256(name: str) -> (str, str, str) {
-    let s = rt_b3_get()
+fn rt_b3_results_sha256_s(inout s: B3State, name: str) -> (str, str, str) {
     if s.results == "" { return ("", "", "") }
     let p = s.results + "/" + name
     if not file_exists(p) { return ("", "", "") }
     ("", "", sha256_hex(read_bytes(p)))
+}
+
+fn rt_b3_results_sha256(name: str) -> (str, str, str) {
+    var s = rt_b3_get()
+    let r = rt_b3_results_sha256_s(inout s, name)
+    rt_b3_put(s)
+    r
 }

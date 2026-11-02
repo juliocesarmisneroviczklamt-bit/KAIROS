@@ -164,7 +164,7 @@ fn last_date(s: Series) -> i64 {
     if len(s.bars) == 0 { 0 } else { s.bars[len(s.bars) - 1].date }
 }
 
-fn root(inout parent: List[i64], x: i64) -> i64 {
+fn uf_root(inout parent: List[i64], x: i64) -> i64 {
     var r = x
     while parent[r] != r { r = parent[r] }
     var y = x
@@ -202,15 +202,15 @@ fn chain_renames(series: List[Series]) -> (List[Series], List[str]) {
             let la = last_date(series[a])
             let fb = first_date(series[b])
             if la < fb and date_days(fb) - date_days(la) <= 45 {
-                let ra = root(inout parent, a)
-                let rb = root(inout parent, b)
+                let ra = uf_root(inout parent, a)
+                let rb = uf_root(inout parent, b)
                 if ra != rb { parent[rb] = ra }
             }
         }
     }
     var groups: Map[i64, List[i64]] = [:]
     for i in 0..n {
-        let r = root(inout parent, i)
+        let r = uf_root(inout parent, i)
         if not contains(groups, r) { groups[r] = [] }
         groups[r].push(i)
     }
