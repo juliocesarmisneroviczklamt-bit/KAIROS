@@ -115,7 +115,9 @@ fn rt_fn(inout g: WGen, name: str) -> i64 {
 }
 
 // The glue function that does `what` (drop, unique, show) for values of type `t`.
-fn glue_fn(inout g: WGen, what: str, t: Ty) -> i64 {
+fn glue_fn(inout g: WGen, what: str, t0: Ty) -> i64 {
+    // a tensor is the struct RtT of the runtime (but it is written as a tensor)
+    let t = if is_tensor_t(t0) and what != "show" { rtt(g) } else { t0 }
     let key = what + " " + show(g.ck, t)
     if contains(g.glue_idx, key) { return g.glue_idx[key] }
     let i = first_user_fn() + len(g.order)
@@ -376,6 +378,7 @@ fn vt(t: Ty) -> i64 {
         TMap(_, _) => wt_i32(),
         TBytes => wt_i32(),
         TFn(_, _) => wt_i32(),
+        TTensor(_, _) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -393,6 +396,7 @@ fn heap(t: Ty) -> bool {
         TMap(_, _) => true,
         TBytes => true,
         TFn(_, _) => true,
+        TTensor(_, _) => true,
         _ => false,
     }
 }
@@ -698,6 +702,40 @@ fn gen(inout g: WGen, e: H) {
             if w > 0 { lget(inout g, tv) }
             return cell_store(inout g, c)
         }
+        if is_tensor_t(c.ty) {
+            // a new tensor: the current one op the value (repeated when it is not a tensor)
+            var tvt = tv
+            var made = false
+            if not is_tensor_t(v.t) {
+                lget(inout g, tv)
+                if v.t == Ty.TBool { op(inout g, 184) }
+                i32c(inout g, if v.t == Ty.TBool { 1 } else { 0 })
+                call_f(inout g, rt_fn(inout g, "rt_t_scalar"))
+                tvt = new_local(inout g, wt_i32())
+                lset(inout g, tvt)
+                made = true
+            }
+            let cur = new_local(inout g, wt_i32())
+            cell_load(inout g, c)
+            lset(inout g, cur)
+            check_sizes(inout g, e, cur, c.ty, tvt, v.t)
+            i64c(inout g, tensor_op_code(e.text))
+            lget(inout g, cur)
+            lget(inout g, tvt)
+            call_f(inout g, rt_fn(inout g, "rt_t_map2"))
+            let nv = new_local(inout g, wt_i32())
+            lset(inout g, nv)
+            if made {
+                lget(inout g, tvt)
+                drop_v(inout g, rtt(g))
+            } else {
+                drop_tmp(inout g, tv, v.t)
+            }
+            lget(inout g, cur)
+            drop_v(inout g, c.ty)
+            lget(inout g, nv)
+            return cell_store(inout g, c)
+        }
         // `x op= v`: the current value (borrowed) op the value
         cell_load(inout g, c)
         if w > 0 { lget(inout g, tv) }
@@ -730,6 +768,8 @@ fn gen(inout g: WGen, e: H) {
     if k == "lambda" { return lambda_w(inout g, e) }
     if k == "fnref" { return fnref_w(inout g, e) }
     if k == "callv" { return callv_w(inout g, e) }
+    if k == "tindex" { return tindex_w(inout g, e) }
+    if k == "tassign" { return tassign_w(inout g, e) }
     if k == "index" {
         if is_list(e.kids[0].t) { return index_list(inout g, e) }
         return index_map(inout g, e)
@@ -758,6 +798,7 @@ fn gen(inout g: WGen, e: H) {
     }
     if k == "binary" { return binary_w(inout g, e) }
     if k == "unary" {
+        if is_tensor_t(e.kids[0].t) { return tensor_map1(inout g, if e.text == "not" { 1 } else { 0 }, e.kids[0]) }
         gen(inout g, e.kids[0])
         if e.text == "not" {
             op(inout g, 69)
@@ -1051,6 +1092,7 @@ fn float_op(inout g: WGen, o: str, e: H) {
 fn binary_w(inout g: WGen, e: H) {
     let a = e.kids[0]
     let b = e.kids[1]
+    if is_tensor_t(a.t) or is_tensor_t(b.t) { return tensor_map2(inout g, e, tensor_op_code(e.text), a, b) }
     if a.t == Ty.TStr and e.text == "+" {
         // texts the compiler knows are joined when compiling
         let c = const_text(e)
@@ -1328,6 +1370,7 @@ fn builtin_w(inout g: WGen, e: H) {
         close(inout g)
         return
     }
+    if tensor_builtin_w(inout g, e) { return }
     if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
     if b == "float" {
         gen(inout g, args[0].kids[0])
@@ -3342,6 +3385,479 @@ fn gen_closure_glue(inout g: WGen, what: str) {
     g.m.funcs.push(finish(inout g, len(ps), wtype(inout g.m, ps, if r > 0 { [r] } else { [] })))
 }
 
+// ------------------------------------------------------------------ tensors
+//
+// A tensor is the struct RtT of the runtime (rt_tensor.krs, in Kairós): it drops, copies and
+// compares as a struct. Its operations are functions of the runtime; the back end checks
+// indexes, ranges and sizes, where it knows the axes, with the interpreter's messages.
+
+fn is_tensor_t(t: Ty) -> bool {
+    match t {
+        TTensor(_, _) => true,
+        _ => false,
+    }
+}
+
+fn axes_of_t(t: Ty) -> List[i64] {
+    match t {
+        TTensor(a, _) => a,
+        _ => [],
+    }
+}
+
+fn rtt(g: WGen) -> Ty {
+    Ty.TStruct(g.ck.struct_ids["RtT"])
+}
+
+// The code rt_t_op knows an operator by (-1: none).
+fn tensor_op_code(o: str) -> i64 {
+    let ops = ["+", "-", "*", "/", "%", "^", "==", "!=", "<", ">", "<=", ">="]
+    for i in 0..len(ops) {
+        if ops[i] == o { return i }
+    }
+    -1
+}
+
+// The value of e as a tensor on the stack (a value repeated everywhere when e is not a tensor):
+// the local of what to drop after, or -1.
+fn tensor_operand(inout g: WGen, e: H, safe: bool) -> i64 {
+    if is_tensor_t(e.t) { return gen_borrow(inout g, e, safe) }
+    gen(inout g, e)
+    if e.t == Ty.TBool {
+        op(inout g, 184)
+        i32c(inout g, 1)
+    } else {
+        if vt(e.t) == wt_i64() { op(inout g, 185) }
+        i32c(inout g, 0)
+    }
+    call_f(inout g, rt_fn(inout g, "rt_t_scalar"))
+    let t = new_local(inout g, wt_i32())
+    op_u(inout g, 34, t)
+    t
+}
+
+// The size of tensor (local t) along axis ax, in a new local.
+fn tensor_size(inout g: WGen, t: i64, ax: i64) -> i64 {
+    lget(inout g, t)
+    i64c(inout g, ax)
+    call_f(inout g, rt_fn(inout g, "rt_t_size"))
+    let n = new_local(inout g, wt_i64())
+    lset(inout g, n)
+    n
+}
+
+// R0201 when tensors a and b (locals) differ in the size of an axis both have; the message
+// gives first the size in the one with the most axes (the frame), as the interpreter.
+fn check_sizes(inout g: WGen, e: H, a: i64, ta: Ty, b: i64, tb: Ty) {
+    let xa = axes_of_t(ta)
+    let xb = axes_of_t(tb)
+    let a_wide = not (len(xb) > len(xa))
+    for ax in (if a_wide { xb } else { xa }) {
+        if not contains(if a_wide { xa } else { xb }, ax) { continue }
+        let sa = tensor_size(inout g, a, ax)
+        let sb = tensor_size(inout g, b, ax)
+        lget(inout g, sa)
+        lget(inout g, sb)
+        op(inout g, 82)
+        open(inout g, 4, 0)
+        let first = if a_wide { sa } else { sb }
+        let second = if a_wide { sb } else { sa }
+        fail_dyn2(inout g, e, "R0201", ["size mismatch on axis `" + g.ck.axes[ax].name + "`: ", " vs ", ""], [(first, "rt_str_i64"), (second, "rt_str_i64")])
+        close(inout g)
+    }
+}
+
+// x op y element by element (rt_t_map2), one of them at least a tensor
+fn tensor_map2(inout g: WGen, e: H, code: i64, x: H, y: H) {
+    let tx = tensor_operand(inout g, x, not changes(y))
+    let lx = new_local(inout g, wt_i32())
+    lset(inout g, lx)
+    let ty = tensor_operand(inout g, y, true)
+    let ly = new_local(inout g, wt_i32())
+    lset(inout g, ly)
+    check_sizes(inout g, e, lx, x.t, ly, y.t)
+    i64c(inout g, code)
+    lget(inout g, lx)
+    lget(inout g, ly)
+    call_f(inout g, rt_fn(inout g, "rt_t_map2"))
+    drop_tmp(inout g, tx, rtt(g))
+    drop_tmp(inout g, ty, rtt(g))
+}
+
+// f(x) element by element (rt_t_map1)
+fn tensor_map1(inout g: WGen, code: i64, x: H) {
+    i64c(inout g, code)
+    let tx = gen_borrow(inout g, x, true)
+    call_f(inout g, rt_fn(inout g, "rt_t_map1"))
+    drop_tmp(inout g, tx, rtt(g))
+}
+
+// A tensor result (owned, on the stack) that the program sees as one value: the value.
+fn tensor_to_scalar(inout g: WGen, t: Ty) {
+    let r = new_local(inout g, wt_i32())
+    lset(inout g, r)
+    lget(inout g, r)
+    call_f(inout g, rt_fn(inout g, if t == Ty.TBool { "rt_t_truth" } else { "rt_t_value" }))
+    lget(inout g, r)
+    drop_v(inout g, rtt(g))
+}
+
+// The selectors of an index (each `at` or `range` node), checked against the tensor in local t
+// as the interpreter checks them, in a new local (a list for rt_t_select and rt_t_assign).
+fn wsels(inout g: WGen, e: H, sels: List[H], t: i64) -> i64 {
+    // the indexes first, in order
+    var vals: List[(i64, i64)] = []
+    for s in sels {
+        if s.kind == "at" {
+            gen(inout g, s.kids[0])
+            let i = new_local(inout g, wt_i64())
+            lset(inout g, i)
+            vals.push((i, -1))
+        } else {
+            gen(inout g, s.kids[0])
+            let lo = new_local(inout g, wt_i64())
+            lset(inout g, lo)
+            gen(inout g, s.kids[1])
+            if s.m == 1 {
+                // ..= : one more (checked)
+                i64c(inout g, 1)
+                arith(inout g, "+", e)
+            }
+            let hi = new_local(inout g, wt_i64())
+            lset(inout g, hi)
+            vals.push((lo, hi))
+        }
+    }
+    // then the bounds, axis by axis
+    i64c(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let out = new_local(inout g, wt_i32())
+    lset(inout g, out)
+    for k in 0..len(sels) {
+        let s = sels[k]
+        let name = g.ck.axes[s.n].name
+        let n = tensor_size(inout g, t, s.n)
+        let v = vals[k]
+        if s.kind == "at" {
+            lget(inout g, v.0)
+            lget(inout g, n)
+            op(inout g, 90)
+            open(inout g, 4, 0)
+            fail_dyn2(inout g, e, "R0001", ["index ", " out of bounds for axis `" + name + "` of size ", ""], [(v.0, "rt_str_i64"), (n, "rt_str_i64")])
+            close(inout g)
+        } else {
+            lget(inout g, v.1)
+            lget(inout g, v.0)
+            op(inout g, 83)
+            open(inout g, 4, 0)
+            fail_dyn2(inout g, e, "R0001", ["reversed range ", "..", " on axis `" + name + "`"], [(v.0, "rt_str_i64"), (v.1, "rt_str_i64")])
+            close(inout g)
+            // the first index outside: lo when below 0, else hi - 1
+            lget(inout g, v.0)
+            i64c(inout g, 0)
+            op(inout g, 83)
+            open(inout g, 4, 0)
+            fail_dyn2(inout g, e, "R0001", ["index ", " out of bounds for axis `" + name + "` of size ", ""], [(v.0, "rt_str_i64"), (n, "rt_str_i64")])
+            close(inout g)
+            lget(inout g, v.1)
+            lget(inout g, n)
+            op(inout g, 86)
+            open(inout g, 4, 0)
+            let bad = new_local(inout g, wt_i64())
+            lget(inout g, v.1)
+            i64c(inout g, 1)
+            op(inout g, 125)
+            lset(inout g, bad)
+            fail_dyn2(inout g, e, "R0001", ["index ", " out of bounds for axis `" + name + "` of size ", ""], [(bad, "rt_str_i64"), (n, "rt_str_i64")])
+            close(inout g)
+        }
+        // (axis, kind, lo, hi) at the end of the list
+        lget(inout g, out)
+        i64c(inout g, s.n)
+        i64c(inout g, if s.kind == "at" { 0 } else { 1 })
+        lget(inout g, v.0)
+        if s.kind == "at" { i64c(inout g, 0) } else { lget(inout g, v.1) }
+        call_f(inout g, rt_fn(inout g, "rt_t_sel"))
+        lget(inout g, out)
+        drop_v(inout g, Ty.TList(Ty.TTuple([Ty.TInt, Ty.TInt, Ty.TInt, Ty.TInt])))
+        lset(inout g, out)
+    }
+    out
+}
+
+fn sels_ty() -> Ty {
+    Ty.TList(Ty.TTuple([Ty.TInt, Ty.TInt, Ty.TInt, Ty.TInt]))
+}
+
+// x[month: m, asset: a .. b]: x first, then the indexes
+fn tindex_w(inout g: WGen, e: H) {
+    let x = e.kids[0]
+    var sels: List[H] = []
+    for i in 1..len(e.kids) { sels.push(e.kids[i]) }
+    var later = false
+    for s in sels {
+        if changes(s) { later = true }
+    }
+    let tx = gen_borrow(inout g, x, not later)
+    let t = new_local(inout g, wt_i32())
+    lset(inout g, t)
+    let sl = wsels(inout g, e, sels, t)
+    lget(inout g, t)
+    lget(inout g, sl)
+    call_f(inout g, rt_fn(inout g, "rt_t_select"))
+    if not is_tensor_t(e.t) { tensor_to_scalar(inout g, e.t) }
+    lget(inout g, sl)
+    drop_v(inout g, sels_ty())
+    drop_tmp(inout g, tx, rtt(g))
+}
+
+// x[month: m] = v and x[month: m] op= v: the value first, then the indexes, then the tensor (it
+// moves into rt_t_assign and back, so it changes in place when no one else has it)
+fn tassign_w(inout g: WGen, e: H) {
+    let n = len(e.kids)
+    let place = e.kids[0]
+    let v = e.kids[n - 1]
+    var sels: List[H] = []
+    for i in 1..n - 1 { sels.push(e.kids[i]) }
+    let tv = tensor_operand(inout g, v, true)
+    let lv = new_local(inout g, wt_i32())
+    lset(inout g, lv)
+    let c = place_cell(inout g, place, false)
+    if g.failed { return }
+    let t = new_local(inout g, wt_i32())
+    cell_load(inout g, c)
+    lset(inout g, t)
+    let sl = wsels(inout g, e, sels, t)
+    var val = lv
+    var made = -1
+    if e.text != "=" {
+        // the current part, op the value
+        lget(inout g, t)
+        lget(inout g, sl)
+        call_f(inout g, rt_fn(inout g, "rt_t_select"))
+        let cur = new_local(inout g, wt_i32())
+        lset(inout g, cur)
+        i64c(inout g, tensor_op_code(e.text))
+        lget(inout g, cur)
+        lget(inout g, lv)
+        call_f(inout g, rt_fn(inout g, "rt_t_map2"))
+        made = new_local(inout g, wt_i32())
+        lset(inout g, made)
+        lget(inout g, cur)
+        drop_v(inout g, rtt(g))
+        val = made
+    }
+    lget(inout g, t)
+    lget(inout g, sl)
+    lget(inout g, val)
+    call_f(inout g, rt_fn(inout g, "rt_t_assign"))
+    cell_store(inout g, c)
+    lget(inout g, sl)
+    drop_v(inout g, sels_ty())
+    if made >= 0 {
+        lget(inout g, made)
+        drop_v(inout g, rtt(g))
+    }
+    drop_tmp(inout g, tv, rtt(g))
+}
+
+// The builtins with tensors: true when b is one of them here.
+fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
+    let b = e.text
+    let args = e.kids
+    var any = false
+    for a in args {
+        if is_tensor_t(a.kids[0].t) { any = true }
+    }
+    let creators = ["zeros", "ones", "full", "tensor"]
+    if not any and not contains(creators, b) { return false }
+    let x = args[0].kids[0]
+    let reds = ["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count"]
+    for k in 0..len(reds) {
+        if b == reds[k] and len(args) == 2 and is_tensor_t(x.t) and starts_with(args[1].kids[0].text, "i64 ") {
+            let tx = gen_borrow(inout g, x, true)
+            gen(inout g, args[1].kids[0])
+            i64c(inout g, k)
+            call_f(inout g, rt_fn(inout g, "rt_t_reduce"))
+            if not is_tensor_t(e.t) { tensor_to_scalar(inout g, e.t) }
+            drop_tmp(inout g, tx, rtt(g))
+            return true
+        }
+    }
+    if (b == "max" or b == "min") and len(args) == 2 {
+        tensor_map2(inout g, e, if b == "max" { 14 } else { 15 }, x, args[1].kids[0])
+        return true
+    }
+    if b == "and" or b == "or" {
+        tensor_map2(inout g, e, if b == "and" { 12 } else { 13 }, x, args[1].kids[0])
+        return true
+    }
+    let fns = ["abs", "sqrt", "exp", "ln", "floor", "ceil", "round", "tanh", "sigmoid", "relu", "softplus", "is_nan"]
+    let codes_ = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    for k in 0..len(fns) {
+        if b == fns[k] {
+            tensor_map1(inout g, codes_[k], x)
+            return true
+        }
+    }
+    if b == "observed" {
+        gen(inout g, x)
+        return true
+    }
+    if b == "fill_nan" {
+        let tx = gen_borrow(inout g, x, not changes(args[1]))
+        gen(inout g, args[1].kids[0])
+        call_f(inout g, rt_fn(inout g, "rt_t_fill_nan"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "where" {
+        let c = tensor_operand(inout g, x, not changes(args[1]) and not changes(args[2]))
+        let ta = tensor_operand(inout g, args[1].kids[0], not changes(args[2]))
+        let tb = tensor_operand(inout g, args[2].kids[0], true)
+        call_f(inout g, rt_fn(inout g, "rt_t_where"))
+        drop_tmp(inout g, c, rtt(g))
+        drop_tmp(inout g, ta, rtt(g))
+        drop_tmp(inout g, tb, rtt(g))
+        return true
+    }
+    if b == "size" {
+        let tx = gen_borrow(inout g, x, true)
+        gen(inout g, args[1].kids[0])
+        call_f(inout g, rt_fn(inout g, "rt_t_size"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "top_k" or b == "bottom_k" or b == "rank" {
+        let tx = gen_borrow(inout g, x, true)
+        let t = new_local(inout g, wt_i32())
+        lset(inout g, t)
+        if b == "rank" {
+            lget(inout g, t)
+            gen(inout g, args[1].kids[0])
+            call_f(inout g, rt_fn(inout g, "rt_t_rank"))
+        } else {
+            gen(inout g, args[1].kids[0])
+            let k = new_local(inout g, wt_i64())
+            lset(inout g, k)
+            lget(inout g, t)
+            gen(inout g, args[2].kids[0])
+            lget(inout g, k)
+            i32c(inout g, if b == "top_k" { 1 } else { 0 })
+            call_f(inout g, rt_fn(inout g, "rt_t_top_k"))
+        }
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "zeros_like" or b == "full_like" {
+        let tx = gen_borrow(inout g, x, true)
+        if b == "zeros_like" {
+            f64c(inout g, 0.0)
+            i32c(inout g, 0)
+        } else {
+            let v = args[1].kids[0]
+            gen(inout g, v)
+            if v.t == Ty.TBool {
+                op(inout g, 184)
+                i32c(inout g, 1)
+            } else {
+                i32c(inout g, 0)
+            }
+        }
+        call_f(inout g, rt_fn(inout g, "rt_t_like"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "zeros" or b == "ones" or b == "full" {
+        // the value, then the (axis, size) pairs; R0203 for a negative size
+        var at = 0
+        let v = new_local(inout g, wt_f64())
+        var boolean = false
+        if b == "full" {
+            let fv = args[0].kids[0]
+            gen(inout g, fv)
+            if fv.t == Ty.TBool {
+                op(inout g, 184)
+                boolean = true
+            }
+            at = 1
+        } else {
+            f64c(inout g, if b == "ones" { 1.0 } else { 0.0 })
+        }
+        lset(inout g, v)
+        i64c(inout g, 0)
+        call_f(inout g, rt_fn(inout g, "rt_list_new"))
+        op(inout g, 167)
+        let axes = new_local(inout g, wt_i32())
+        lset(inout g, axes)
+        i64c(inout g, 0)
+        call_f(inout g, rt_fn(inout g, "rt_list_new"))
+        op(inout g, 167)
+        let shape = new_local(inout g, wt_i32())
+        lset(inout g, shape)
+        var k = at
+        while k + 1 < len(args) {
+            let ax = args[k].kids[0]
+            let ln = new_local(inout g, wt_i64())
+            gen(inout g, args[k + 1].kids[0])
+            lset(inout g, ln)
+            lget(inout g, ln)
+            i64c(inout g, 0)
+            op(inout g, 83)
+            open(inout g, 4, 0)
+            let id = parse_int(substr(ax.text, 4, len(ax.text) - 4))
+            fail_dyn2(inout g, e, "R0203", ["negative size ", " for axis `" + g.ck.axes[id].name + "`"], [(ln, "rt_str_i64")])
+            close(inout g)
+            for pair in [(axes, -1), (shape, ln)] {
+                lget(inout g, pair.0)
+                if pair.1 < 0 { gen(inout g, ax) } else { lget(inout g, pair.1) }
+                call_f(inout g, rt_fn(inout g, "rt_t_shape_add"))
+                lget(inout g, pair.0)
+                drop_v(inout g, Ty.TList(Ty.TInt))
+                lset(inout g, pair.0)
+            }
+            k += 2
+        }
+        lget(inout g, axes)
+        lget(inout g, shape)
+        lget(inout g, v)
+        i32c(inout g, if boolean { 1 } else { 0 })
+        call_f(inout g, rt_fn(inout g, "rt_t_full"))
+        return true
+    }
+    if b == "tensor" {
+        let tx = gen_borrow(inout g, x, true)
+        gen(inout g, args[1].kids[0])
+        let boolean = args[2].kids[0].text == "bool true"
+        call_f(inout g, rt_fn(inout g, if boolean { "rt_t_from_bools" } else { "rt_t_from_list" }))
+        drop_tmp(inout g, tx, x.t)
+        return true
+    }
+    wg_fail(inout g, e, "`" + b + "` on tensors")
+    true
+}
+
+// The text of a tensor (glue "show"): the names of the axes, then rt_t_show.
+fn glue_show_tensor(inout g: WGen) {
+    let n = len(g.ck.axes)
+    i64c(inout g, n)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let names = new_local(inout g, wt_i32())
+    lset(inout g, names)
+    for i in 0..n {
+        lget(inout g, names)
+        i32c(inout g, intern_obj(inout g, g.ck.axes[i].name))
+        store_at(inout g, wt_i32(), 16 + 8 * i)
+    }
+    lget(inout g, 0)
+    lget(inout g, names)
+    call_f(inout g, rt_fn(inout g, "rt_t_show"))
+    lget(inout g, names)
+    drop_v(inout g, Ty.TList(Ty.TStr))
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -3375,6 +3891,8 @@ fn gen_glue(inout g: WGen, j: i64) {
     } else if what == "show" {
         if is_list(t) {
             glue_show_list(inout g, t)
+        } else if is_tensor_t(t) {
+            glue_show_tensor(inout g)
         } else if t == Ty.TBytes {
             lget(inout g, 0)
             call_f(inout g, rt_fn(inout g, "rt_bytes_show"))

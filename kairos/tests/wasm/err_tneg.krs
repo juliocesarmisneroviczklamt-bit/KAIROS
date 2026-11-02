@@ -1,0 +1,4 @@
+axis cell
+let n = 2 - 3
+print(zeros(cell: 1))       // out: Tensor[cell: 1; f64] [0.0]
+print(zeros(cell: n))       // error: R0203

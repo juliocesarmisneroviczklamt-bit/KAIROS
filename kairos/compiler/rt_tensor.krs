@@ -1,0 +1,463 @@
+// The tensors of programs compiled to WebAssembly (M14), written in Kairós: as the interpreter's
+// (src/tensor.rs), operation by operation, so the results are the same bits. A tensor has its
+// axes (their ids), their sizes and its values, row-major in the order of its axes; a tensor of
+// bool keeps 0.0 and 1.0. The back end checks indexes and sizes where it knows the axes, before
+// calling these functions.
+
+struct RtT {
+    axes: List[i64],
+    shape: List[i64],
+    data: List[f64],
+    boolean: bool,
+}
+
+fn rt_t_count(shape: List[i64]) -> i64 {
+    var n = 1
+    for s in shape { n = n * s }
+    n
+}
+
+fn rt_t_pos(t: RtT, ax: i64) -> i64 {
+    for i in 0..len(t.axes) {
+        if t.axes[i] == ax { return i }
+    }
+    -1
+}
+
+fn rt_t_size(t: RtT, ax: i64) -> i64 {
+    let p = rt_t_pos(t, ax)
+    if p < 0 { 0 } else { t.shape[p] }
+}
+
+fn rt_t_strides(shape: List[i64]) -> List[i64] {
+    let n = len(shape)
+    var s: List[i64] = []
+    for i in 0..n { s.push(1) }
+    var k = n - 2
+    while k >= 0 {
+        s[k] = s[k + 1] * shape[k + 1]
+        k -= 1
+    }
+    s
+}
+
+fn rt_t_scalar(v: f64, boolean: bool) -> RtT {
+    RtT { axes: [], shape: [], data: [v], boolean: boolean }
+}
+
+fn rt_t_full(axes: List[i64], shape: List[i64], v: f64, boolean: bool) -> RtT {
+    var d: List[f64] = []
+    for i in 0..rt_t_count(shape) { d.push(v) }
+    RtT { axes: axes, shape: shape, data: d, boolean: boolean }
+}
+
+// zeros_like and full_like
+fn rt_t_like(t: RtT, v: f64, boolean: bool) -> RtT {
+    rt_t_full(t.axes, t.shape, v, boolean)
+}
+
+// tensor(xs, axis): a tensor of one axis with the values of a list
+fn rt_t_from_list(xs: List[f64], ax: i64) -> RtT {
+    RtT { axes: [ax], shape: [len(xs)], data: xs, boolean: false }
+}
+
+fn rt_t_from_bools(xs: List[bool], ax: i64) -> RtT {
+    var d: List[f64] = []
+    for x in xs { d.push(if x { 1.0 } else { 0.0 }) }
+    RtT { axes: [ax], shape: [len(xs)], data: d, boolean: true }
+}
+
+// The offset in t of each element of the frame (axes, shape), in row-major order: t's own
+// strides along the axes it has, 0 along the others (its values repeat there).
+fn rt_t_offsets(t: RtT, axes: List[i64], shape: List[i64]) -> List[i64] {
+    let st = rt_t_strides(t.shape)
+    var ms: List[i64] = []
+    for a in axes {
+        let p = rt_t_pos(t, a)
+        ms.push(if p >= 0 { st[p] } else { 0 })
+    }
+    let nd = len(shape)
+    var idx: List[i64] = []
+    for k in 0..nd { idx.push(0) }
+    var out: List[i64] = []
+    var off = 0
+    for i in 0..rt_t_count(shape) {
+        out.push(off)
+        var k = nd
+        while k > 0 {
+            k -= 1
+            idx[k] += 1
+            off += ms[k]
+            if idx[k] < shape[k] { break }
+            off -= ms[k] * idx[k]
+            idx[k] = 0
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------ element by element
+
+// x op y: 0 + 1 - 2 * 3 / 4 % 5 ^, 6 == 7 != 8 < 9 > 10 <= 11 >=, 12 and 13 or, 14 max 15 min
+fn rt_t_op(op: i64, x: f64, y: f64) -> f64 {
+    if op == 0 { return x + y }
+    if op == 1 { return x - y }
+    if op == 2 { return x * y }
+    if op == 3 { return x / y }
+    if op == 4 { return x % y }
+    if op == 5 { return x ^ y }
+    if op == 14 or op == 15 {
+        // max, min (NaN when either is)
+        if is_nan(x) or is_nan(y) { return nan }
+        return if op == 14 { if y > x { y } else { x } } else { if y < x { y } else { x } }
+    }
+    var b = false
+    if op == 6 { b = x == y } else if op == 7 { b = x != y } else if op == 8 { b = x < y } else if op == 9 { b = x > y } else if op == 10 { b = x <= y } else if op == 11 { b = x >= y } else if op == 12 { b = x != 0.0 and y != 0.0 } else { b = x != 0.0 or y != 0.0 }
+    if b { 1.0 } else { 0.0 }
+}
+
+fn rt_t_op_bool(op: i64) -> bool {
+    op >= 6 and op <= 13
+}
+
+// The one value of a tensor without axes, and its truth.
+fn rt_t_value(t: RtT) -> f64 {
+    t.data[0]
+}
+
+fn rt_t_truth(t: RtT) -> bool {
+    t.data[0] != 0.0
+}
+
+// the selectors of an index, one by one
+fn rt_t_sel(sels: List[(i64, i64, i64, i64)], ax: i64, kind: i64, lo: i64, hi: i64) -> List[(i64, i64, i64, i64)] {
+    var out = sels
+    out.push((ax, kind, lo, hi))
+    out
+}
+
+fn rt_t_shape_add(xs: List[i64], x: i64) -> List[i64] {
+    var out = xs
+    out.push(x)
+    out
+}
+
+// The operand with the most axes gives the frame (the first of them on a tie).
+fn rt_t_map2(op: i64, a: RtT, b: RtT) -> RtT {
+    let wide = if len(b.axes) > len(a.axes) { b } else { a }
+    let oa = rt_t_offsets(a, wide.axes, wide.shape)
+    let ob = rt_t_offsets(b, wide.axes, wide.shape)
+    var d: List[f64] = []
+    for i in 0..len(oa) { d.push(rt_t_op(op, a.data[oa[i]], b.data[ob[i]])) }
+    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: rt_t_op_bool(op) }
+}
+
+// f(x): 0 -x, 1 not, 2 abs, 3 sqrt, 4 exp, 5 ln, 6 floor, 7 ceil, 8 round, 9 tanh, 10 sigmoid,
+// 11 relu, 12 softplus, 13 is_nan
+fn rt_t_fn(f: i64, x: f64) -> f64 {
+    if f == 0 { return -x }
+    if f == 1 { return if x == 0.0 { 1.0 } else { 0.0 } }
+    if f == 2 { return abs(x) }
+    if f == 3 { return sqrt(x) }
+    if f == 4 { return exp(x) }
+    if f == 5 { return ln(x) }
+    if f == 6 { return floor(x) }
+    if f == 7 { return ceil(x) }
+    if f == 8 { return round(x) }
+    if f == 9 { return tanh(x) }
+    if f == 10 { return sigmoid(x) }
+    if f == 11 { return relu(x) }
+    if f == 12 { return softplus(x) }
+    if is_nan(x) { 1.0 } else { 0.0 }
+}
+
+fn rt_t_map1(f: i64, t: RtT) -> RtT {
+    var d: List[f64] = []
+    for x in t.data { d.push(rt_t_fn(f, x)) }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: f == 1 or f == 13 }
+}
+
+fn rt_t_fill_nan(t: RtT, v: f64) -> RtT {
+    var d: List[f64] = []
+    for x in t.data { d.push(if is_nan(x) { v } else { x }) }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: t.boolean }
+}
+
+// where(c, a, b): a where c, b elsewhere
+fn rt_t_where(c: RtT, a: RtT, b: RtT) -> RtT {
+    var wide = c
+    if len(a.axes) > len(wide.axes) { wide = a }
+    if len(b.axes) > len(wide.axes) { wide = b }
+    let oc = rt_t_offsets(c, wide.axes, wide.shape)
+    let oa = rt_t_offsets(a, wide.axes, wide.shape)
+    let ob = rt_t_offsets(b, wide.axes, wide.shape)
+    var d: List[f64] = []
+    for i in 0..len(oc) { d.push(if c.data[oc[i]] != 0.0 { a.data[oa[i]] } else { b.data[ob[i]] }) }
+    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: a.boolean }
+}
+
+// ------------------------------------------------------------------ reductions
+
+// The fold of n values of t from `start`, `step` apart: 0 sum, 1 mean, 2 prod, 3 max, 4 min,
+// 5 nan_sum, 6 nan_mean, 7 nan_prod, 8 nan_count, 9 count. (Rust's sum starts at -0.0.)
+fn rt_t_fold(kind: i64, t: RtT, start: i64, n: i64, step: i64) -> f64 {
+    if kind == 0 or kind == 5 {
+        var s = -0.0
+        for k in 0..n {
+            let x = t.data[start + k * step]
+            if kind == 0 or not is_nan(x) { s = s + x }
+        }
+        return s
+    }
+    if kind == 2 or kind == 7 {
+        var p = 1.0
+        for k in 0..n {
+            let x = t.data[start + k * step]
+            if kind == 2 or not is_nan(x) { p = p * x }
+        }
+        return p
+    }
+    if kind == 1 or kind == 6 {
+        var s = 0.0
+        var c = 0
+        for k in 0..n {
+            let x = t.data[start + k * step]
+            if kind == 1 or not is_nan(x) {
+                s = s + x
+                c += 1
+            }
+        }
+        return if c == 0 { nan } else { s / float(c) }
+    }
+    if kind == 3 or kind == 4 {
+        var m = if kind == 3 { -inf } else { inf }
+        for k in 0..n {
+            let x = t.data[start + k * step]
+            if is_nan(m) or is_nan(x) {
+                m = nan
+            } else if kind == 3 {
+                if x > m { m = x }
+            } else {
+                if x < m { m = x }
+            }
+        }
+        return m
+    }
+    var c = 0
+    for k in 0..n {
+        let x = t.data[start + k * step]
+        if kind == 8 and not is_nan(x) { c += 1 }
+        if kind == 9 and x != 0.0 { c += 1 }
+    }
+    float(c)
+}
+
+// over axis ax (-1: all of them, to one value), the values in index order
+fn rt_t_reduce(t: RtT, ax: i64, kind: i64) -> RtT {
+    if ax < 0 { return rt_t_scalar(rt_t_fold(kind, t, 0, len(t.data), 1), false) }
+    let p = rt_t_pos(t, ax)
+    var outer = 1
+    for k in 0..p { outer = outer * t.shape[k] }
+    let n = t.shape[p]
+    var inner = 1
+    for k in p + 1..len(t.shape) { inner = inner * t.shape[k] }
+    var d: List[f64] = []
+    for o in 0..outer {
+        for i in 0..inner { d.push(rt_t_fold(kind, t, o * n * inner + i, n, inner)) }
+    }
+    var axes: List[i64] = []
+    var shape: List[i64] = []
+    for k in 0..len(t.axes) {
+        if k != p {
+            axes.push(t.axes[k])
+            shape.push(t.shape[k])
+        }
+    }
+    RtT { axes: axes, shape: shape, data: d, boolean: false }
+}
+
+// ------------------------------------------------------------------ selections
+//
+// A selector: (axis, 0, i, 0) one index (the axis goes), or (axis, 1, lo, hi) the range [lo, hi).
+
+fn rt_t_region(t: RtT, sels: List[(i64, i64, i64, i64)]) -> (List[i64], List[i64], List[bool]) {
+    var start: List[i64] = []
+    var ln: List[i64] = []
+    var keep: List[bool] = []
+    for k in 0..len(t.axes) {
+        start.push(0)
+        ln.push(t.shape[k])
+        keep.push(true)
+    }
+    for s in sels {
+        let p = rt_t_pos(t, s.0)
+        start[p] = s.2
+        if s.1 == 0 {
+            ln[p] = 1
+            keep[p] = false
+        } else {
+            ln[p] = s.3 - s.2
+        }
+    }
+    (start, ln, keep)
+}
+
+fn rt_t_select(t: RtT, sels: List[(i64, i64, i64, i64)]) -> RtT {
+    let r = rt_t_region(t, sels)
+    let st = rt_t_strides(t.shape)
+    var base = 0
+    for k in 0..len(st) { base += r.0[k] * st[k] }
+    // the region in row-major order: t's strides over the region's lengths
+    let offs = rt_t_offsets_by(st, r.1)
+    var d: List[f64] = []
+    for o in offs { d.push(t.data[base + o]) }
+    var axes: List[i64] = []
+    var shape: List[i64] = []
+    for k in 0..len(t.axes) {
+        if r.2[k] {
+            axes.push(t.axes[k])
+            shape.push(r.1[k])
+        }
+    }
+    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean }
+}
+
+// The offsets, with strides `ms`, of the elements of `shape` in row-major order.
+fn rt_t_offsets_by(ms: List[i64], shape: List[i64]) -> List[i64] {
+    let nd = len(shape)
+    var idx: List[i64] = []
+    for k in 0..nd { idx.push(0) }
+    var out: List[i64] = []
+    var off = 0
+    for i in 0..rt_t_count(shape) {
+        out.push(off)
+        var k = nd
+        while k > 0 {
+            k -= 1
+            idx[k] += 1
+            off += ms[k]
+            if idx[k] < shape[k] { break }
+            off -= ms[k] * idx[k]
+            idx[k] = 0
+        }
+    }
+    out
+}
+
+// x[sels] = v: v a tensor over the axes that remain (in any order), or one value repeated (the
+// tensor comes in and out: it changes in place when no one else has its values)
+fn rt_t_assign(inout t: RtT, sels: List[(i64, i64, i64, i64)], v: RtT) {
+    let r = rt_t_region(t, sels)
+    let st = rt_t_strides(t.shape)
+    var base = 0
+    for k in 0..len(st) { base += r.0[k] * st[k] }
+    let vst = rt_t_strides(v.shape)
+    var vs: List[i64] = []
+    for k in 0..len(t.axes) {
+        let p = rt_t_pos(v, t.axes[k])
+        vs.push(if r.2[k] and p >= 0 { vst[p] } else { 0 })
+    }
+    let dst = rt_t_offsets_by(st, r.1)
+    let src = rt_t_offsets_by(vs, r.1)
+    for i in 0..len(dst) { t.data[base + dst[i]] = v.data[src[i]] }
+}
+
+// ------------------------------------------------------------------ along an axis
+
+// The total order of floats (as Rust's total_cmp): a key that compares as an integer.
+fn rt_t_key(x: f64) -> i64 {
+    let b = to_bits(x)
+    if b < 0 { bit_xor(b, 9223372036854775807) } else { b }
+}
+
+// The offsets of the valid (non-NaN) values of a fiber, sorted by value, stably.
+fn rt_t_sorted_valid(t: RtT, offs: List[i64]) -> List[i64] {
+    var xs: List[i64] = []
+    for o in offs {
+        if not is_nan(t.data[o]) { xs.push(o) }
+    }
+    // merge sort, bottom up (equal values keep their order)
+    var src = xs
+    var width = 1
+    let n = len(xs)
+    while width < n {
+        var dst: List[i64] = []
+        var lo = 0
+        while lo < n {
+            let mid = min(lo + width, n)
+            let hi = min(lo + 2 * width, n)
+            var i = lo
+            var j = mid
+            while i < mid or j < hi {
+                if j >= hi or (i < mid and rt_t_key(t.data[src[j]]) >= rt_t_key(t.data[src[i]])) {
+                    dst.push(src[i])
+                    i += 1
+                } else {
+                    dst.push(src[j])
+                    j += 1
+                }
+            }
+            lo = hi
+        }
+        src = dst
+        width = 2 * width
+    }
+    src
+}
+
+// The offsets of each fiber along position p, in order.
+fn rt_t_fibers(t: RtT, p: i64) -> List[List[i64]] {
+    var outer = 1
+    for k in 0..p { outer = outer * t.shape[k] }
+    let n = t.shape[p]
+    var inner = 1
+    for k in p + 1..len(t.shape) { inner = inner * t.shape[k] }
+    var out: List[List[i64]] = []
+    for o in 0..outer {
+        for i in 0..inner {
+            var f: List[i64] = []
+            for k in 0..n { f.push(o * n * inner + k * inner + i) }
+            out.push(f)
+        }
+    }
+    out
+}
+
+// top_k(t, k, over: ax) and bottom_k: the k largest (smallest) valid values of each fiber
+fn rt_t_top_k(t: RtT, ax: i64, k0: i64, top: bool) -> RtT {
+    var d: List[f64] = []
+    for x in t.data { d.push(0.0) }
+    for f in rt_t_fibers(t, rt_t_pos(t, ax)) {
+        let s = rt_t_sorted_valid(t, f)
+        let k = min(max(k0, 0), len(s))
+        let from = if top { len(s) - k } else { 0 }
+        for i in from..from + k { d[s[i]] = 1.0 }
+    }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: true }
+}
+
+// rank(t, over: ax): the percentile rank in [0, 1] of each valid value (NaN stays NaN)
+fn rt_t_rank(t: RtT, ax: i64) -> RtT {
+    var d: List[f64] = []
+    for x in t.data { d.push(nan) }
+    for f in rt_t_fibers(t, rt_t_pos(t, ax)) {
+        let s = rt_t_sorted_valid(t, f)
+        let m = len(s)
+        for r in 0..m { d[s[r]] = if m == 1 { 0.5 } else { float(r) / float(m - 1) } }
+    }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: false }
+}
+
+// ------------------------------------------------------------------ text
+
+// As the interpreter writes a tensor: its axes and sizes, and its values when it has one axis
+// and at most 20 of them. `names`: the name of each axis, by id.
+fn rt_t_show(t: RtT, names: List[str]) -> str {
+    var dims: List[str] = []
+    for k in 0..len(t.axes) { dims.push(names[t.axes[k]] + ": " + str(t.shape[k])) }
+    let head = "Tensor[" + join(dims, ", ") + "; " + (if t.boolean { "bool" } else { "f64" }) + "]"
+    if len(t.axes) != 1 or len(t.data) > 20 { return head }
+    var vals: List[str] = []
+    for x in t.data { vals.push(if t.boolean { if x != 0.0 { "true" } else { "false" } } else { str(x) }) }
+    head + " [" + join(vals, ", ") + "]"
+}

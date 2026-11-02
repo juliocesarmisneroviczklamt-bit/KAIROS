@@ -16,6 +16,7 @@ import "rt_ryu.krs"
 import "rt_math.krs"
 import "rt_unicode.krs"
 import "rt_decimal.krs"
+import "rt_tensor.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0

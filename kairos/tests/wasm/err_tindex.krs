@@ -1,0 +1,5 @@
+axis cell
+let t = tensor([1.0, 2.0, 3.0], cell)
+print(t[cell: 2])           // out: 3.0
+let i = 5 - 2
+print(t[cell: i])           // error: R0001

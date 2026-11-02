@@ -1,0 +1,5 @@
+axis cell
+let t = tensor([1.0, 2.0, 3.0], cell)
+print(t[cell: 1 ..= 2])     // out: Tensor[cell: 2; f64] [2.0, 3.0]
+let a = 2
+print(t[cell: a .. 1])      // error: R0001

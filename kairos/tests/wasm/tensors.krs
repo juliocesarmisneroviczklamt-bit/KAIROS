@@ -1,0 +1,41 @@
+// Tensors in WebAssembly: named axes, values repeated along the axes an operand lacks,
+// reductions in index order, indexes and ranges, assignment in place, top_k and rank: the
+// interpreter's results, bit for bit (the runtime is written in Kairós: rt_tensor.krs).
+axis dia
+axis papel
+
+let n = 4
+let price = (zeros(dia: n, papel: 3) + tensor([10.0, 20.0, 40.0], papel)) * (1.0 + tensor([0.0, 0.01, -0.02, 0.03], dia))
+print(price)
+print(price[dia: 1], price[papel: 2], price[dia: 1, papel: 2])
+let ret = price[dia: 1 .. n] / price[dia: 0 .. n - 1] - 1.0
+print(ret[papel: 0], sum(ret), sum(ret, over: dia), mean(ret, over: papel))
+print(prod(1.0 + ret, over: dia), max(ret, over: papel), min(ret, over: dia), count(ret > 0.0, over: dia))
+var w = full_like(price, 0.0)
+w[dia: 2] = tensor([0.5, 0.25, 0.25], papel)
+w[dia: 3, papel: 0] = 1.0
+w[dia: 0 ..= 1] += 0.1
+print(w[papel: 0], w[papel: 1], sum(w, over: papel))
+let gappy = tensor([3.0, nan, 1.0, 5.0, nan, 2.0], papel)
+print(is_nan(gappy), fill_nan(gappy, 0.0), nan_sum(gappy), nan_mean(gappy), nan_count(gappy), nan_prod(gappy))
+print(top_k(gappy, 2, over: papel), bottom_k(gappy, 2, over: papel), rank(gappy, over: papel))
+let up = price > 15.0
+print(up[dia: 0], up[dia: 0] and not (price[dia: 0] > 30.0), where(up, price, 0.0)[dia: 1])
+print(abs(-ret)[papel: 1], round(price * 3.3)[dia: 2], sqrt(price)[dia: 0], max(price, 25.0)[dia: 1])
+print(size(price, dia), size(price, papel), ones(dia: 2), full(true, papel: 2))
+var acc = zeros(papel: 3)
+for d in 0..n { acc += price[dia: d] }
+print(acc, sum(acc) == sum(price))
+
+// the output, line by line:
+// out: Tensor[dia: 4, papel: 3; f64]
+// out: Tensor[papel: 3; f64] [10.1, 20.2, 40.4] Tensor[dia: 4; f64] [40.0, 40.4, 39.2, 41.2] 40.4
+// out: Tensor[dia: 3; f64] [0.010000000000000009, -0.02970297029702962, 0.05102040816326525] 0.09395231359870693 Tensor[papel: 3; f64] [0.03131743786623564, 0.03131743786623564, 0.03131743786623564] Tensor[dia: 3; f64] [0.010000000000000009, -0.02970297029702962, 0.05102040816326525]
+// out: Tensor[papel: 3; f64] [1.03, 1.03, 1.03] Tensor[dia: 3; f64] [0.010000000000000009, -0.02970297029702962, 0.05102040816326525] Tensor[papel: 3; f64] [-0.02970297029702962, -0.02970297029702962, -0.02970297029702962] Tensor[papel: 3; f64] [2.0, 2.0, 2.0]
+// out: Tensor[dia: 4; f64] [0.1, 0.1, 0.5, 1.0] Tensor[dia: 4; f64] [0.1, 0.1, 0.25, 0.0] Tensor[dia: 4; f64] [0.30000000000000004, 0.30000000000000004, 1.0, 1.0]
+// out: Tensor[papel: 6; bool] [false, true, false, false, true, false] Tensor[papel: 6; f64] [3.0, 0.0, 1.0, 5.0, 0.0, 2.0] 11.0 2.75 4.0 30.0
+// out: Tensor[papel: 6; bool] [true, false, false, true, false, false] Tensor[papel: 6; bool] [false, false, true, false, false, true] Tensor[papel: 6; f64] [0.6666666666666666, NaN, 0.0, 1.0, NaN, 0.3333333333333333]
+// out: Tensor[papel: 3; bool] [false, true, true] Tensor[papel: 3; bool] [false, true, false] Tensor[papel: 3; f64] [0.0, 20.2, 40.4]
+// out: Tensor[dia: 3; f64] [0.010000000000000009, 0.02970297029702962, 0.05102040816326525] Tensor[papel: 3; f64] [32.0, 65.0, 129.0] Tensor[papel: 3; f64] [3.1622776601683795, 4.47213595499958, 6.324555320336759] Tensor[papel: 3; f64] [25.0, 25.0, 40.4]
+// out: 4 3 Tensor[dia: 2; f64] [1.0, 1.0] Tensor[papel: 2; bool] [true, true]
+// out: Tensor[papel: 3; f64] [40.2, 80.4, 160.8] true
