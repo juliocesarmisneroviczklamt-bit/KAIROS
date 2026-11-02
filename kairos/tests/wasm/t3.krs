@@ -1,0 +1,47 @@
+// t3 (M18) in WebAssembly: the edges of `ternary`, contractions with batch axes on either side, t3
+// alone in lists, tuples, structs and functions, stores, `where` and sorting
+axis feature
+axis hidden
+
+// NaN gives 0; every zero, or no value at all, gives zeros; infinity takes the scale with it
+print(ternary(tensor([nan, 1.0, -3.0], asset)))                  // out: Tensor[asset: 3; t3] [0, 1, -1]
+print(ternary(tensor([0.0, -0.0, 0.0], asset)))                  // out: Tensor[asset: 3; t3] [0, 0, 0]
+print(ternary(tensor([nan, nan], asset)))                        // out: Tensor[asset: 2; t3] [0, 0]
+print(ternary(tensor([inf, 1.0, -2.0], asset)))                  // out: Tensor[asset: 3; t3] [0, 0, 0]
+print(ternary(tensor([inf, -inf, nan, 0.5], asset), threshold: 0.4))   // out: Tensor[asset: 4; t3] [1, -1, 0, 1]
+print(ternary(tensor([1.0, -1.0, 4.0, -4.0], asset)))            // out: Tensor[asset: 4; t3] [0, 0, 1, -1]
+// the half goes away from zero: x / scale = 0.5 gives 1 (the scale is 2 here)
+print(ternary(tensor([1.0, 3.0, -1.0, -3.0], asset)))            // out: Tensor[asset: 4; t3] [1, 1, -1, -1]
+
+// a ternary layer: x[sample, feature] by w[feature, hidden]
+let x = randn(seed: 7, feature: 4, hidden: 3)
+let w = ternary(randn(seed: 11, feature: 4, hidden: 3), threshold: 0.5)
+print(w[hidden: 0], w[hidden: 2])   // out: Tensor[feature: 4; t3] [1, 1, 1, 1] Tensor[feature: 4; t3] [-1, 1, 0, 1]
+let inputs = randn(seed: 3, asset: 2, feature: 4)
+let y1 = contract(inputs, w, over: feature)
+let y2 = contract(w, inputs, over: feature)
+let y3 = contract(inputs, float(w), over: feature)
+print(y1 == y3, sum(y1 - y2), size(y1, hidden))   // out: Tensor[asset: 2, hidden: 3; bool] 0.0 3
+print(count(y1 == y3))   // out: 6.0
+// t3 against t3: x by its own trits (batch axis hidden)
+print(contract(x, ternary(x), over: feature))   // out: Tensor[hidden: 3; f64] [2.973923500245103, 2.273908038407534, 2.4669533357064104]
+
+// t3 alone
+fn flip(t: t3) -> t3 { -t }
+let ts: List[t3] = to_list(w[hidden: 0])
+print(ts, flip(ts[2]), [flip(ts[3]), ts[0]])   // out: [1, 1, 1, 1] -1 [-1, 1]
+var sorted_ = to_list(w[hidden: 2])
+sorted_.sort()
+print(sorted_)   // out: [-1, 0, 1, 1]
+struct Pos { name: str, side: t3 }
+let p = Pos { name: "PETR4", side: ts[2] }
+print(p, p == Pos { name: "PETR4", side: -flip(ts[2]) }, (ts[2], 1.5))   // out: Pos { name: "PETR4", side: 1 } true (1, 1.5)
+
+// stores: a slice of t3, or one t3 everywhere in it
+var book = ternary(zeros(month: 2, asset: 3))
+book[month: 0] = ternary(tensor([0.3, -0.2, 0.0], asset), threshold: 0.1)
+book[month: 1, asset: 2] = ts[2]
+book[month: 1, asset: 0] = flip(ts[2])
+print(book[month: 0], book[month: 1])   // out: Tensor[asset: 3; t3] [1, -1, 0] Tensor[asset: 3; t3] [-1, 0, 1]
+print(sum(book, over: asset), mean(book))   // out: Tensor[month: 2; f64] [0.0, 0.0] 0.0
+print(where(book[month: 0] == ts[2], ts[2], book[month: 1]))   // out: Tensor[asset: 3; t3] [1, 0, 1]

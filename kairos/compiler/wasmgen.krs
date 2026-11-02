@@ -1527,7 +1527,7 @@ fn builtin_w(inout g: WGen, e: H) {
             return drop_tmp(inout g, tx, x.t)
         }
         gen(inout g, x)
-        if x.t == Ty.TInt { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
+        if x.t == Ty.TInt or x.t == Ty.TT3 { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
         if x.t == Ty.TBool {
             let t = intern_obj(inout g, "true")
             let f = intern_obj(inout g, "false")
@@ -2385,7 +2385,15 @@ fn is_fl(g: WGen, t0: Ty) -> bool {
     let t = fin_ty(g.ck, t0)
     match t {
         TFloat => true,
-        TTensor(ax, x) => fin_ty(g.ck, x) == Ty.TFloat,
+        TTensor(ax, x) => fin_ty(g.ck, x) == Ty.TFloat or fin_ty(g.ck, x) == Ty.TT3,
+        _ => false,
+    }
+}
+
+// a tensor of t3 (M18)
+fn is_t3_t(g: WGen, t0: Ty) -> bool {
+    match fin_ty(g.ck, t0) {
+        TTensor(ax, x) => fin_ty(g.ck, x) == Ty.TT3,
         _ => false,
     }
 }
@@ -2867,6 +2875,10 @@ fn tr_builtin(inout g: WGen, e: H) -> H {
         return hblock(stmts, hrt(g, tr_rec(g, "where", e.t), [cond, ls[0], ls[1], plain], Ty.TInt, e), Ty.TInt, e)
     }
     if b == "where" and is_fl(g, e.t) {
+        if xs[1].t == Ty.TT3 or xs[2].t == Ty.TT3 {
+            wg_fail(inout g, e, "a t3 alone as a branch of `where` inside `grad`")
+            return e
+        }
         let c = if is_fl(g, xs[1].t) { ls[1] } else { tr_const(g, vals[1], xs[1].t) }
         let d = if is_fl(g, xs[2].t) { ls[2] } else { tr_const(g, vals[2], xs[2].t) }
         return hblock(stmts, hrt(g, tr_rec(g, "where", e.t), [vals[0], c, d, plain], Ty.TInt, e), Ty.TInt, e)
@@ -2881,7 +2893,12 @@ fn tr_builtin(inout g: WGen, e: H) -> H {
         for i in 1..len(vals) { tk.push(vals[i]) }
         return hblock(stmts, hrt(g, "rt_d_stack_t", [ls[0], hbi(b, tk, e.t, e)], Ty.TInt, e), Ty.TInt, e)
     }
-    if b == "to_list" and is_fl(g, xs[0].t) { return hblock(stmts, hrt(g, "rt_d_elems", [ls[0]], Ty.TList(Ty.TInt), e), Ty.TList(Ty.TInt), e) }
+    // M18: the straight-through estimator: the trits of a tracked tensor, as f64, whose gradient
+    // is the one that reaches them; float of a t3 tensor passes its gradient the same way
+    if (b == "ternary" or b == "float") and is_fl(g, xs[0].t) and (b == "ternary" or is_t3_t(g, xs[0].t)) {
+        return hblock(stmts, hrt(g, "rt_d_ste_t", [ls[0], plain], Ty.TInt, e), Ty.TInt, e)
+    }
+    if b == "to_list" and is_fl(g, xs[0].t) and not is_t3_t(g, xs[0].t) { return hblock(stmts, hrt(g, "rt_d_elems", [ls[0]], Ty.TList(Ty.TInt), e), Ty.TList(Ty.TInt), e) }
     if b == "float" and is_fl(g, xs[0].t) { return hblock(stmts, ls[0], Ty.TInt, e) }
     if b == "observed" { return hblock(stmts, ls[0], tr_ty(g, e.t), e) }
     if (b == "sum" or b == "mean" or b == "prod") and is_list(fin_ty(g.ck, xs[0].t)) and is_fl(g, elem_ty(g, fin_ty(g.ck, xs[0].t))) {
@@ -4547,7 +4564,7 @@ fn parse_int_w(inout g: WGen, e: H) {
 
 // The kind rt_sort compares by (-1: not a kind it sorts).
 fn sort_kind(t: Ty) -> i64 {
-    if t == Ty.TInt { return 0 }
+    if t == Ty.TInt or t == Ty.TT3 { return 0 }
     if t == Ty.TFloat { return 1 }
     if t == Ty.TBool { return 2 }
     if t == Ty.TStr { return 3 }
@@ -4887,14 +4904,19 @@ fn tensor_op_code(o: str) -> i64 {
 fn tensor_operand(inout g: WGen, e: H, safe: bool) -> i64 {
     if is_tensor_t(e.t) { return gen_borrow(inout g, e, safe) }
     gen(inout g, e)
-    if e.t == Ty.TBool {
-        op(inout g, 184)
-        i32c(inout g, 1)
+    if e.t == Ty.TT3 {
+        op(inout g, 185)
+        call_f(inout g, rt_fn(inout g, "rt_t_trit"))
     } else {
-        if vt(e.t) == wt_i64() { op(inout g, 185) }
-        i32c(inout g, 0)
+        if e.t == Ty.TBool {
+            op(inout g, 184)
+            i32c(inout g, 1)
+        } else {
+            if vt(e.t) == wt_i64() { op(inout g, 185) }
+            i32c(inout g, 0)
+        }
+        call_f(inout g, rt_fn(inout g, "rt_t_scalar"))
     }
-    call_f(inout g, rt_fn(inout g, "rt_t_scalar"))
     let t = new_local(inout g, wt_i32())
     op_u(inout g, 34, t)
     t
@@ -4962,6 +4984,8 @@ fn tensor_to_scalar(inout g: WGen, t: Ty) {
     lset(inout g, r)
     lget(inout g, r)
     call_f(inout g, rt_fn(inout g, if t == Ty.TBool { "rt_t_truth" } else { "rt_t_value" }))
+    // a t3: -1.0, 0.0 or 1.0 as the i64 it is
+    if t == Ty.TT3 { op(inout g, 176) }
     lget(inout g, r)
     drop_v(inout g, rtt(g))
 }
@@ -5201,6 +5225,25 @@ fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
         drop_tmp(inout g, tx, rtt(g))
         return true
     }
+    if b == "ternary" {
+        let tx = gen_borrow(inout g, x, len(args) < 2 or not changes(args[1]))
+        if len(args) > 1 {
+            i32c(inout g, 1)
+            gen(inout g, args[1].kids[0])
+        } else {
+            i32c(inout g, 0)
+            f64c(inout g, 0.0)
+        }
+        call_f(inout g, rt_fn(inout g, "rt_t_ternary"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
+    if b == "float" {
+        let tx = gen_borrow(inout g, x, true)
+        call_f(inout g, rt_fn(inout g, "rt_t_t3_to_f"))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
     if b == "contract" {
         let y = args[1].kids[0]
         let tx = gen_borrow(inout g, x, not changes(args[1]))
@@ -5237,7 +5280,8 @@ fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
     }
     if b == "to_list" {
         let tx = gen_borrow(inout g, x, true)
-        call_f(inout g, rt_fn(inout g, if elem_ty(g, e.t) == Ty.TBool { "rt_t_to_bools" } else { "rt_t_to_list" }))
+        let et = elem_ty(g, e.t)
+        call_f(inout g, rt_fn(inout g, if et == Ty.TBool { "rt_t_to_bools" } else if et == Ty.TT3 { "rt_t_to_trits" } else { "rt_t_to_list" }))
         drop_tmp(inout g, tx, rtt(g))
         return true
     }
@@ -5547,7 +5591,7 @@ fn loop_end(inout g: WGen, lp: (i64, i64, i64)) {
 
 // The two values of type t on the stack: are they equal? (an i32)
 fn eq_values(inout g: WGen, t: Ty) {
-    if t == Ty.TInt { return op(inout g, 81) }
+    if t == Ty.TInt or t == Ty.TT3 { return op(inout g, 81) }
     if t == Ty.TFloat { return op(inout g, 97) }
     if t == Ty.TBool { return op(inout g, 70) }
     if t == Ty.TStr { return call_f(inout g, rt_fn(inout g, "rt_str_eq")) }
@@ -5810,7 +5854,7 @@ fn show_inner(inout g: WGen, o: i64, off: i64, t: Ty) {
     }
     lget(inout g, o)
     load_at(inout g, w, off)
-    if t == Ty.TInt { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
+    if t == Ty.TInt or t == Ty.TT3 { return call_f(inout g, rt_fn(inout g, "rt_str_i64")) }
     if t == Ty.TFloat { return call_f(inout g, rt_fn(inout g, "rt_fmt_f64")) }
     if t == Ty.TStr { return call_f(inout g, rt_fn(inout g, "rt_str_debug")) }
     if t == Ty.TBool {
@@ -5862,7 +5906,7 @@ fn glue_eq(inout g: WGen, t: Ty) {
         load_at(inout g, w, 8 + 8 * i)
         lget(inout g, 1)
         load_at(inout g, w, 8 + 8 * i)
-        if ft == Ty.TInt {
+        if ft == Ty.TInt or ft == Ty.TT3 {
             op(inout g, 81)
         } else if ft == Ty.TFloat {
             op(inout g, 97)

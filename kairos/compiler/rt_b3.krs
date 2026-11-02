@@ -640,7 +640,7 @@ fn rt_b3_daily_s(inout s: B3State, field: i64) -> (str, str, RtT) {
             v[(m * w + day.di - d.cal.mfrom[m]) * nt + t] = x
         }
     }
-    ("", "", RtT { axes: [0, 3, 2], shape: [n, w, nt], data: v, boolean: false })
+    ("", "", RtT { axes: [0, 3, 2], shape: [n, w, nt], data: v, boolean: false, trit: false })
 }
 
 fn rt_b3_daily(field: i64) -> (str, str, Tensor[month, session, asset; f64]) {
@@ -659,7 +659,7 @@ fn rt_b3_sessions_s(inout s: B3State) -> (str, str, RtT) {
     for m in 0..rt_b3_n(s) {
         for j in 0..w { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { 1.0 } else { 0.0 }) }
     }
-    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: true })
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: true, trit: false })
 }
 
 fn rt_b3_sessions() -> (str, str, Tensor[month, session; bool]) {
@@ -679,7 +679,7 @@ fn rt_b3_session_dates_s(inout s: B3State) -> (str, str, RtT) {
     for m in 0..rt_b3_n(s) {
         for j in 0..w { v.push(if j < d.cal.mto[m] - d.cal.mfrom[m] { float(d.dates[d.cal.mfrom[m] + j]) } else { nan }) }
     }
-    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: false })
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), w], data: v, boolean: false, trit: false })
 }
 
 fn rt_b3_session_dates() -> (str, str, Tensor[month, session; f64]) {
@@ -767,7 +767,7 @@ fn rt_b3_nefin_daily_s(inout s: B3State, k: i64, vw: bool) -> (str, str, RtT) {
             v.push(x)
         }
     }
-    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), wd], data: v, boolean: false })
+    ("", "", RtT { axes: [0, 3], shape: [rt_b3_n(s), wd], data: v, boolean: false, trit: false })
 }
 
 fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]) {

@@ -36,7 +36,7 @@ fn rt_d_new() -> RtDTape {
 }
 
 fn rt_d_none() -> RtT {
-    RtT { axes: [], shape: [], data: [], boolean: false }
+    RtT { axes: [], shape: [], data: [], boolean: false, trit: false }
 }
 
 fn rt_d_node(val: RtT, op: i64, k: i64, a: i64, b: i64) -> RtDNode {
@@ -75,6 +75,14 @@ fn rt_d_bin(inout tp: RtDTape, op: i64, a: i64, b: i64, v: RtT) -> i64 {
 fn rt_d_map(inout tp: RtDTape, f: i64, a: i64, v: RtT) -> i64 {
     if not rt_d_tracked(tp, a) { return rt_d_const(inout tp, v) }
     rt_d_push(inout tp, rt_d_node(v, 3, f, a, -1))
+}
+
+// M18: ternary(x) (or float of t3s) by the straight-through estimator: the trits as f64, whose
+// gradient passes to x as it is (a constant when x is not tracked)
+fn rt_d_ste(inout tp: RtDTape, a: i64, v: RtT) -> i64 {
+    let f = rt_t_t3_to_f(v)
+    if not rt_d_tracked(tp, a) { return rt_d_const(inout tp, f) }
+    rt_d_push(inout tp, rt_d_node(f, 3, 101, a, -1))
 }
 
 fn rt_d_reduce(inout tp: RtDTape, kind: i64, a: i64, ax: i64, v: RtT) -> i64 {
@@ -167,7 +175,7 @@ fn rt_d_ew(code: i64, a: RtT, b: RtT) -> RtT {
     let ob = rt_t_offsets(b, f.axes, f.shape)
     var d: List[f64] = []
     for i in 0..len(oa) { d.push(rt_d_f2(code, a.data[oa[i]], b.data[ob[i]])) }
-    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false }
+    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false, trit: false }
 }
 
 // f(x, p, q), by code: 1 -x * p / (q * q) (division), 2 x * q * p^(q - 1) (power, the base),
@@ -192,7 +200,7 @@ fn rt_d_ew3(code: i64, a: RtT, b: RtT, c: RtT) -> RtT {
     let oc = rt_t_offsets(c, f.axes, f.shape)
     var d: List[f64] = []
     for i in 0..len(oa) { d.push(rt_d_f3(code, a.data[oa[i]], b.data[ob[i]], c.data[oc[i]])) }
-    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false }
+    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false, trit: false }
 }
 
 fn rt_d_zero_like(v: RtT) -> RtT {
@@ -267,7 +275,7 @@ fn rt_d_prod_grad(a: RtT, ax: i64, g: RtT) -> RtT {
             k -= 1
         }
     }
-    RtT { axes: a.axes, shape: a.shape, data: out, boolean: false }
+    RtT { axes: a.axes, shape: a.shape, data: out, boolean: false, trit: false }
 }
 
 // The sum over the axes `over` of x * y (tensor.rs contract_over): the other axes x and y share
@@ -299,7 +307,7 @@ fn rt_d_contract_over(x: RtT, y: RtT, over: List[i64]) -> RtT {
     var d: List[f64] = []
     if inner == 0 {
         for i in 0..n_out { d.push(0.0) }
-        return RtT { axes: axes, shape: shape, data: d, boolean: false }
+        return RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
     }
     let ox = rt_t_offsets(x, full_axes, full_shape)
     let oy = rt_t_offsets(y, full_axes, full_shape)
@@ -314,7 +322,7 @@ fn rt_d_contract_over(x: RtT, y: RtT, over: List[i64]) -> RtT {
             k = 0
         }
     }
-    RtT { axes: axes, shape: shape, data: d, boolean: false }
+    RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
 }
 
 // where's gradient for one side: g where the condition is `first`, 0 elsewhere
@@ -324,7 +332,7 @@ fn rt_d_pick(cond: RtT, g: RtT, first: bool) -> RtT {
     let og = rt_t_offsets(g, f.axes, f.shape)
     var d: List[f64] = []
     for i in 0..len(oc) { d.push(if (cond.data[oc[i]] != 0.0) == first { g.data[og[i]] } else { 0.0 }) }
-    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false }
+    RtT { axes: f.axes, shape: f.shape, data: d, boolean: false, trit: false }
 }
 
 // ------------------------------------------------------------------ backwards
@@ -403,6 +411,9 @@ fn rt_d_backward(tp: RtDTape, out: i64) -> RtDGrads {
                     c = rt_d_ew(2, g, av)
                 } else if f == 12 {
                     c = rt_d_ew(12, g, av)
+                } else if f == 101 {
+                    // the straight-through estimator (M18): the gradient passes as it is
+                    c = g
                 } else {
                     c = rt_d_ew(3, g, av)
                 }
@@ -546,6 +557,13 @@ fn rt_d_bin_t(op: i64, a: i64, b: i64, v: RtT) -> i64 {
 fn rt_d_map_f(f: i64, a: i64, v: f64) -> i64 {
     var tp = wasm_d_take()
     let i = rt_d_map(inout tp, f, a, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_ste_t(a: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_ste(inout tp, a, v)
     wasm_d_put(tp)
     i
 }

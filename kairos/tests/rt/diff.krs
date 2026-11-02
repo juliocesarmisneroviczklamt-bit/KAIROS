@@ -17,7 +17,7 @@ fn sc(x: f64) -> RtT {
 }
 
 fn v(t: Tensor[asset; f64]) -> RtT {
-    RtT { axes: [2], shape: [size(t, asset)], data: to_list(t), boolean: false }
+    RtT { axes: [2], shape: [size(t, asset)], data: to_list(t), boolean: false, trit: false }
 }
 
 fn check(what: str, got: RtT, want: List[f64]) -> i64 {
@@ -135,7 +135,7 @@ fn tape3(t0: Tensor[asset; f64]) -> RtT {
     u = rt_d_assign(inout tp, u, pr, [(2, 0, 1, 2)], v(uv))
     let cond = uv > 2.0
     let wv = where(cond, uv, t0)
-    let w = rt_d_where(inout tp, RtT { axes: [2], shape: [3], data: to_list(where(cond, 1.0, 0.0)), boolean: true }, u, t, v(wv))
+    let w = rt_d_where(inout tp, RtT { axes: [2], shape: [3], data: to_list(where(cond, 1.0, 0.0)), boolean: true, trit: false }, u, t, v(wv))
     let xs = to_list(wv)
     var parts: List[i64] = []
     for k in 0..3 { parts.push(rt_d_elem(inout tp, w, k, sc(xs[k]))) }

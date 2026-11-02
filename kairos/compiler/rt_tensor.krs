@@ -1,14 +1,15 @@
 // The tensors of programs compiled to WebAssembly (M14), written in Kairós: as the interpreter's
 // (src/tensor.rs), operation by operation, so the results are the same bits. A tensor has its
 // axes (their ids), their sizes and its values, row-major in the order of its axes; a tensor of
-// bool keeps 0.0 and 1.0. The back end checks indexes and sizes where it knows the axes, before
-// calling these functions.
+// bool keeps 0.0 and 1.0, one of t3 (M18) -1.0, 0.0 and 1.0 (never -0.0). The back end checks
+// indexes and sizes where it knows the axes, before calling these functions.
 
 struct RtT {
     axes: List[i64],
     shape: List[i64],
     data: List[f64],
     boolean: bool,
+    trit: bool,
 }
 
 fn rt_t_count(shape: List[i64]) -> i64 {
@@ -42,13 +43,13 @@ fn rt_t_strides(shape: List[i64]) -> List[i64] {
 }
 
 fn rt_t_scalar(v: f64, boolean: bool) -> RtT {
-    RtT { axes: [], shape: [], data: [v], boolean: boolean }
+    RtT { axes: [], shape: [], data: [v], boolean: boolean, trit: false }
 }
 
 fn rt_t_full(axes: List[i64], shape: List[i64], v: f64, boolean: bool) -> RtT {
     var d: List[f64] = []
     for i in 0..rt_t_count(shape) { d.push(v) }
-    RtT { axes: axes, shape: shape, data: d, boolean: boolean }
+    RtT { axes: axes, shape: shape, data: d, boolean: boolean, trit: false }
 }
 
 // zeros_like and full_like
@@ -58,13 +59,57 @@ fn rt_t_like(t: RtT, v: f64, boolean: bool) -> RtT {
 
 // tensor(xs, axis): a tensor of one axis with the values of a list
 fn rt_t_from_list(xs: List[f64], ax: i64) -> RtT {
-    RtT { axes: [ax], shape: [len(xs)], data: xs, boolean: false }
+    RtT { axes: [ax], shape: [len(xs)], data: xs, boolean: false, trit: false }
 }
 
 fn rt_t_from_bools(xs: List[bool], ax: i64) -> RtT {
     var d: List[f64] = []
     for x in xs { d.push(if x { 1.0 } else { 0.0 }) }
-    RtT { axes: [ax], shape: [len(xs)], data: d, boolean: true }
+    RtT { axes: [ax], shape: [len(xs)], data: d, boolean: true, trit: false }
+}
+
+// ------------------------------------------------------------------ t3 (M18)
+
+// a t3 alone (-1.0, 0.0 or 1.0), as a tensor without axes
+fn rt_t_trit(v: f64) -> RtT {
+    RtT { axes: [], shape: [], data: [v], boolean: false, trit: true }
+}
+
+// ternary(x): BitNet b1.58's quantization, round(x / g) limited to [-1, 1] with g the mean of |x|
+// over the values that are not NaN (NaN gives 0, and everything when g is 0 or NaN); with a
+// threshold th: +1 above th, -1 below -th, 0 otherwise
+fn rt_t_ternary(x: RtT, has_th: bool, th: f64) -> RtT {
+    var d: List[f64] = []
+    if has_th {
+        for v in x.data { d.push(if v > th { 1.0 } else if v < -th { -1.0 } else { 0.0 }) }
+    } else {
+        var s = 0.0
+        var c = 0
+        for v in x.data {
+            if not is_nan(v) {
+                s = s + abs(v)
+                c += 1
+            }
+        }
+        let g = if c == 0 { nan } else { s / float(c) }
+        for v in x.data {
+            let r = round(v / g)
+            d.push(if r >= 1.0 { 1.0 } else if r <= -1.0 { -1.0 } else { 0.0 })
+        }
+    }
+    RtT { axes: x.axes, shape: x.shape, data: d, boolean: false, trit: true }
+}
+
+// float(w) of a t3 tensor: the same values, as f64
+fn rt_t_t3_to_f(t: RtT) -> RtT {
+    RtT { axes: t.axes, shape: t.shape, data: t.data, boolean: false, trit: false }
+}
+
+// to_list of a t3 tensor: -1, 0, 1
+fn rt_t_to_trits(t: RtT) -> List[i64] {
+    var out: List[i64] = []
+    for x in t.data { out.push(int(x)) }
+    out
 }
 
 // to_list: the values, row-major (true and false for a tensor of bool)
@@ -160,7 +205,7 @@ fn rt_t_map2(op: i64, a: RtT, b: RtT) -> RtT {
     let ob = rt_t_offsets(b, wide.axes, wide.shape)
     var d: List[f64] = []
     for i in 0..len(oa) { d.push(rt_t_op(op, a.data[oa[i]], b.data[ob[i]])) }
-    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: rt_t_op_bool(op) }
+    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: rt_t_op_bool(op), trit: false }
 }
 
 // f(x): 0 -x, 1 not, 2 abs, 3 sqrt, 4 exp, 5 ln, 6 floor, 7 ceil, 8 round, 9 tanh, 10 sigmoid,
@@ -185,14 +230,19 @@ fn rt_t_fn(f: i64, x: f64) -> f64 {
 
 fn rt_t_map1(f: i64, t: RtT) -> RtT {
     var d: List[f64] = []
+    if t.trit {
+        // -w (the only map of a t3 tensor): no -0.0
+        for x in t.data { d.push(if x == 0.0 { 0.0 } else { -x }) }
+        return RtT { axes: t.axes, shape: t.shape, data: d, boolean: false, trit: true }
+    }
     for x in t.data { d.push(rt_t_fn(f, x)) }
-    RtT { axes: t.axes, shape: t.shape, data: d, boolean: f == 1 or f == 13 }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: f == 1 or f == 13, trit: false }
 }
 
 fn rt_t_fill_nan(t: RtT, v: f64) -> RtT {
     var d: List[f64] = []
     for x in t.data { d.push(if is_nan(x) { v } else { x }) }
-    RtT { axes: t.axes, shape: t.shape, data: d, boolean: t.boolean }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: t.boolean, trit: t.trit }
 }
 
 // where(c, a, b): a where c, b elsewhere
@@ -205,7 +255,7 @@ fn rt_t_where(c: RtT, a: RtT, b: RtT) -> RtT {
     let ob = rt_t_offsets(b, wide.axes, wide.shape)
     var d: List[f64] = []
     for i in 0..len(oc) { d.push(if c.data[oc[i]] != 0.0 { a.data[oa[i]] } else { b.data[ob[i]] }) }
-    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: a.boolean }
+    RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: a.boolean, trit: a.trit or b.trit }
 }
 
 // ------------------------------------------------------------------ reductions
@@ -285,7 +335,7 @@ fn rt_t_reduce(t: RtT, ax: i64, kind: i64) -> RtT {
             shape.push(t.shape[k])
         }
     }
-    RtT { axes: axes, shape: shape, data: d, boolean: false }
+    RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
 }
 
 // ------------------------------------------------------------------ selections
@@ -331,7 +381,7 @@ fn rt_t_select(t: RtT, sels: List[(i64, i64, i64, i64)]) -> RtT {
             shape.push(r.1[k])
         }
     }
-    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean }
+    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean, trit: t.trit }
 }
 
 // The offsets, with strides `ms`, of the elements of `shape` in row-major order.
@@ -445,7 +495,7 @@ fn rt_t_top_k(t: RtT, ax: i64, k0: i64, top: bool) -> RtT {
         let from = if top { len(s) - k } else { 0 }
         for i in from..from + k { d[s[i]] = 1.0 }
     }
-    RtT { axes: t.axes, shape: t.shape, data: d, boolean: true }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: true, trit: false }
 }
 
 // rank(t, over: ax): the percentile rank in [0, 1] of each valid value (NaN stays NaN)
@@ -457,7 +507,7 @@ fn rt_t_rank(t: RtT, ax: i64) -> RtT {
         let m = len(s)
         for r in 0..m { d[s[r]] = if m == 1 { 0.5 } else { float(r) / float(m - 1) } }
     }
-    RtT { axes: t.axes, shape: t.shape, data: d, boolean: false }
+    RtT { axes: t.axes, shape: t.shape, data: d, boolean: false, trit: false }
 }
 
 // ------------------------------------------------------------------ text
@@ -467,10 +517,10 @@ fn rt_t_rank(t: RtT, ax: i64) -> RtT {
 fn rt_t_show(t: RtT, names: List[str]) -> str {
     var dims: List[str] = []
     for k in 0..len(t.axes) { dims.push(names[t.axes[k]] + ": " + str(t.shape[k])) }
-    let head = "Tensor[" + join(dims, ", ") + "; " + (if t.boolean { "bool" } else { "f64" }) + "]"
+    let head = "Tensor[" + join(dims, ", ") + "; " + (if t.boolean { "bool" } else if t.trit { "t3" } else { "f64" }) + "]"
     if len(t.axes) != 1 or len(t.data) > 20 { return head }
     var vals: List[str] = []
-    for x in t.data { vals.push(if t.boolean { if x != 0.0 { "true" } else { "false" } } else { str(x) }) }
+    for x in t.data { vals.push(if t.boolean { if x != 0.0 { "true" } else { "false" } } else if t.trit { str(int(x)) } else { str(x) }) }
     head + " [" + join(vals, ", ") + "]"
 }
 
@@ -498,7 +548,7 @@ fn rt_t_nan_quantile(t: RtT, q: f64, ax: i64) -> RtT {
             shape.push(t.shape[k])
         }
     }
-    RtT { axes: axes, shape: shape, data: d, boolean: false }
+    RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
 }
 
 // merge_days(t): [.., month, .., session, ..] as [day, ..] (day = month * sessions + session), the
@@ -525,7 +575,7 @@ fn rt_t_merge_days(t: RtT) -> RtT {
     }
     var d: List[f64] = []
     for o in rt_t_offsets(t, oaxes, oshape) { d.push(t.data[o]) }
-    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean }
+    RtT { axes: axes, shape: shape, data: d, boolean: t.boolean, trit: t.trit }
 }
 
 // contract(x, y, over: ax): the sum over ax of x * y (from 0.0, in the order of ax); the other
@@ -553,12 +603,31 @@ fn rt_t_contract(x: RtT, y: RtT, ax: i64) -> RtT {
     let kx = rt_t_strides(x.shape)[px]
     let ky = rt_t_strides(y.shape)[py]
     var d: List[f64] = []
+    // M18: with a t3 side there is no product: the values where the trit is +1 are added, those
+    // where it is -1 subtracted, in the axis' order
+    if x.trit != y.trit {
+        let f = if x.trit { y } else { x }
+        let w = if x.trit { x } else { y }
+        let of = if x.trit { oy } else { ox }
+        let ow = if x.trit { ox } else { oy }
+        let kf = if x.trit { ky } else { kx }
+        let kw = if x.trit { kx } else { ky }
+        for i in 0..len(ox) {
+            var acc = 0.0
+            for k in 0..n {
+                let t = w.data[ow[i] + k * kw]
+                if t > 0.0 { acc = acc + f.data[of[i] + k * kf] } else if t < 0.0 { acc = acc - f.data[of[i] + k * kf] }
+            }
+            d.push(acc)
+        }
+        return RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
+    }
     for i in 0..len(ox) {
         var acc = 0.0
         for k in 0..n { acc = acc + x.data[ox[i] + k * kx] * y.data[oy[i] + k * ky] }
         d.push(acc)
     }
-    RtT { axes: axes, shape: shape, data: d, boolean: false }
+    RtT { axes: axes, shape: shape, data: d, boolean: false, trit: false }
 }
 
 // randn(seed: s, a: n, ...): normal samples as the interpreter draws them (src/tensor.rs): a
@@ -601,7 +670,7 @@ fn rt_t_randn(seed: i64, axes: List[i64], shape: List[i64]) -> RtT {
         v.push(r * rt_sin(th))
     }
     if len(v) > n { let _ = v.pop() }
-    RtT { axes: axes, shape: shape, data: v, boolean: false }
+    RtT { axes: axes, shape: shape, data: v, boolean: false, trit: false }
 }
 
 // randn's limit: more than 2^28 values (or a product that does not fit)
