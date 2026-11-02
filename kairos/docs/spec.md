@@ -751,6 +751,6 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M8 | o laboratório escrito em Kairós: `import`, dados diários, `b3.simulate`, registro (§10) | ✅ os 5 estudos do `quant-b3` (`lab/*.krs`) imprimem o relatório do Rust linha por linha; universo NEFIN igual (41.106 pares); estatística bit a bit; o registro não muda |
 | M9 | arquivos, texto, mapas, internet; biblioteca padrão escrita em Kairós (§4.6–4.8) | ✅ o registro de tentativas e a coleta macro em Kairós dão os mesmos relatórios e arquivos do Rust |
 | M10 | a base de dados em Kairós: COTAHIST, eventos da B3, painel (§4.9) | ✅ `bars.bin` (220 MB), cache de eventos, `panel.bin` (80 MB) e diagnósticos iguais aos do Rust, byte a byte |
-| M11 | o simulador em Kairós (custos, impacto, IR) | os relatórios continuam idênticos com o simulador escrito em Kairós |
+| M11 | o simulador em Kairós (custos, impacto, IR) | ✅ `std/sim.krs` dá os mesmos bits do simulador Rust (mercado sintético no CI; os 5 relatórios do laboratório iguais) |
 | M12 | auto-hospedagem | o compilador da Kairós, escrito em Kairós, compila a si mesmo |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |

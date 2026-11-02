@@ -2,6 +2,27 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.11.0 — M11: o simulador escrito em Kairós
+
+**`b3.evaluate` e `b3.simulate` agora rodam o simulador realista do laboratório escrito em Kairós** ([`kairos/std/sim.krs`](kairos/std/sim.krs)), carregado junto com o prelúdio. O runtime ficou só com o que é garantia da linguagem: holdout aberto, cerca dos dados, pesos válidos e o registro da tentativa.
+
+- **O simulador:**
+  - custos de corretagem e emolumentos, metade do spread real (mediana de 21 pregões) e impacto k·σ·√(ordem/volume);
+  - atraso de execução e limite de capacidade;
+  - IR de pessoa física: isenção de R$ 20 mil, prejuízo compensado, custo médio e JCP retido;
+  - o CDI no caixa.
+- **A avaliação:**
+  - CAGR, volatilidade, Sharpe sobre o CDI e maxDD;
+  - alpha CAPM contra o mercado do NEFIN, com t de Newey-West.
+- **Mesmos bits:** as somas seguem a ordem do simulador Rust.
+  - um mercado sintético (dividendos e JCP, cotações faltando, spreads sem compra/venda, papéis ilíquidos, quedas) confere mês a mês custo fixo e real, atrasos de 0 a 3 pregões, limite de capacidade e meses isentos e tributados, nos 12 ambientes do CI;
+  - os cinco estudos imprimem os mesmos relatórios;
+  - o teste da ponte dá os mesmos 9 números, CAGR incluído.
+- **Os dados para o simulador:** o runtime entrega o painel em forma compacta, só os pregões em que cada ativo negociou, já cortado pela cerca do holdout, e o calendário. Tudo é montado uma vez por sessão.
+- **`std/stats.krs`:** as estatísticas do laboratório entram na biblioteca padrão (`stat_mean`, `stat_sd`, `ols_nw`, `nw_lags`…). [`lab/stats.krs`](kairos/lab/stats.krs) mantém os nomes do laboratório.
+- **Desempenho:** fora do `grad`, funções nativas e chamadas ao módulo `b3` não copiam mais os argumentos.
+- **Referência:** `KAIROS_RUST_SIM=1` usa o simulador Rust antigo, só para comparação.
+
 ## 0.10.0 — M10: a base de dados do laboratório montada em Kairós
 
 **Do download ao painel, os dados do laboratório agora são montados por programas Kairós.** Cada etapa grava os mesmos bytes que o Rust gravava.

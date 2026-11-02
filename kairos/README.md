@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.10.0**, com o roteiro M1–M10 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.11.0**, com o roteiro M1–M11 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -12,7 +12,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.10.0**, com 
 - M7: código nativo com Cranelift;
 - M8: o laboratório escrito em Kairós ([`lab/`](lab));
 - M9: arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós;
-- M10: a base de dados do laboratório montada em Kairós.
+- M10: a base de dados do laboratório montada em Kairós;
+- M11: o simulador escrito em Kairós ([`std/sim.krs`](std/sim.krs)).
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -129,7 +130,6 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 
 | marco | entrega |
 |---|---|
-| M11 | o simulador (custos, impacto, IR) escrito em Kairós |
 | M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |
