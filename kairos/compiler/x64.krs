@@ -457,6 +457,12 @@ fn x_call_rdata(inout x: X64, off: i64) {
     x_rip(inout x, 0, false, [255], 2, off, 0)
 }
 
+// syscall: the Linux kernel's call (rax its number; rdi, rsi, rdx, r10, r8, r9; rcx and r11 lost)
+fn x_syscall(inout x: X64) {
+    xb(inout x, 15)
+    xb(inout x, 5)
+}
+
 // ud2: stops the program (an illegal instruction)
 fn x_ud2(inout x: X64) {
     xb(inout x, 15)

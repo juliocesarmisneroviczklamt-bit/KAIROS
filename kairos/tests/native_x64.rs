@@ -1,10 +1,11 @@
-//! M21: the native back end written in Kairós (kairos/compiler/native.krs, driven by kn.krs). The
-//! WebAssembly module of each program of tests/wasm (made by wasmgen.krs, with the operating
-//! system written in Kairós, rt_win.krs) is translated to x86-64 and written as a Windows
-//! executable, which must print what the interpreter prints, fail with the same runtime error and
-//! exit with the same code. And the compiler itself, as an executable, compiles itself to the same
-//! bytes. The executables run on Windows x86-64 only; the tests run in release (the compiler
-//! written in Kairós takes minutes in a debug build).
+//! M21 (Windows) and M23 (Linux): the native back end written in Kairós (kairos/compiler/native.krs,
+//! driven by kn.krs). The WebAssembly module of each program of tests/wasm (made by wasmgen.krs,
+//! with the operating system written in Kairós, rt_win.krs or rt_linux.krs) is translated to
+//! x86-64 and written as an executable of the system the tests run on, which must print what the
+//! interpreter prints, fail with the same runtime error and exit with the same code. And the
+//! compiler itself, as an executable, compiles itself to the same bytes. The executables run on
+//! Windows and Linux x86-64; the tests run in release (the compiler written in Kairós takes minutes
+//! in a debug build).
 
 use kairos::session::Session;
 use std::cell::RefCell;
@@ -25,7 +26,24 @@ impl Write for Buf {
 }
 
 fn runs_here() -> bool {
-    cfg!(windows) && cfg!(target_arch = "x86_64") && !cfg!(debug_assertions)
+    (cfg!(windows) || cfg!(target_os = "linux")) && cfg!(target_arch = "x86_64") && !cfg!(debug_assertions)
+}
+
+/// An executable's file name: `.exe` on Windows.
+fn exe_name(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// What kn writes is a plain file: on Linux it is made executable (as `chmod +x`).
+fn executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(path).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(path, p).unwrap();
+    }
+    let _ = path;
 }
 
 fn on_big_stack(f: fn()) {
@@ -118,12 +136,14 @@ fn programs_compiled_to_windows_executables_run_like_the_interpreter() {
                 errors += 1;
             }
             let name = f.file_stem().unwrap().to_string_lossy().into_owned();
-            let got = run_exe(&out.join(format!("{name}.exe")), &[], &results);
+            let exe = out.join(exe_name(&name));
+            executable(&exe);
+            let got = run_exe(&exe, &[], &results);
             assert_eq!(got, interp, "{path}: the executable and the interpreter differ");
         }
         let _ = std::fs::remove_dir_all(&out);
         assert!(files.len() >= 10 && errors >= 5, "{} programs, {errors} with errors", files.len());
-        println!("{} programs run the same as Windows executables, {errors} of them stopping with the same runtime error", files.len());
+        println!("{} programs run the same as native executables, {errors} of them stopping with the same runtime error", files.len());
     })
 }
 
@@ -149,14 +169,17 @@ fn the_native_compiler_compiles_itself() {
         let results = root.join("tests").join("wasm").join("tmp").join("native_results");
         std::fs::create_dir_all(&results).unwrap();
         let t = std::time::Instant::now();
-        let again = run_exe(&one.join("kn.exe"), &[&std_dir, &two.to_string_lossy(), &kn, "compiler/kairos.krs"], &results);
-        assert_eq!(again, (String::new(), String::new(), 0), "kn.exe compiles kn.krs and kairos.krs");
-        let a = std::fs::read(one.join("kn.exe")).unwrap();
-        let b = std::fs::read(two.join("kn.exe")).unwrap();
-        assert!(a == b, "kn.exe compiled by itself is another executable ({} and {} bytes)", a.len(), b.len());
-        println!("kn.exe ({} bytes) compiles itself to the same bytes, and the command, in {:.1} s", a.len(), t.elapsed().as_secs_f64());
+        let kn_exe = one.join(exe_name("kn"));
+        executable(&kn_exe);
+        let again = run_exe(&kn_exe, &[&std_dir, &two.to_string_lossy(), &kn, "compiler/kairos.krs"], &results);
+        assert_eq!(again, (String::new(), String::new(), 0), "kn compiles kn.krs and kairos.krs");
+        let a = std::fs::read(&kn_exe).unwrap();
+        let b = std::fs::read(two.join(exe_name("kn"))).unwrap();
+        assert!(a == b, "kn compiled by itself is another executable ({} and {} bytes)", a.len(), b.len());
+        println!("kn ({} bytes) compiles itself to the same bytes, and the command, in {:.1} s", a.len(), t.elapsed().as_secs_f64());
         // the command written in Kairós, as an executable
-        let cmd = two.join("kairos.exe");
+        let cmd = two.join(exe_name("kairos"));
+        executable(&cmd);
         let program = "tests/programs/basics.krs";
         let src = std::fs::read_to_string(root.join(program)).unwrap();
         assert_eq!(run_exe(&cmd, &["run", program], &results), run_interp(program, &src), "`kairos.exe run {program}`");

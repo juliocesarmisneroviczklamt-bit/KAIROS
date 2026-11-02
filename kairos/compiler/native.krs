@@ -1,7 +1,8 @@
 // The native back end of Kairós (M21), written in Kairós: the WebAssembly module that the back end
 // makes (wasmgen.krs) translated to x86-64, function by function, and written as a Windows
-// executable (pe.krs). Nothing but the module and kernel32.dll: the program's operating system
-// (the WASI functions the runtime calls) is Kairós too, compiled into the module (rt_win.krs).
+// executable (pe.krs) or a Linux one (elf.krs, M23). Nothing but the module and kernel32.dll, or
+// the kernel's system calls: the program's operating system (the WASI functions the runtime
+// calls) is Kairós too, compiled into the module (rt_win.krs, rt_linux.krs).
 //
 // Each value of WebAssembly's operand stack has a slot of 8 bytes in the function's frame, whose
 // place the translator knows at each instruction (the stack's height is fixed by the code). A
@@ -28,14 +29,20 @@
 // Functions the module exports with a mark get another body:
 //   __k32_<Name>      a call to <Name> of kernel32.dll (Windows' convention: rcx, rdx, r8, r9,
 //                     then the stack), with the function's parameters, giving its rax
+//   __syscall         the Linux system call of its first parameter, with the six others
 //   __mem_base        the address where the module's memory starts (r15)
+//   __initial_sp      the stack the kernel started the program with (Linux)
+//   __native_copy     (dst, src, n): n bytes between two addresses of the process
+//   __native_strlen   the length of the C string at an address of the process
 //   __wasi_<name>     the function that does WASI's <name>: a call to that import calls it
 //
 // Memory: 8 GiB + 64 KiB of addresses reserved, so that any 32-bit address with any 32-bit offset
 // stays in them; the first 64 KiB hold the globals (8 bytes each) and, at their end, the number
-// of pages in use; the module's memory follows (r15), its pages committed as it grows.
+// of pages in use and the first stack; the module's memory follows (r15), its pages committed (or
+// made writable) as it grows.
 import "x64.krs"
 import "pe.krs"
+import "elf.krs"
 
 struct NCtl {
     kind: i64,          // 0 block, 1 loop, 2 if, 3 the function's body
@@ -62,7 +69,8 @@ struct Nat {
     impl_of: List[i64],         // each import: the function that does it (-1: none)
     k32: List[str],             // the functions of kernel32.dll, in the import table's order
     k32_of: Map[i64, i64],      // a function marked __k32_ -> its entry in k32
-    base_fn: i64,               // the function marked __mem_base (-1: none)
+    target: str,                // "windows" or "linux"
+    special: Map[i64, str],     // a function with a mark of its own (__mem_base, __syscall...) -> it
     grow_l: i64,                // memory.grow (rcx: the pages to add; rax: the old count or -1)
     trap_l: i64,                // a trap: the program stops
     table_l: i64,               // the jumps of the table (call_indirect), 5 bytes each
@@ -184,6 +192,11 @@ fn n_global(g: i64) -> i64 {
 
 fn n_pages_at() -> i64 {
     -8
+}
+
+// where the entry keeps the stack the kernel started the program with (Linux)
+fn n_sp_at() -> i64 {
+    -16
 }
 
 fn n_out(inout n: Nat, bytes_: i64) {
@@ -1366,11 +1379,7 @@ fn n_func(inout n: Nat, k: i64) {
         x_ret(inout n.x)
         return
     }
-    if fi == n.base_fn {
-        x_mov(inout n.x, rax(), r15())
-        x_ret(inout n.x)
-        return
-    }
+    if n_special(inout n, fi) { return }
     n.code = f.code
     n.pos = 0
     n_alloc_regs(inout n)
@@ -1461,38 +1470,76 @@ fn n_k32(inout n: Nat, name: str) -> i64 {
     len(n.k32) - 1
 }
 
-// The module as a Windows executable: (no error, its bytes, the error).
-fn native_exe(m: WMod) -> (bool, Bytes, str) {
-    var n = Nat {
-        x: x64_new(), m: m, nimp: len(m.imports), labels: [], impl_of: [], k32: [], k32_of: [:], base_fn: -1,
-        grow_l: 0, trap_l: 0, table_l: 0, iat_at: 0, failed: false, msg: "",
-        code: [], pos: 0, np: 0, nl: 0, result: 0, lreg: [], saved: [], vals: [], h: 0, max_h: 0, max_out: 0, ctl: [], dead: false, dead_depth: 0, frame_at: 0,
+// The body of a function with a mark of its own (true when it has one). Our convention: the
+// arguments at [rsp + 8 + 8i] at the entry, the result in rax; rbx, rsi, rdi and r12-r14 kept.
+fn n_special(inout n: Nat, fi: i64) -> bool {
+    if not contains(n.special, fi) { return false }
+    let mark = n.special[fi]
+    if mark == "__mem_base" {
+        x_mov(inout n.x, rax(), r15())
+    } else if mark == "__initial_sp" {
+        x_load(inout n.x, rax(), r15(), n_sp_at())
+    } else if mark == "__syscall" {
+        x_push(inout n.x, rsi())
+        x_push(inout n.x, rdi())
+        let regs = [rax(), rdi(), rsi(), rdx(), 10, r8(), r9()]
+        for i in 0..7 { x_load(inout n.x, regs[i], rsp(), 24 + 8 * i) }
+        x_syscall(inout n.x)
+        x_pop(inout n.x, rdi())
+        x_pop(inout n.x, rsi())
+    } else if mark == "__native_copy" {
+        x_push(inout n.x, rsi())
+        x_push(inout n.x, rdi())
+        x_load(inout n.x, rdi(), rsp(), 24)
+        x_load(inout n.x, rsi(), rsp(), 32)
+        x_load(inout n.x, rcx(), rsp(), 40)
+        x_rep_movsb(inout n.x)
+        x_pop(inout n.x, rdi())
+        x_pop(inout n.x, rsi())
+    } else if mark == "__native_strlen" {
+        let top = x_label(inout n.x)
+        let done = x_label(inout n.x)
+        x_load(inout n.x, rcx(), rsp(), 8)
+        x_imm(inout n.x, rax(), 0)
+        x_bind(inout n.x, top)
+        // cmp byte [rcx + rax], 0
+        x_rm(inout n.x, 0, false, [128], 7, rcx(), rax(), 0)
+        xb(inout n.x, 0)
+        x_jcc(inout n.x, cc_e(), done)
+        x_alu_i(inout n.x, 0, true, rax(), 1)
+        x_jmp(inout n.x, top)
+        x_bind(inout n.x, done)
     }
-    let total = n.nimp + len(m.funcs)
-    for i in 0..total { n.labels.push(if i < n.nimp { -1 } else { x_label(inout n.x) }) }
-    for i in 0..n.nimp { n.impl_of.push(-1) }
-    let va = n_k32(inout n, "VirtualAlloc")
-    let exit_slot = n_k32(inout n, "ExitProcess")
-    var start = -1
-    for e in m.exports {
-        if e.1 != 0 { continue }
-        if e.0 == "_start" { start = e.2 }
-        if starts_with(e.0, "__k32_") { n.k32_of[e.2] = n_k32(inout n, substr(e.0, 6, len(e.0) - 6)) }
-        if e.0 == "__mem_base" { n.base_fn = e.2 }
-        if starts_with(e.0, "__wasi_") {
-            let name = substr(e.0, 7, len(e.0) - 7)
-            for i in 0..n.nimp {
-                if m.imports[i].0 == "wasi_snapshot_preview1" and m.imports[i].1 == name { n.impl_of[i] = e.2 }
-            }
-        }
+    x_ret(inout n.x)
+    true
+}
+
+// A system call from the entry, with constant arguments.
+fn n_sys(inout n: Nat, nr: i64, a: List[i64]) {
+    let regs = [rdi(), rsi(), rdx(), 10, r8(), r9()]
+    for i in 0..len(a) { x_mov_imm(inout n.x, regs[i], a[i]) }
+    x_mov_imm(inout n.x, rax(), nr)
+    x_syscall(inout n.x)
+}
+
+// The globals and the data, once the memory is there (the data at `data_off` in .data).
+fn n_entry_memory(inout n: Nat, data_off: i64) {
+    x_imm(inout n.x, rax(), n.m.pages)
+    x_store(inout n.x, r15(), n_pages_at(), rax())
+    for g in 0..len(n.m.globals) {
+        x_imm(inout n.x, rax(), n.m.globals[g].1)
+        x_store(inout n.x, r15(), n_global(g), rax())
     }
-    if start < 0 { return (false, bytes(), "a module without _start") }
-    n.iat_at = pe_iat_at(len(n.k32))
-    n.grow_l = x_label(inout n.x)
-    n.trap_l = x_label(inout n.x)
-    n.table_l = x_label(inout n.x)
-    // the entry: memory, globals, data, then _start and ExitProcess(0)
-    let entry = len(n.x.code)
+    if len(n.m.data) > 0 {
+        x_lea_rdata(inout n.x, rsi(), data_off)
+        x_lea(inout n.x, rdi(), r15(), n.m.data_at)
+        x_imm(inout n.x, rcx(), len(n.m.data))
+        x_rep_movsb(inout n.x)
+    }
+}
+
+// Windows' entry: memory (VirtualAlloc), globals, data, then _start and ExitProcess(0).
+fn n_entry_windows(inout n: Nat, start: i64, va: i64, exit_slot: i64) {
     x_alu_i(inout n.x, 5, true, rsp(), 40)
     let fail = x_label(inout n.x)
     // VirtualAlloc(0, 8 GiB + 64 KiB, MEM_RESERVE, PAGE_NOACCESS)
@@ -1506,36 +1553,155 @@ fn native_exe(m: WMod) -> (bool, Bytes, str) {
     x_mov(inout n.x, r15(), rax())
     // VirtualAlloc(it, (1 + pages) * 64 KiB, MEM_COMMIT, PAGE_READWRITE)
     x_mov(inout n.x, rcx(), rax())
-    x_imm(inout n.x, rdx(), 65536 * (1 + m.pages))
+    x_imm(inout n.x, rdx(), 65536 * (1 + n.m.pages))
     x_imm(inout n.x, r8(), 4096)
     x_imm(inout n.x, r9(), 4)
     x_call_rdata(inout n.x, n.iat_at + 8 * va)
     x_test(inout n.x, true, rax(), rax())
     x_jcc(inout n.x, cc_e(), fail)
     x_alu_i(inout n.x, 0, true, r15(), 65536)
-    x_imm(inout n.x, rax(), m.pages)
-    x_store(inout n.x, r15(), n_pages_at(), rax())
-    for g in 0..len(m.globals) {
-        x_imm(inout n.x, rax(), m.globals[g].1)
-        x_store(inout n.x, r15(), n_global(g), rax())
-    }
-    let data_off = pe_data_at(n.k32)
-    if len(m.data) > 0 {
-        x_lea_rdata(inout n.x, rsi(), data_off)
-        x_lea(inout n.x, rdi(), r15(), m.data_at)
-        x_imm(inout n.x, rcx(), len(m.data))
-        x_rep_movsb(inout n.x)
-    }
+    n_entry_memory(inout n, pe_data_at(n.k32))
     x_call(inout n.x, n.labels[start])
     x_imm(inout n.x, rcx(), 0)
     x_call_rdata(inout n.x, n.iat_at + 8 * exit_slot)
     x_bind(inout n.x, fail)
     x_imm(inout n.x, rcx(), 3)
     x_call_rdata(inout n.x, n.iat_at + 8 * exit_slot)
+}
+
+// Linux's entry: the first stack kept, memory reserved (mmap) and made writable (mprotect),
+// globals, data, a stack of 1 GiB for deep recursion (when the kernel gives it), then _start and
+// exit_group(0).
+fn n_entry_linux(inout n: Nat, start: i64) {
+    let fail = x_label(inout n.x)
+    let keep = x_label(inout n.x)
+    x_mov(inout n.x, rbx(), rsp())
+    // mmap(0, 8 GiB + 64 KiB, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0)
+    n_sys(inout n, 9, [0, 8589934592 + 65536, 0, 16418, -1, 0])
+    x_alu_i(inout n.x, 7, true, rax(), -4096)
+    x_jcc(inout n.x, cc_a(), fail)
+    x_mov(inout n.x, r15(), rax())
+    // mprotect(it, (1 + pages) * 64 KiB, PROT_READ | PROT_WRITE)
+    x_mov(inout n.x, rdi(), r15())
+    x_mov_imm(inout n.x, rsi(), 65536 * (1 + n.m.pages))
+    x_mov_imm(inout n.x, rdx(), 3)
+    x_mov_imm(inout n.x, rax(), 10)
+    x_syscall(inout n.x)
+    x_test(inout n.x, true, rax(), rax())
+    x_jcc(inout n.x, cc_ne(), fail)
+    x_alu_i(inout n.x, 0, true, r15(), 65536)
+    x_store(inout n.x, r15(), n_sp_at(), rbx())
+    n_entry_memory(inout n, 0)
+    // mmap(0, 1 GiB, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0)
+    n_sys(inout n, 9, [0, 1073741824, 3, 16418 + 131072, -1, 0])
+    x_alu_i(inout n.x, 7, true, rax(), -4096)
+    x_jcc(inout n.x, cc_a(), keep)
+    x_lea(inout n.x, rsp(), rax(), 1073741824)
+    x_bind(inout n.x, keep)
+    x_alu_i(inout n.x, 4, true, rsp(), -16)
+    x_call(inout n.x, n.labels[start])
+    n_sys(inout n, 231, [0])
+    x_bind(inout n.x, fail)
+    n_sys(inout n, 231, [3])
+}
+
+// memory.grow under Linux: as Windows' (n_grow_fn), the pages made writable by mprotect.
+fn n_grow_linux(inout n: Nat) {
+    x_bind(inout n.x, n.grow_l)
+    x_push(inout n.x, rbp())
+    x_mov(inout n.x, rbp(), rsp())
+    x_alu_i(inout n.x, 5, true, rsp(), 48)
+    let fail = x_label(inout n.x)
+    let done = x_label(inout n.x)
+    x_mov32(inout n.x, rcx(), rcx())
+    x_load(inout n.x, rax(), r15(), n_pages_at())
+    x_store(inout n.x, rbp(), -8, rax())
+    x_store(inout n.x, rbp(), -16, rcx())
+    x_alu(inout n.x, op_add(), true, rax(), rcx())
+    x_alu_i(inout n.x, 7, true, rax(), 65536)
+    x_jcc(inout n.x, cc_a(), fail)
+    x_store(inout n.x, rbp(), -24, rax())
+    x_test(inout n.x, true, rcx(), rcx())
+    x_jcc(inout n.x, cc_e(), done)
+    // mprotect(memory + old * 64 KiB, pages * 64 KiB, PROT_READ | PROT_WRITE), rsi and rdi kept
+    x_store(inout n.x, rbp(), -32, rsi())
+    x_store(inout n.x, rbp(), -40, rdi())
+    x_load(inout n.x, rdi(), rbp(), -8)
+    x_shift_i(inout n.x, 4, true, rdi(), 16)
+    x_alu(inout n.x, op_add(), true, rdi(), r15())
+    x_load(inout n.x, rsi(), rbp(), -16)
+    x_shift_i(inout n.x, 4, true, rsi(), 16)
+    x_mov_imm(inout n.x, rdx(), 3)
+    x_mov_imm(inout n.x, rax(), 10)
+    x_syscall(inout n.x)
+    x_load(inout n.x, rsi(), rbp(), -32)
+    x_load(inout n.x, rdi(), rbp(), -40)
+    x_test(inout n.x, true, rax(), rax())
+    x_jcc(inout n.x, cc_ne(), fail)
+    x_load(inout n.x, rax(), rbp(), -24)
+    x_store(inout n.x, r15(), n_pages_at(), rax())
+    x_bind(inout n.x, done)
+    x_load(inout n.x, rax(), rbp(), -8)
+    x_leave(inout n.x)
+    x_ret(inout n.x)
+    x_bind(inout n.x, fail)
+    x_mov_imm(inout n.x, rax(), 4294967295)
+    x_leave(inout n.x)
+    x_ret(inout n.x)
+}
+
+// The module as a Windows executable.
+fn native_exe(m: WMod) -> (bool, Bytes, str) {
+    native_image(m, "windows")
+}
+
+// The module as an executable of `target` ("windows": PE; "linux": ELF): (no error, its bytes,
+// the error).
+fn native_image(m: WMod, target: str) -> (bool, Bytes, str) {
+    let win = target == "windows"
+    var n = Nat {
+        x: x64_new(), m: m, nimp: len(m.imports), labels: [], impl_of: [], k32: [], k32_of: [:], target: target, special: [:],
+        grow_l: 0, trap_l: 0, table_l: 0, iat_at: 0, failed: false, msg: "",
+        code: [], pos: 0, np: 0, nl: 0, result: 0, lreg: [], saved: [], vals: [], h: 0, max_h: 0, max_out: 0, ctl: [], dead: false, dead_depth: 0, frame_at: 0,
+    }
+    let total = n.nimp + len(m.funcs)
+    for i in 0..total { n.labels.push(if i < n.nimp { -1 } else { x_label(inout n.x) }) }
+    for i in 0..n.nimp { n.impl_of.push(-1) }
+    var va = 0
+    var exit_slot = 0
+    if win {
+        va = n_k32(inout n, "VirtualAlloc")
+        exit_slot = n_k32(inout n, "ExitProcess")
+    }
+    var start = -1
+    for e in m.exports {
+        if e.1 != 0 { continue }
+        if e.0 == "_start" { start = e.2 }
+        if starts_with(e.0, "__k32_") {
+            if not win { return (false, bytes(), "kernel32's " + substr(e.0, 6, len(e.0) - 6) + " in a Linux executable") }
+            n.k32_of[e.2] = n_k32(inout n, substr(e.0, 6, len(e.0) - 6))
+        }
+        if e.0 == "__mem_base" or e.0 == "__syscall" or e.0 == "__initial_sp" or e.0 == "__native_copy" or e.0 == "__native_strlen" {
+            n.special[e.2] = e.0
+        }
+        if starts_with(e.0, "__wasi_") {
+            let name = substr(e.0, 7, len(e.0) - 7)
+            for i in 0..n.nimp {
+                if m.imports[i].0 == "wasi_snapshot_preview1" and m.imports[i].1 == name { n.impl_of[i] = e.2 }
+            }
+        }
+    }
+    if start < 0 { return (false, bytes(), "a module without _start") }
+    n.iat_at = if win { pe_iat_at(len(n.k32)) } else { 0 }
+    n.grow_l = x_label(inout n.x)
+    n.trap_l = x_label(inout n.x)
+    n.table_l = x_label(inout n.x)
+    let entry = len(n.x.code)
+    if win { n_entry_windows(inout n, start, va, exit_slot) } else { n_entry_linux(inout n, start) }
     // the trap: stop (an illegal instruction)
     x_bind(inout n.x, n.trap_l)
     x_ud2(inout n.x)
-    n_grow_fn(inout n, va)
+    if win { n_grow_fn(inout n, va) } else { n_grow_linux(inout n) }
     for k in 0..len(m.funcs) {
         n_func(inout n, k)
         if n.failed { return (false, bytes(), "function " + str(n.nimp + k) + ": " + n.msg) }
@@ -1548,8 +1714,14 @@ fn native_exe(m: WMod) -> (bool, Bytes, str) {
         x_jmp(inout n.x, n.labels[t])
     }
     if not x_resolve(inout n.x) { return (false, bytes(), "a label never placed") }
+    if not win {
+        let data_at = elf_data_at(len(n.x.code))
+        x_resolve_rdata(inout n.x, elf_text_at(), data_at)
+        return (true, elf_image(n.x.code, entry, m.data), "")
+    }
     let data_rva = pe_data_rva(len(n.x.code))
     x_resolve_rdata(inout n.x, pe_text_rva(), data_rva)
+    let data_off = pe_data_at(n.k32)
     var data = pe_imports(n.k32, data_rva)
     while len(data) < data_off { data.push(0) }
     for b in m.data { data.push(b) }

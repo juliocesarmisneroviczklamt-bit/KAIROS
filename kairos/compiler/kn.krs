@@ -1,11 +1,14 @@
-// kn: Kairós to a Windows executable, written in Kairós (M21). It checks programs with the front
-// end in Kairós, makes each one's WebAssembly module with the operating system written in Kairós
-// (rt_win.krs) and translates it to x86-64 (native.krs): no Rust, no WebAssembly runtime.
+// kn: Kairós to a native executable, written in Kairós (M21; Linux: M23). It checks programs with
+// the front end in Kairós, makes each one's WebAssembly module with the operating system written in
+// Kairós (rt_win.krs, rt_linux.krs) and translates it to x86-64 (native.krs): no Rust, no
+// WebAssembly runtime.
 //
-//   kairos run kairos/compiler/kn.krs <std folder> <output folder> program.krs [more.krs ...]
+//   kairos run kairos/compiler/kn.krs <std folder> <output folder> [--windows | --linux] program.krs [more.krs ...]
 //
-// Each `program.krs` becomes `<output folder>/program.exe`; a program with an error, or with what
-// the back ends do not compile yet, is reported (`file: error CODE ...`) and gets no executable.
+// Each `program.krs` becomes `<output folder>/program.exe` (Windows, the default on Windows) or
+// `<output folder>/program` (Linux, the default elsewhere: `chmod +x` it); a program with an
+// error, or with what the back ends do not compile yet, is reported (`file: error CODE ...`) and
+// gets no executable.
 import "wasmgen.krs"
 import "native.krs"
 
@@ -47,13 +50,25 @@ let up = dir_of(std_dir)
 let compiler = (if up == "" { "" } else { up + "/" }) + "compiler/"
 kn_runtime(inout base, compiler + "rt.krs")
 kn_runtime(inout base, compiler + "rt_zip.krs")
-kn_runtime(inout base, compiler + "rt_win.krs")
+// the system: --windows or --linux, else the one kn runs on
+var target = if env("OS") == "Windows_NT" { "windows" } else { "linux" }
+var programs: List[str] = []
+for k in 2..len(args()) {
+    let a = args()[k]
+    if a == "--windows" {
+        target = "windows"
+    } else if a == "--linux" {
+        target = "linux"
+    } else {
+        programs.push(a)
+    }
+}
+kn_runtime(inout base, compiler + (if target == "windows" { "rt_win.krs" } else { "rt_linux.krs" }))
 var base_b3 = base
 var b3_ready = false
 make_dir(out_dir)
 var failed = 0
-for k in 2..len(args()) {
-    let path = args()[k]
+for path in programs {
     var ck = base
     ck.imported[norm_path(path)] = true
     check_file(inout ck, path, read_text(path))
@@ -83,9 +98,9 @@ for k in 2..len(args()) {
         failed += 1
         continue
     }
-    let exe = native_exe(w.1)
+    let exe = native_image(w.1, target)
     if exe.0 {
-        write_bytes(out_dir + "/" + kn_base_name(path) + ".exe", exe.1)
+        write_bytes(out_dir + "/" + kn_base_name(path) + (if target == "windows" { ".exe" } else { "" }), exe.1)
     } else {
         print(path + ": error N0001 " + exe.2)
         failed += 1

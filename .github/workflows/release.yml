@@ -228,13 +228,46 @@ jobs:
           name: selfhost-native
           path: kairos-*.zip
 
+  # the same as a Linux executable (M23): ELF over the kernel's system calls, no libraries
+  selfhost-native-linux:
+    name: build (kairos-selfhost for Linux, written in Kairós)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        run: |
+          cargo build --release --locked -p kairos
+          ./target/release/kairos run kairos/compiler/kn.krs kairos/std out kairos/compiler/kairos.krs
+          chmod +x out/kairos
+      - name: try it
+        run: |
+          out/kairos --version
+          out/kairos run kairos/examples/finance.krs > /dev/null
+      - name: package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' kairos/Cargo.toml | head -n 1)
+          dir="kairos-${version}-selfhost-linux64"
+          mkdir -p "$dir/examples" "$dir/docs"
+          cp out/kairos "$dir/kairos-selfhost"
+          cp LICENSE kairos/README.md "$dir/"
+          cp kairos/docs/spec.md "$dir/docs/"
+          cp kairos/examples/*.krs "$dir/examples/"
+          tar czf "$dir.tar.gz" "$dir"
+          ls -l kairos-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-native-linux
+          path: kairos-*.tar.gz
+
   publish:
     name: publish
     # experimental targets, the BSD VMs and the self-hosted module never block a release: their
     # packages go in when they build; the step below refuses to publish if any non-experimental
     # package is missing
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.vscode.result == 'success'
-    needs: [build, bsd, vscode, selfhost, selfhost-native]
+    needs: [build, bsd, vscode, selfhost, selfhost-native, selfhost-native-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

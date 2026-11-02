@@ -6230,9 +6230,10 @@ fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
 }
 
 // The module for the native back end (M21, native.krs): the same, with the operating system
-// written in Kairós (rt_win.krs, checked with the program) compiled in and marked by exports:
-// `__wasi_<name>` does WASI's <name> (win_<name>), `__k32_<Name>` is kernel32's <Name>
-// (k32_<Name>), `__mem_base` the memory's address (rt_win_base).
+// written in Kairós (rt_win.krs or rt_linux.krs, checked with the program) compiled in and marked
+// by exports: `__wasi_<name>` does WASI's <name> (os_wasi_<name>), `__k32_<Name>` is kernel32's
+// <Name> (k32_<Name>), and `__mem_base`, `__syscall`, `__initial_sp`, `__native_copy` and
+// `__native_strlen` are os_mem_base, os_syscall... (native.krs gives them their bodies).
 fn wasm_module_native(ck: Checker, srcs: List[str], prog: str) -> (bool, WMod, str) {
     wasm_gen(ck, srcs, prog, true)
 }
@@ -6263,9 +6264,11 @@ fn wasm_gen(ck: Checker, srcs: List[str], prog: str, native: bool) -> (bool, WMo
         for name in keys(ck.fn_ids) {
             let id = ck.fn_ids[name]
             var mark = ""
-            if starts_with(name, "win_") { mark = "__wasi_" + substr(name, 4, len(name) - 4) }
+            if starts_with(name, "os_wasi_") { mark = "__wasi_" + substr(name, 8, len(name) - 8) }
             if starts_with(name, "k32_") { mark = "__k32_" + substr(name, 4, len(name) - 4) }
-            if name == "rt_win_base" { mark = "__mem_base" }
+            if name == "os_mem_base" or name == "os_syscall" or name == "os_initial_sp" or name == "os_native_copy" or name == "os_native_strlen" {
+                mark = "__" + substr(name, 3, len(name) - 3)
+            }
             if mark != "" { g.m.exports.push((mark, 0, fn_index(inout g, id))) }
         }
     }

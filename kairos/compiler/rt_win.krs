@@ -1,8 +1,8 @@
 // The operating system of Kairós programs compiled to Windows executables (M21), written in
 // Kairós: the WASI functions the runtime (rt.krs) calls, over kernel32.dll. The native back end
-// (native.krs) calls `win_<name>` for each WASI import, gives each `k32_<Name>` the body of a call
-// to kernel32's <Name> (its arguments as Windows takes them, its rax as the result) and gives
-// `rt_win_base` the address where the module's memory starts: an address of the module is that
+// (native.krs) calls `os_wasi_<name>` for each WASI import, gives each `k32_<Name>` the body of a
+// call to kernel32's <Name> (its arguments as Windows takes them, its rax as the result) and gives
+// `os_mem_base` the address where the module's memory starts: an address of the module is that
 // plus its offset.
 //
 // Paths are relative to the current folder (WASI's descriptor 3, `--dir=.`), their `/` written as
@@ -12,7 +12,7 @@
 
 // ------------------------------------------------------------------ kernel32 (the bodies the native back end gives)
 
-fn rt_win_base() -> i64 {
+fn os_mem_base() -> i64 {
     0
 }
 
@@ -112,7 +112,7 @@ fn k32_ExitProcess(code: i64) -> i64 {
 
 // a native address from an address of the module
 fn rt_win_at(a: i64) -> i64 {
-    rt_win_base() + a
+    os_mem_base() + a
 }
 
 // a 32-bit result of kernel32 (BOOL, DWORD): the low half of rax
@@ -266,7 +266,7 @@ fn rt_win_ns(a: i64) -> i64 {
 
 // ------------------------------------------------------------------ WASI
 
-fn win_fd_write(fd: i64, iovs: i64, n: i64, nwritten_at: i64) -> i64 {
+fn os_wasi_fd_write(fd: i64, iovs: i64, n: i64, nwritten_at: i64) -> i64 {
     let e = rt_win_entry(fd)
     if e == 0 { return 8 }
     let kind = wasm_load64(e)
@@ -311,7 +311,7 @@ fn win_fd_write(fd: i64, iovs: i64, n: i64, nwritten_at: i64) -> i64 {
     err
 }
 
-fn win_fd_read(fd: i64, iovs: i64, n: i64, nread_at: i64) -> i64 {
+fn os_wasi_fd_read(fd: i64, iovs: i64, n: i64, nread_at: i64) -> i64 {
     let e = rt_win_entry(fd)
     if e == 0 { return 8 }
     let kind = wasm_load64(e)
@@ -338,7 +338,7 @@ fn win_fd_read(fd: i64, iovs: i64, n: i64, nread_at: i64) -> i64 {
     err
 }
 
-fn win_fd_close(fd: i64) -> i64 {
+fn os_wasi_fd_close(fd: i64) -> i64 {
     let e = rt_win_entry(fd)
     if e == 0 { return 8 }
     let kind = wasm_load64(e)
@@ -348,7 +348,7 @@ fn win_fd_close(fd: i64) -> i64 {
     0
 }
 
-fn win_path_open(dir: i64, dirflags: i64, path: i64, plen: i64, oflags: i64, rights: i64, inherit: i64, fdflags: i64, fd_at: i64) -> i64 {
+fn os_wasi_path_open(dir: i64, dirflags: i64, path: i64, plen: i64, oflags: i64, rights: i64, inherit: i64, fdflags: i64, fd_at: i64) -> i64 {
     let w = rt_win_wide(path, plen, 2, true)
     if bit_and(oflags, 2) != 0 {
         // a folder: kept as the pattern of its names
@@ -408,7 +408,7 @@ fn win_path_open(dir: i64, dirflags: i64, path: i64, plen: i64, oflags: i64, rig
     0
 }
 
-fn win_path_create_directory(dir: i64, path: i64, plen: i64) -> i64 {
+fn os_wasi_path_create_directory(dir: i64, path: i64, plen: i64) -> i64 {
     let w = rt_win_wide(path, plen, 0, true)
     let ok = rt_win_u32(k32_CreateDirectoryW(rt_win_at(w.0), 0)) != 0
     let err = if ok { 0 } else { rt_win_errno() }
@@ -417,7 +417,7 @@ fn win_path_create_directory(dir: i64, path: i64, plen: i64) -> i64 {
 }
 
 // WASI's filestat: the type (3 folder, 4 file) at 16, the size at 32, the times at 40, 48, 56.
-fn win_path_filestat_get(dir: i64, flags: i64, path: i64, plen: i64, st: i64) -> i64 {
+fn os_wasi_path_filestat_get(dir: i64, flags: i64, path: i64, plen: i64, st: i64) -> i64 {
     let w = rt_win_wide(path, plen, 0, true)
     let data = rt_alloc(64)
     let ok = rt_win_u32(k32_GetFileAttributesExW(rt_win_at(w.0), 0, rt_win_at(data))) != 0
@@ -441,7 +441,7 @@ fn win_path_filestat_get(dir: i64, flags: i64, path: i64, plen: i64, st: i64) ->
 
 // The names of a folder from the `cookie`-th, as WASI's entries: the next cookie (8 bytes), the
 // inode (8), the name's length (4), the type (1), 3 more, then the name; cut at the buffer's end.
-fn win_fd_readdir(fd: i64, buf: i64, size: i64, cookie: i64, used_at: i64) -> i64 {
+fn os_wasi_fd_readdir(fd: i64, buf: i64, size: i64, cookie: i64, used_at: i64) -> i64 {
     let e = rt_win_entry(fd)
     if e == 0 { return 8 }
     if wasm_load64(e) != 2 { return 54 }
@@ -487,7 +487,7 @@ fn win_fd_readdir(fd: i64, buf: i64, size: i64, cookie: i64, used_at: i64) -> i6
 }
 
 // The time in nanoseconds: 0 the wall clock (since 1970), 1 a monotonic one.
-fn win_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
+fn os_wasi_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
     let cell = rt_alloc(16)
     if id == 0 {
         let _ = k32_GetSystemTimePreciseAsFileTime(rt_win_at(cell))
@@ -503,7 +503,7 @@ fn win_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
     0
 }
 
-fn win_proc_exit(code: i64) {
+fn os_wasi_proc_exit(code: i64) {
     let _ = k32_ExitProcess(code)
 }
 
@@ -650,18 +650,18 @@ fn rt_utf8_size(s: str) -> i64 {
     wasm_load32(wasm_str_addr(s) + 4)
 }
 
-fn win_args_sizes_get(argc_at: i64, size_at: i64) -> i64 {
+fn os_wasi_args_sizes_get(argc_at: i64, size_at: i64) -> i64 {
     rt_win_cstrings(rt_win_args(), argc_at, size_at, -1, 0)
 }
 
-fn win_args_get(argv_at: i64, buf_at: i64) -> i64 {
+fn os_wasi_args_get(argv_at: i64, buf_at: i64) -> i64 {
     rt_win_cstrings(rt_win_args(), 0, 0, argv_at, buf_at)
 }
 
-fn win_environ_sizes_get(n_at: i64, size_at: i64) -> i64 {
+fn os_wasi_environ_sizes_get(n_at: i64, size_at: i64) -> i64 {
     rt_win_cstrings(rt_win_environ(), n_at, size_at, -1, 0)
 }
 
-fn win_environ_get(env_at: i64, buf_at: i64) -> i64 {
+fn os_wasi_environ_get(env_at: i64, buf_at: i64) -> i64 {
     rt_win_cstrings(rt_win_environ(), 0, 0, env_at, buf_at)
 }

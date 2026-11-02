@@ -1,0 +1,75 @@
+// A Linux executable (ELF64, x86-64, static: no loader and no libraries), written by the compiler in
+// Kairós (M23): the headers, the code and the data, loaded at fixed addresses. (The System V ABI,
+// "ELF-64 Object File Format".)
+//
+// The file: the ELF header and three program headers in its first 0x1000 bytes, the code from
+// 0x1000, the data from the next multiple of 0x1000. In memory each part is at 0x400000 plus its
+// place in the file: the first two pages read and execute, the data read and write, and a stack
+// that does not execute.
+
+fn elf_base() -> i64 {
+    4194304
+}
+
+// where the code is (from the base, as in the file)
+fn elf_text_at() -> i64 {
+    4096
+}
+
+// where the data is, after `code_len` bytes of code
+fn elf_data_at(code_len: i64) -> i64 {
+    pe_align(elf_text_at() + code_len, 4096)
+}
+
+fn elf_put(inout b: List[i64], at: i64, v: i64, n: i64) {
+    for i in 0..n { b[at + i] = bit_and(shr(v, 8 * i), 255) }
+}
+
+// a program header at `at`: its type, flags (1 execute, 2 write, 4 read), place in the file and
+// size, at the base plus its place
+fn elf_phdr(inout h: List[i64], at: i64, kind: i64, flags: i64, off: i64, size: i64) {
+    elf_put(inout h, at, kind, 4)
+    elf_put(inout h, at + 4, flags, 4)
+    elf_put(inout h, at + 8, off, 8)
+    elf_put(inout h, at + 16, if kind == 1 { elf_base() + off } else { 0 }, 8)
+    elf_put(inout h, at + 24, if kind == 1 { elf_base() + off } else { 0 }, 8)
+    elf_put(inout h, at + 32, size, 8)
+    elf_put(inout h, at + 40, size, 8)
+    elf_put(inout h, at + 48, if kind == 1 { 4096 } else { 16 }, 8)
+}
+
+// The executable: `code` with its entry at `entry`, then `data`.
+fn elf_image(code: List[i64], entry: i64, data: List[i64]) -> Bytes {
+    let data_at = elf_data_at(len(code))
+    var h: List[i64] = []
+    for i in 0..4096 { h.push(0) }
+    // the identification: ELF, 64 bits, little-endian, version 1, System V
+    h[0] = 127
+    h[1] = 69
+    h[2] = 76
+    h[3] = 70
+    h[4] = 2
+    h[5] = 1
+    h[6] = 1
+    // an executable for x86-64: its entry, the program headers at 64, 56 bytes each, three
+    elf_put(inout h, 16, 2, 2)
+    elf_put(inout h, 18, 62, 2)
+    elf_put(inout h, 20, 1, 4)
+    elf_put(inout h, 24, elf_base() + elf_text_at() + entry, 8)
+    elf_put(inout h, 32, 64, 8)
+    elf_put(inout h, 52, 64, 2)
+    elf_put(inout h, 54, 56, 2)
+    elf_put(inout h, 56, 3, 2)
+    elf_put(inout h, 58, 64, 2)
+    // the headers and the code (read, execute), the data (read, write), the stack (read, write)
+    elf_phdr(inout h, 64, 1, 5, 0, elf_text_at() + len(code))
+    elf_phdr(inout h, 120, 1, 6, data_at, max(len(data), 1))
+    elf_phdr(inout h, 176, 1685382481, 6, 0, 0)
+    var out = bytes()
+    for x in h { out.put_u8(x) }
+    for x in code { out.put_u8(x) }
+    for i in elf_text_at() + len(code)..data_at { out.put_u8(0) }
+    for x in data { out.put_u8(x) }
+    if len(data) == 0 { out.put_u8(0) }
+    out
+}
