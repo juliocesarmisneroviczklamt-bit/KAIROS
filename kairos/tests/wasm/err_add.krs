@@ -1,0 +1,3 @@
+let big = 9223372036854775807
+print("before")   // out: before
+print(big + 1)    // error: R0006

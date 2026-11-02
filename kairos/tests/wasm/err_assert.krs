@@ -1,0 +1,2 @@
+assert(2 > 1)
+assert(1 > 2, "one is not more than two")   // error: R0003

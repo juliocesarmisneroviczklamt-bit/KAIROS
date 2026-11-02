@@ -102,10 +102,11 @@ struct H {
     lo: i64,
     hi: i64,
     f: i64,             // the file it comes from (an index of `files`; -1: none)
+    t: Ty,              // its type (final once the batch is checked; the canonical text omits it)
 }
 
 fn hn(kind: str, text: str, n: i64, m: i64, kids: List[H], lo: i64, hi: i64) -> H {
-    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi, f: -1 }
+    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi, f: -1, t: Ty.TUnit }
 }
 
 fn hk(kind: str, kids: List[H]) -> H {

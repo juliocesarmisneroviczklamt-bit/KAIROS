@@ -1,0 +1,944 @@
+// The WebAssembly back end of Kairós (M13), written in Kairós: the checked HIR of a program
+// becomes a WebAssembly module that runs under WASI (wasmtime, node, a browser...). This first
+// part compiles integers, booleans, functions and control flow with the interpreter's
+// semantics: the same output, and the same runtime errors with the same messages (checked
+// arithmetic: R0006 overflow, R0002 division by zero, R0007 negative exponent; R0003
+// assertions). What it does not compile yet stops with the code W0001.
+//
+// The module imports `fd_write` and `proc_exit` from WASI and exports `_start` and `memory`.
+// Memory: an iovec at 0, the byte count at 8, 32 bytes of scratch for numbers at 16, the
+// constant texts (the program's, and every runtime error message, rendered when compiling) from
+// 1024.
+import "wasm.krs"
+import "front.krs"
+
+struct WGen {
+    m: WMod,
+    ck: Checker,
+    srcs: List[str],                // the source of each file (for messages)
+    fidx: Map[i64, i64],            // Kairós function -> WebAssembly function
+    strs: Map[str, (i64, i64)],     // a constant text -> (address, byte length)
+    // the function being generated
+    code: List[i64],
+    ltypes: List[i64],              // the type of each local (the parameters first)
+    nparams: i64,
+    slot_local: List[i64],          // Kairós slot -> local (-1: no value)
+    depth: i64,                     // blocks, loops and ifs open
+    loops: List[(i64, i64)],        // the levels of a loop's exit and continue blocks
+    failed: bool,
+    msg: str,
+    efile: i64,
+    elo: i64,
+    ehi: i64,
+}
+
+// imports and the runtime's functions
+fn f_fd_write() -> i64 {
+    0
+}
+
+fn f_proc_exit() -> i64 {
+    1
+}
+
+fn f_write() -> i64 {
+    2
+}
+
+fn f_fail() -> i64 {
+    3
+}
+
+fn f_print_i64() -> i64 {
+    4
+}
+
+fn first_user_fn() -> i64 {
+    5
+}
+
+fn wg_fail(inout g: WGen, e: H, what: str) {
+    if g.failed { return }
+    g.failed = true
+    g.msg = "not in the WebAssembly back end yet: " + what
+    g.efile = e.f
+    g.elo = e.lo
+    g.ehi = e.hi
+}
+
+// ------------------------------------------------------------------ instructions
+
+fn op(inout g: WGen, b: i64) {
+    g.code.push(b)
+}
+
+fn op_u(inout g: WGen, b: i64, x: i64) {
+    g.code.push(b)
+    uleb(inout g.code, x)
+}
+
+fn lget(inout g: WGen, i: i64) {
+    op_u(inout g, 32, i)
+}
+
+fn lset(inout g: WGen, i: i64) {
+    op_u(inout g, 33, i)
+}
+
+fn i64c(inout g: WGen, v: i64) {
+    g.code.push(66)
+    sleb(inout g.code, v)
+}
+
+fn i32c(inout g: WGen, v: i64) {
+    g.code.push(65)
+    sleb(inout g.code, v)
+}
+
+fn call_f(inout g: WGen, f: i64) {
+    op_u(inout g, 16, f)
+}
+
+// block (2), loop (3) or if (4), with its type (64: none)
+fn open(inout g: WGen, kind: i64, bt: i64) {
+    g.code.push(kind)
+    g.code.push(if bt == 0 { 64 } else { bt })
+    g.depth += 1
+}
+
+fn else_(inout g: WGen) {
+    g.code.push(5)
+}
+
+fn close(inout g: WGen) {
+    g.code.push(11)
+    g.depth -= 1
+}
+
+// a branch to the block opened at `level`
+fn br_to(inout g: WGen, level: i64, cond: bool) {
+    op_u(inout g, if cond { 13 } else { 12 }, g.depth - level)
+}
+
+fn new_local(inout g: WGen, t: i64) -> i64 {
+    g.ltypes.push(t)
+    len(g.ltypes) - 1
+}
+
+// ------------------------------------------------------------------ texts and messages
+
+// A constant text in memory: (address, byte length).
+fn intern(inout g: WGen, s: str) -> (i64, i64) {
+    if contains(g.strs, s) { return g.strs[s] }
+    let b = utf8_bytes(s)
+    let at = g.m.data_at + len(g.m.data)
+    append(inout g.m.data, b)
+    g.strs[s] = (at, len(b))
+    (at, len(b))
+}
+
+fn emit_text(inout g: WGen, fd: i64, s: str) {
+    let t = intern(inout g, s)
+    i32c(inout g, fd)
+    i32c(inout g, t.0)
+    i32c(inout g, t.1)
+    call_f(inout g, f_write())
+}
+
+// A diagnostic as `kairos` prints it (src/diag.rs `render`).
+fn render_diag(code: str, msg: str, hint: str, src: str, file: str, lo0: i64, hi0: i64) -> str {
+    let cs = codes(src)
+    var boff = [0]
+    for k in 0..len(cs) { boff.push(boff[k] + lx_utf8_len(cs[k])) }
+    let nb = boff[len(cs)]
+    let lo = min(max(lo0, 0), nb)
+    let hi = min(max(hi0, lo), nb)
+    // the characters at those bytes
+    var ci = 0
+    while ci < len(cs) and boff[ci] < lo { ci += 1 }
+    var cj = ci
+    while cj < len(cs) and boff[cj] < hi { cj += 1 }
+    var start = ci
+    while start > 0 and cs[start - 1] != 10 { start -= 1 }
+    var stop = ci
+    while stop < len(cs) and cs[stop] != 10 { stop += 1 }
+    var line_no = 1
+    for k in 0..ci {
+        if cs[k] == 10 { line_no += 1 }
+    }
+    let col = ci - start + 1
+    var text_end = stop
+    while text_end > start and cs[text_end - 1] == 13 { text_end -= 1 }
+    var text = []
+    for k in start..text_end { text.push(cs[k]) }
+    let width = max(min(cj, stop) - ci, 1)
+    var pad = []
+    for k in 0..len(str(line_no)) { pad.push(" ") }
+    let p = join(pad, "")
+    var sp = []
+    for k in 0..col - 1 { sp.push(" ") }
+    var carets = []
+    for k in 0..width { carets.push("^") }
+    let nl = from_codes([10])
+    let kind = if starts_with(code, "R") { "runtime error" } else if starts_with(code, "W") { "warning" } else { "error" }
+    var s = kind + "[" + code + "]: " + msg + nl + p + "--> " + file + ":" + str(line_no) + ":" + str(col) + nl
+    s = s + p + " |" + nl + str(line_no) + " | " + from_codes(text) + nl + p + " | " + join(sp, "") + join(carets, "") + nl
+    if hint != "" { s = s + p + " = hint: " + hint + nl }
+    s
+}
+
+// Stops the program with a runtime error at `e`, as the interpreter would.
+fn fail_at_rt(inout g: WGen, e: H, code: str, msg: str, hint: str) {
+    let f = if e.f >= 0 and e.f < len(g.srcs) { e.f } else { 0 }
+    let text = render_diag(code, msg, hint, g.srcs[f], g.ck.files[f], e.lo, e.hi)
+    let t = intern(inout g, text)
+    i32c(inout g, t.0)
+    i32c(inout g, t.1)
+    call_f(inout g, f_fail())
+    op(inout g, 0)
+}
+
+fn overflow_at(inout g: WGen, e: H) {
+    fail_at_rt(inout g, e, "R0006", "integer overflow", "i64 arithmetic is checked; use f64 for very large values")
+}
+
+// ------------------------------------------------------------------ types
+
+// The WebAssembly type of a value of type `t`: 0 none (`()`, `!`), -1 not compiled yet.
+fn vt(t: Ty) -> i64 {
+    match t {
+        TInt => wt_i64(),
+        TBool => wt_i32(),
+        TUnit => 0,
+        TNever => 0,
+        _ => -1,
+    }
+}
+
+fn vt_of(inout g: WGen, e: H) -> i64 {
+    let v = vt(e.t)
+    if v < 0 { wg_fail(inout g, e, "values of type `" + show(g.ck, e.t) + "`") }
+    max(v, 0)
+}
+
+// ------------------------------------------------------------------ expressions
+
+fn gen_stmt(inout g: WGen, e: H) {
+    gen(inout g, e)
+    if vt(e.t) > 0 { op(inout g, 26) }
+}
+
+fn gen(inout g: WGen, e: H) {
+    if g.failed { return }
+    let k = e.kind
+    let t = vt_of(inout g, e)
+    if g.failed { return }
+    if k == "lit" {
+        if starts_with(e.text, "i64 ") {
+            i64c(inout g, parse_int(substr(e.text, 4, len(e.text))))
+        } else if e.text == "bool true" {
+            i32c(inout g, 1)
+        } else if e.text == "bool false" {
+            i32c(inout g, 0)
+        } else if e.text != "unit" {
+            wg_fail(inout g, e, "the literal `" + e.text + "`")
+        }
+        return
+    }
+    if k == "local" {
+        let l = g.slot_local[e.n]
+        if l >= 0 { lget(inout g, l) }
+        return
+    }
+    if k == "block" {
+        let n = len(e.kids)
+        for i in 0..n - 1 { gen_stmt(inout g, e.kids[i]) }
+        if e.kids[n - 1].kind != "-" { gen(inout g, e.kids[n - 1]) }
+        return
+    }
+    if k == "let" {
+        gen(inout g, e.kids[1])
+        let p = e.kids[0]
+        if p.kind == "pbind" {
+            let l = g.slot_local[p.n]
+            if l >= 0 { lset(inout g, l) }
+        } else if p.kind == "pwild" {
+            if vt(e.kids[1].t) > 0 { op(inout g, 26) }
+        } else {
+            wg_fail(inout g, p, "this pattern")
+        }
+        return
+    }
+    if k == "assign" or k == "opassign" {
+        let p = e.kids[0]
+        if p.kind != "plocal" { return wg_fail(inout g, p, "assigning a part of a value") }
+        let l = g.slot_local[p.n]
+        if k == "assign" {
+            gen(inout g, e.kids[1])
+            if l >= 0 { lset(inout g, l) }
+            return
+        }
+        // `x op= v`: the value first, then the variable
+        gen(inout g, e.kids[1])
+        let tv = new_local(inout g, wt_i64())
+        lset(inout g, tv)
+        lget(inout g, l)
+        lget(inout g, tv)
+        arith(inout g, e.text, e)
+        lset(inout g, l)
+        return
+    }
+    if k == "binary" { return binary_w(inout g, e) }
+    if k == "unary" {
+        gen(inout g, e.kids[0])
+        if e.text == "not" {
+            op(inout g, 69)
+            return
+        }
+        // -x: 0 - x, checked
+        let x = new_local(inout g, wt_i64())
+        lset(inout g, x)
+        lget(inout g, x)
+        i64c(inout g, imin())
+        op(inout g, 81)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        i64c(inout g, 0)
+        lget(inout g, x)
+        op(inout g, 125)
+        return
+    }
+    if k == "and" or k == "or" {
+        gen(inout g, e.kids[0])
+        open(inout g, 4, wt_i32())
+        if k == "and" {
+            gen(inout g, e.kids[1])
+            else_(inout g)
+            i32c(inout g, 0)
+        } else {
+            i32c(inout g, 1)
+            else_(inout g)
+            gen(inout g, e.kids[1])
+        }
+        close(inout g)
+        return
+    }
+    if k == "if" {
+        gen(inout g, e.kids[0])
+        open(inout g, 4, t)
+        gen(inout g, e.kids[1])
+        if e.kids[2].kind != "-" {
+            else_(inout g)
+            gen(inout g, e.kids[2])
+        }
+        close(inout g)
+        return
+    }
+    if k == "while" {
+        open(inout g, 2, 0)
+        let exit = g.depth
+        open(inout g, 3, 0)
+        let top = g.depth
+        gen(inout g, e.kids[0])
+        op(inout g, 69)
+        br_to(inout g, exit, true)
+        g.loops.push((exit, top))
+        gen_stmt(inout g, e.kids[1])
+        let _ = g.loops.pop()
+        br_to(inout g, top, false)
+        close(inout g)
+        close(inout g)
+        return
+    }
+    if k == "forrange" { return for_range_w(inout g, e) }
+    if k == "break" or k == "continue" {
+        let lp = g.loops[len(g.loops) - 1]
+        br_to(inout g, if k == "break" { lp.0 } else { lp.1 }, false)
+        return
+    }
+    if k == "return" {
+        if e.kids[0].kind != "-" { gen(inout g, e.kids[0]) }
+        op(inout g, 15)
+        return
+    }
+    if k == "match" { return match_w(inout g, e) }
+    if k == "call" {
+        for a in e.kids {
+            if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
+            gen(inout g, a.kids[0])
+        }
+        call_f(inout g, g.fidx[e.n])
+        return
+    }
+    if k == "builtin" { return builtin_w(inout g, e) }
+    wg_fail(inout g, e, "`" + k + "`")
+}
+
+// `x op y` on integers (both on the stack): the interpreter's checked arithmetic.
+fn arith(inout g: WGen, o: str, e: H) {
+    let y = new_local(inout g, wt_i64())
+    let x = new_local(inout g, wt_i64())
+    lset(inout g, y)
+    lset(inout g, x)
+    if o == "+" or o == "-" {
+        let r = new_local(inout g, wt_i64())
+        lget(inout g, x)
+        lget(inout g, y)
+        op(inout g, if o == "+" { 124 } else { 125 })
+        lset(inout g, r)
+        // + overflows when x and y have the sign the result lacks; - when x and y differ in
+        // sign and the result differs from x
+        if o == "+" {
+            lget(inout g, x)
+            lget(inout g, r)
+            op(inout g, 133)
+            lget(inout g, y)
+            lget(inout g, r)
+            op(inout g, 133)
+        } else {
+            lget(inout g, x)
+            lget(inout g, y)
+            op(inout g, 133)
+            lget(inout g, x)
+            lget(inout g, r)
+            op(inout g, 133)
+        }
+        op(inout g, 131)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        lget(inout g, r)
+        return
+    }
+    if o == "*" {
+        let r = new_local(inout g, wt_i64())
+        lget(inout g, x)
+        lget(inout g, y)
+        op(inout g, 126)
+        lset(inout g, r)
+        // overflow: x = -1 and y = MIN, or x not 0 nor -1 and r / x != y
+        lget(inout g, x)
+        i64c(inout g, -1)
+        op(inout g, 81)
+        open(inout g, 4, wt_i32())
+        lget(inout g, y)
+        i64c(inout g, imin())
+        op(inout g, 81)
+        else_(inout g)
+        lget(inout g, x)
+        op(inout g, 80)
+        open(inout g, 4, wt_i32())
+        i32c(inout g, 0)
+        else_(inout g)
+        lget(inout g, r)
+        lget(inout g, x)
+        op(inout g, 127)
+        lget(inout g, y)
+        op(inout g, 82)
+        close(inout g)
+        close(inout g)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        lget(inout g, r)
+        return
+    }
+    if o == "/" or o == "%" {
+        lget(inout g, y)
+        op(inout g, 80)
+        open(inout g, 4, 0)
+        fail_at_rt(inout g, e, "R0002", "division by zero", "")
+        close(inout g)
+        lget(inout g, x)
+        i64c(inout g, imin())
+        op(inout g, 81)
+        lget(inout g, y)
+        i64c(inout g, -1)
+        op(inout g, 81)
+        op(inout g, 113)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        lget(inout g, x)
+        lget(inout g, y)
+        op(inout g, if o == "/" { 127 } else { 129 })
+        return
+    }
+    if o == "^" { return pow_w(inout g, x, y, e) }
+    wg_fail(inout g, e, "the operator `" + o + "`")
+}
+
+// x ^ y on integers as Rust's `checked_pow` computes it: by squaring, every product checked.
+fn pow_w(inout g: WGen, x: i64, y: i64, e: H) {
+    lget(inout g, y)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    open(inout g, 4, 0)
+    fail_at_rt(inout g, e, "R0007", "negative exponent in integer power", "use floats: `float(x) ^ float(y)`")
+    close(inout g)
+    // an exponent beyond u32 does not fit
+    lget(inout g, y)
+    i64c(inout g, 4294967295)
+    op(inout g, 85)
+    open(inout g, 4, 0)
+    overflow_at(inout g, e)
+    close(inout g)
+    let acc = new_local(inout g, wt_i64())
+    let base = new_local(inout g, wt_i64())
+    let ex = new_local(inout g, wt_i64())
+    i64c(inout g, 1)
+    lset(inout g, acc)
+    lget(inout g, x)
+    lset(inout g, base)
+    lget(inout g, y)
+    lset(inout g, ex)
+    open(inout g, 2, 0)
+    let done = g.depth
+    lget(inout g, ex)
+    op(inout g, 80)
+    br_to(inout g, done, true)
+    open(inout g, 3, 0)
+    let top = g.depth
+    // if the exponent is odd: acc = acc * base; with exponent 1, done
+    lget(inout g, ex)
+    i64c(inout g, 1)
+    op(inout g, 131)
+    op(inout g, 80)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    lget(inout g, acc)
+    lget(inout g, base)
+    arith(inout g, "*", e)
+    lset(inout g, acc)
+    lget(inout g, ex)
+    i64c(inout g, 1)
+    op(inout g, 81)
+    br_to(inout g, done, true)
+    close(inout g)
+    lget(inout g, ex)
+    i64c(inout g, 1)
+    op(inout g, 136)
+    lset(inout g, ex)
+    lget(inout g, base)
+    lget(inout g, base)
+    arith(inout g, "*", e)
+    lset(inout g, base)
+    br_to(inout g, top, false)
+    close(inout g)
+    close(inout g)
+    lget(inout g, acc)
+}
+
+fn binary_w(inout g: WGen, e: H) {
+    let o = e.text
+    let a = e.kids[0]
+    let at = vt(a.t)
+    gen(inout g, a)
+    gen(inout g, e.kids[1])
+    if g.failed { return }
+    if at == wt_i64() {
+        if o == "==" { return op(inout g, 81) }
+        if o == "!=" { return op(inout g, 82) }
+        if o == "<" { return op(inout g, 83) }
+        if o == ">" { return op(inout g, 85) }
+        if o == "<=" { return op(inout g, 87) }
+        if o == ">=" { return op(inout g, 89) }
+        return arith(inout g, o, e)
+    }
+    if at == wt_i32() {
+        if o == "==" { return op(inout g, 70) }
+        if o == "!=" { return op(inout g, 71) }
+        return wg_fail(inout g, e, "ordering booleans")
+    }
+    if at == 0 and (o == "==" or o == "!=") {
+        i32c(inout g, if o == "==" { 1 } else { 0 })
+        return
+    }
+    wg_fail(inout g, e, "`" + o + "` on these values")
+}
+
+fn for_range_w(inout g: WGen, e: H) {
+    let i = new_local(inout g, wt_i64())
+    let hi = new_local(inout g, wt_i64())
+    gen(inout g, e.kids[0])
+    lset(inout g, i)
+    gen(inout g, e.kids[1])
+    lset(inout g, hi)
+    open(inout g, 2, 0)
+    let exit = g.depth
+    open(inout g, 3, 0)
+    let top = g.depth
+    lget(inout g, i)
+    lget(inout g, hi)
+    op(inout g, if e.m == 1 { 85 } else { 89 })
+    br_to(inout g, exit, true)
+    let l = g.slot_local[e.n]
+    if l >= 0 {
+        lget(inout g, i)
+        lset(inout g, l)
+    }
+    open(inout g, 2, 0)
+    let cont = g.depth
+    g.loops.push((exit, cont))
+    gen_stmt(inout g, e.kids[2])
+    let _ = g.loops.pop()
+    close(inout g)
+    // the next value; the loop stops instead of overflowing
+    lget(inout g, i)
+    i64c(inout g, imax())
+    op(inout g, 81)
+    br_to(inout g, exit, true)
+    lget(inout g, i)
+    i64c(inout g, 1)
+    op(inout g, 124)
+    lset(inout g, i)
+    br_to(inout g, top, false)
+    close(inout g)
+    close(inout g)
+}
+
+// A pattern's test on the scrutinee in local `s` (pushes an i32), or none when it always
+// matches.
+fn pat_test(inout g: WGen, p: H, s: i64, st: i64) -> bool {
+    if p.kind == "pwild" or p.kind == "pbind" { return false }
+    if p.kind == "plit" {
+        lget(inout g, s)
+        if starts_with(p.text, "i64 ") {
+            i64c(inout g, parse_int(substr(p.text, 4, len(p.text))))
+            op(inout g, 81)
+        } else if p.text == "bool false" {
+            op(inout g, 69)
+        } else if p.text != "bool true" {
+            wg_fail(inout g, p, "the pattern `" + p.text + "`")
+        }
+        return true
+    }
+    wg_fail(inout g, p, "this pattern")
+    false
+}
+
+fn match_w(inout g: WGen, e: H) {
+    let scrut = e.kids[0]
+    let st = vt_of(inout g, scrut)
+    gen(inout g, scrut)
+    if g.failed { return }
+    let s = new_local(inout g, if st > 0 { st } else { wt_i32() })
+    if st > 0 { lset(inout g, s) }
+    let bt = vt(e.t)
+    var opened = 0
+    var closed_all = false
+    for i in 1..len(e.kids) {
+        let arm = e.kids[i]
+        let p = arm.kids[0]
+        let tested = pat_test(inout g, p, s, st)
+        if g.failed { return }
+        if tested {
+            open(inout g, 4, bt)
+            opened += 1
+        }
+        if p.kind == "pbind" {
+            let l = g.slot_local[p.n]
+            if l >= 0 {
+                lget(inout g, s)
+                lset(inout g, l)
+            }
+        }
+        gen(inout g, arm.kids[1])
+        if not tested {
+            closed_all = true
+            break
+        }
+        else_(inout g)
+    }
+    if not closed_all { fail_at_rt(inout g, e, "R0008", "no match arm matched", "") }
+    for i in 0..opened { close(inout g) }
+}
+
+fn builtin_w(inout g: WGen, e: H) {
+    let b = e.text
+    let args = e.kids
+    for a in args {
+        if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
+    }
+    if b == "print" {
+        for i in 0..len(args) {
+            if i > 0 { emit_text(inout g, 1, " ") }
+            let x = args[i].kids[0]
+            let xt = vt(x.t)
+            if x.kind == "lit" and starts_with(x.text, "str ") {
+                emit_text(inout g, 1, unhex(substr(x.text, 4, len(x.text))))
+            } else if xt == wt_i64() {
+                gen(inout g, x)
+                call_f(inout g, f_print_i64())
+            } else if xt == wt_i32() {
+                gen(inout g, x)
+                open(inout g, 4, 0)
+                emit_text(inout g, 1, "true")
+                else_(inout g)
+                emit_text(inout g, 1, "false")
+                close(inout g)
+            } else if x.t == Ty.TUnit {
+                gen(inout g, x)
+                emit_text(inout g, 1, "()")
+            } else {
+                return wg_fail(inout g, x, "printing values of type `" + show(g.ck, x.t) + "`")
+            }
+        }
+        emit_text(inout g, 1, from_codes([10]))
+        return
+    }
+    if b == "assert" {
+        gen(inout g, args[0].kids[0])
+        var msg = "assertion failed"
+        if len(args) == 2 {
+            let m = args[1].kids[0]
+            if not (m.kind == "lit" and starts_with(m.text, "str ")) { return wg_fail(inout g, m, "an assertion message that is not a literal") }
+            msg = unhex(substr(m.text, 4, len(m.text)))
+        }
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        fail_at_rt(inout g, e, "R0003", msg, "")
+        close(inout g)
+        return
+    }
+    if b == "abs" and vt(args[0].kids[0].t) == wt_i64() {
+        gen(inout g, args[0].kids[0])
+        let x = new_local(inout g, wt_i64())
+        lset(inout g, x)
+        lget(inout g, x)
+        i64c(inout g, imin())
+        op(inout g, 81)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        i64c(inout g, 0)
+        lget(inout g, x)
+        op(inout g, 125)
+        lget(inout g, x)
+        lget(inout g, x)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        op(inout g, 27)
+        return
+    }
+    if (b == "max" or b == "min") and len(args) == 2 and vt(args[0].kids[0].t) == wt_i64() {
+        gen(inout g, args[0].kids[0])
+        gen(inout g, args[1].kids[0])
+        let y = new_local(inout g, wt_i64())
+        let x = new_local(inout g, wt_i64())
+        lset(inout g, y)
+        lset(inout g, x)
+        // max: y when x < y; min: x when x < y
+        if b == "max" {
+            lget(inout g, y)
+            lget(inout g, x)
+        } else {
+            lget(inout g, x)
+            lget(inout g, y)
+        }
+        lget(inout g, x)
+        lget(inout g, y)
+        op(inout g, 83)
+        op(inout g, 27)
+        return
+    }
+    if b == "int" and vt(args[0].kids[0].t) == wt_i64() { return gen(inout g, args[0].kids[0]) }
+    wg_fail(inout g, e, "`" + b + "`")
+}
+
+// ------------------------------------------------------------------ functions and the module
+
+// The functions the top-level statements reach, in the order they are found.
+fn reach(ck: Checker, h: H, inout seen: Map[i64, bool], inout order: List[i64]) {
+    if h.kind == "call" and not contains(seen, h.n) {
+        seen[h.n] = true
+        order.push(h.n)
+        reach(ck, ck.fn_hir[h.n], inout seen, inout order)
+    }
+    for k in h.kids { reach(ck, k, inout seen, inout order) }
+}
+
+// Sets up the locals of a frame: the slots' types, the first `np` of them parameters.
+fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
+    g.code = []
+    g.ltypes = []
+    g.slot_local = []
+    g.depth = 0
+    g.loops = []
+    var params: List[i64] = []
+    for i in 0..len(tys) {
+        let ti = fin_ty(g.ck, tys[i])
+        let v = vt(ti)
+        if v < 0 {
+            wg_fail(inout g, at, "variables of type `" + show(g.ck, ti) + "`")
+            return params
+        }
+        if v == 0 {
+            g.slot_local.push(-1)
+        } else {
+            g.slot_local.push(new_local(inout g, v))
+            if i < np { params.push(v) }
+        }
+    }
+    params
+}
+
+fn finish(inout g: WGen, np: i64, tidx: i64) {
+    op(inout g, 11)
+    var locals: List[i64] = []
+    for i in np..len(g.ltypes) { locals.push(g.ltypes[i]) }
+    g.m.funcs.push(WFunc { tidx: tidx, locals: locals, code: g.code })
+}
+
+fn gen_fn(inout g: WGen, id: i64) {
+    let sig = g.ck.sigs[id]
+    let body = g.ck.fn_hir[id]
+    for p in sig.params {
+        if p.2 { return wg_fail(inout g, body, "`inout` parameters") }
+    }
+    let np = len(sig.params)
+    let params = frame(inout g, g.ck.bodies[id], np, body)
+    if g.failed { return }
+    // parameters of no value take no local: the others keep their order
+    var wparams = 0
+    for i in 0..np {
+        if g.slot_local[i] >= 0 { wparams += 1 }
+    }
+    let r = vt(sig.ret)
+    if r < 0 { return wg_fail(inout g, body, "functions returning `" + show(g.ck, sig.ret) + "`") }
+    let tidx = wtype(inout g.m, params, if r > 0 { [r] } else { [] })
+    gen(inout g, body)
+    finish(inout g, wparams, tidx)
+}
+
+// The runtime's functions: write(fd, ptr, len), fail(ptr, len), print_i64(v).
+fn runtime_fns(inout g: WGen) {
+    let i32t = wt_i32()
+    let i64t = wt_i64()
+    // write: an iovec at 0, fd_write(fd, 0, 1, 8)
+    g.code = []
+    g.depth = 0
+    i32c(inout g, 0)
+    lget(inout g, 1)
+    op_u(inout g, 54, 2)
+    uleb(inout g.code, 0)
+    i32c(inout g, 4)
+    lget(inout g, 2)
+    op_u(inout g, 54, 2)
+    uleb(inout g.code, 0)
+    lget(inout g, 0)
+    i32c(inout g, 0)
+    i32c(inout g, 1)
+    i32c(inout g, 8)
+    call_f(inout g, f_fd_write())
+    op(inout g, 26)
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t, i32t, i32t], []), locals: [], code: g.code })
+    // fail: the message to stderr, exit code 1
+    g.code = []
+    i32c(inout g, 2)
+    lget(inout g, 0)
+    lget(inout g, 1)
+    call_f(inout g, f_write())
+    i32c(inout g, 1)
+    call_f(inout g, f_proc_exit())
+    op(inout g, 0)
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t, i32t], []), locals: [], code: g.code })
+    // print_i64: the decimal digits, from the end of the scratch (16..48) backwards
+    g.code = []
+    // locals: 1 position (i32), 2 magnitude (i64), 3 negative (i32)
+    lget(inout g, 0)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    lset(inout g, 3)
+    lget(inout g, 3)
+    open(inout g, 4, i64t)
+    i64c(inout g, 0)
+    lget(inout g, 0)
+    op(inout g, 125)
+    else_(inout g)
+    lget(inout g, 0)
+    close(inout g)
+    lset(inout g, 2)
+    i32c(inout g, 48)
+    lset(inout g, 1)
+    open(inout g, 3, 0)
+    lget(inout g, 1)
+    i32c(inout g, 1)
+    op(inout g, 107)
+    lset(inout g, 1)
+    lget(inout g, 1)
+    lget(inout g, 2)
+    i64c(inout g, 10)
+    op(inout g, 130)
+    i64c(inout g, 48)
+    op(inout g, 124)
+    op(inout g, 167)
+    op_u(inout g, 58, 0)
+    uleb(inout g.code, 0)
+    lget(inout g, 2)
+    i64c(inout g, 10)
+    op(inout g, 128)
+    op_u(inout g, 34, 2)
+    i64c(inout g, 0)
+    op(inout g, 82)
+    op_u(inout g, 13, 0)
+    close(inout g)
+    lget(inout g, 3)
+    open(inout g, 4, 0)
+    lget(inout g, 1)
+    i32c(inout g, 1)
+    op(inout g, 107)
+    op_u(inout g, 34, 1)
+    i32c(inout g, 45)
+    op_u(inout g, 58, 0)
+    uleb(inout g.code, 0)
+    close(inout g)
+    i32c(inout g, 1)
+    lget(inout g, 1)
+    i32c(inout g, 48)
+    lget(inout g, 1)
+    op(inout g, 107)
+    call_f(inout g, f_write())
+    op(inout g, 11)
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i64t], []), locals: [i32t, i64t, i32t], code: g.code })
+}
+
+// The module of a checked program: (it compiled, the module, the error: file lo hi message).
+fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
+    var g = WGen {
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], strs: [:], code: [], ltypes: [], nparams: 0, slot_local: [],
+        depth: 0, loops: [], failed: false, msg: "", efile: 0, elo: 0, ehi: 0,
+    }
+    let i32t = wt_i32()
+    g.m.imports.push(("wasi_snapshot_preview1", "fd_write", wtype(inout g.m, [i32t, i32t, i32t, i32t], [i32t])))
+    g.m.imports.push(("wasi_snapshot_preview1", "proc_exit", wtype(inout g.m, [i32t], [])))
+    runtime_fns(inout g)
+    var seen: Map[i64, bool] = [:]
+    var order: List[i64] = []
+    for t in ck.all_tops { reach(ck, t, inout seen, inout order) }
+    for i in 0..len(order) { g.fidx[order[i]] = first_user_fn() + i }
+    for id in order {
+        gen_fn(inout g, id)
+        if g.failed { break }
+    }
+    if not g.failed {
+        // _start: the top-level statements, the top-level variables as its locals
+        let none: List[H] = []
+        let params = frame(inout g, ck.main.slot_tys, 0, if len(ck.all_tops) > 0 { ck.all_tops[0] } else { hk("-", none) })
+        for t in ck.all_tops { gen_stmt(inout g, t) }
+        let empty: List[i64] = []
+        finish(inout g, 0, wtype(inout g.m, params, empty))
+        g.m.exports.push(("_start", 0, len(g.m.funcs) + 1))
+        g.m.exports.push(("memory", 2, 0))
+        g.m.pages = 1 + (1024 + len(g.m.data)) / 65536
+    }
+    if g.failed {
+        return (false, bytes(), str(g.efile) + " " + str(g.elo) + " " + str(g.ehi) + " " + g.msg)
+    }
+    (true, module_bytes(g.m), "")
+}

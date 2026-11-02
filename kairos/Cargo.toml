@@ -34,3 +34,8 @@ cranelift-native = "0.137"
 [[bin]]
 name = "kairos-bench"
 path = "src/bin/kairos_bench.rs"
+
+[dev-dependencies]
+# M13: the tests run the WebAssembly that the compiler written in Kairós generates (an interpreter
+# of WebAssembly in pure Rust, so they run on every target)
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "portable-dispatch"] }

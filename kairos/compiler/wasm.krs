@@ -1,0 +1,208 @@
+// WebAssembly, written by the compiler in Kairós (M13): the binary format of a module
+// (https://webassembly.github.io/spec/core/binary/). A function's code is a list of bytes, each
+// an i64 from 0 to 255; the module is assembled into `Bytes` at the end.
+
+// value types
+fn wt_i32() -> i64 {
+    127
+}
+
+fn wt_i64() -> i64 {
+    126
+}
+
+fn wt_f64() -> i64 {
+    124
+}
+
+// an unsigned LEB128 number
+fn uleb(inout c: List[i64], v0: i64) {
+    var v = v0
+    while true {
+        let b = bit_and(v, 127)
+        v = shr(v, 7)
+        if v == 0 {
+            c.push(b)
+            return
+        }
+        c.push(bit_or(b, 128))
+    }
+}
+
+// v >> 7, keeping the sign (`shr` shifts zeros in)
+fn asr7(v: i64) -> i64 {
+    if v >= 0 { v / 128 } else { -((-(v + 1)) / 128) - 1 }
+}
+
+// a signed LEB128 number
+fn sleb(inout c: List[i64], v0: i64) {
+    var v = v0
+    while true {
+        let b = bit_and(v, 127)
+        v = asr7(v)
+        let sign = bit_and(b, 64) != 0
+        if (v == 0 and not sign) or (v == -1 and sign) {
+            c.push(b)
+            return
+        }
+        c.push(bit_or(b, 128))
+    }
+}
+
+// the UTF-8 bytes of a text
+fn utf8_bytes(s: str) -> List[i64] {
+    var c: List[i64] = []
+    for cp in codes(s) {
+        if cp < 128 {
+            c.push(cp)
+        } else if cp < 2048 {
+            c.push(192 + shr(cp, 6))
+            c.push(128 + bit_and(cp, 63))
+        } else if cp < 65536 {
+            c.push(224 + shr(cp, 12))
+            c.push(128 + bit_and(shr(cp, 6), 63))
+            c.push(128 + bit_and(cp, 63))
+        } else {
+            c.push(240 + shr(cp, 18))
+            c.push(128 + bit_and(shr(cp, 12), 63))
+            c.push(128 + bit_and(shr(cp, 6), 63))
+            c.push(128 + bit_and(cp, 63))
+        }
+    }
+    c
+}
+
+fn append(inout c: List[i64], xs: List[i64]) {
+    for x in xs { c.push(x) }
+}
+
+// a name: its length, then its UTF-8 bytes
+fn wname(inout c: List[i64], s: str) {
+    let b = utf8_bytes(s)
+    uleb(inout c, len(b))
+    append(inout c, b)
+}
+
+// A function defined in the module.
+struct WFunc {
+    tidx: i64,              // its type
+    locals: List[i64],      // the types of its locals after the parameters
+    code: List[i64],        // its instructions, the final `end` included
+}
+
+struct WMod {
+    sigs: List[str],                    // each type as text, to share them
+    tparams: List[List[i64]],
+    tresults: List[List[i64]],
+    imports: List[(str, str, i64)],     // (module, name, type)
+    funcs: List[WFunc],
+    exports: List[(str, i64, i64)],     // (name, kind: 0 function, 2 memory; index)
+    data_at: i64,                       // where the data is placed in memory
+    data: List[i64],
+    pages: i64,                         // 64 KiB each
+}
+
+fn wmod_new(data_at: i64) -> WMod {
+    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], data_at: data_at, data: [], pages: 1 }
+}
+
+// The index of a function type, added when new.
+fn wtype(inout m: WMod, params: List[i64], results: List[i64]) -> i64 {
+    var key = []
+    for p in params { key.push(str(p)) }
+    key.push("->")
+    for r in results { key.push(str(r)) }
+    let k = join(key, " ")
+    for i in 0..len(m.sigs) {
+        if m.sigs[i] == k { return i }
+    }
+    m.sigs.push(k)
+    m.tparams.push(params)
+    m.tresults.push(results)
+    len(m.sigs) - 1
+}
+
+fn section(inout out: List[i64], id: i64, body: List[i64]) {
+    out.push(id)
+    uleb(inout out, len(body))
+    append(inout out, body)
+}
+
+fn vec_types(inout c: List[i64], ts: List[i64]) {
+    uleb(inout c, len(ts))
+    append(inout c, ts)
+}
+
+// The module as bytes.
+fn module_bytes(m: WMod) -> Bytes {
+    var out: List[i64] = [0, 97, 115, 109, 1, 0, 0, 0]
+    var types: List[i64] = []
+    uleb(inout types, len(m.sigs))
+    for i in 0..len(m.sigs) {
+        types.push(96)
+        vec_types(inout types, m.tparams[i])
+        vec_types(inout types, m.tresults[i])
+    }
+    section(inout out, 1, types)
+    if len(m.imports) > 0 {
+        var imps: List[i64] = []
+        uleb(inout imps, len(m.imports))
+        for im in m.imports {
+            wname(inout imps, im.0)
+            wname(inout imps, im.1)
+            imps.push(0)
+            uleb(inout imps, im.2)
+        }
+        section(inout out, 2, imps)
+    }
+    var fns: List[i64] = []
+    uleb(inout fns, len(m.funcs))
+    for f in m.funcs { uleb(inout fns, f.tidx) }
+    section(inout out, 3, fns)
+    var mem: List[i64] = [1, 0]
+    uleb(inout mem, m.pages)
+    section(inout out, 5, mem)
+    var exps: List[i64] = []
+    uleb(inout exps, len(m.exports))
+    for x in m.exports {
+        wname(inout exps, x.0)
+        exps.push(x.1)
+        uleb(inout exps, x.2)
+    }
+    section(inout out, 7, exps)
+    var codes_: List[i64] = []
+    uleb(inout codes_, len(m.funcs))
+    for f in m.funcs {
+        // the locals in runs of the same type
+        var groups: List[(i64, i64)] = []
+        for t in f.locals {
+            let g = len(groups)
+            if g > 0 and groups[g - 1].1 == t {
+                groups[g - 1] = (groups[g - 1].0 + 1, t)
+            } else {
+                groups.push((1, t))
+            }
+        }
+        var body: List[i64] = []
+        uleb(inout body, len(groups))
+        for g in groups {
+            uleb(inout body, g.0)
+            body.push(g.1)
+        }
+        append(inout body, f.code)
+        uleb(inout codes_, len(body))
+        append(inout codes_, body)
+    }
+    section(inout out, 10, codes_)
+    if len(m.data) > 0 {
+        var data: List[i64] = [1, 0, 65]
+        sleb(inout data, m.data_at)
+        data.push(11)
+        uleb(inout data, len(m.data))
+        append(inout data, m.data)
+        section(inout out, 11, data)
+    }
+    var b = bytes()
+    for x in out { b.put_u8(x) }
+    b
+}

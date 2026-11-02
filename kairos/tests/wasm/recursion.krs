@@ -1,0 +1,43 @@
+// Functions calling each other in the WebAssembly back end.
+fn is_even(n: i64) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+
+fn is_odd(n: i64) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+
+fn ack(m: i64, n: i64) -> i64 {
+    if m == 0 { return n + 1 }
+    if n == 0 { return ack(m - 1, 1) }
+    ack(m - 1, ack(m, n - 1))
+}
+
+fn is_prime(n: i64) -> bool {
+    if n < 2 { return false }
+    var d = 2
+    while d * d <= n {
+        if n % d == 0 { return false }
+        d += 1
+    }
+    true
+}
+
+print(is_even(10), is_odd(7), ack(2, 3)) // out: true true 9
+var count = 0
+for i in 0..1000 {
+    if is_prime(i) { count += 1 }
+}
+print("primes below 1000:", count)      // out: primes below 1000: 168
+
+fn collatz(start: i64) -> i64 {
+    var x = start
+    var steps = 0
+    while x != 1 {
+        x = if x % 2 == 0 { x / 2 } else { 3 * x + 1 }
+        steps += 1
+    }
+    steps
+}
+
+print(collatz(27))                      // out: 111

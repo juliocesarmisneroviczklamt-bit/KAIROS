@@ -1,0 +1,58 @@
+// kw: Kairós to WebAssembly, written in Kairós (M13). It checks programs with the front end in
+// Kairós (the prelude first) and writes each one as a WebAssembly module for WASI.
+//
+//   kairos run kairos/compiler/kw.krs <std folder> <output folder> program.krs [more.krs ...]
+//
+// Each `program.krs` becomes `<output folder>/program.wasm` (run it with any WASI runtime:
+// `wasmtime program.wasm`); a program with an error, or with what the back end does not
+// compile yet, is reported (`file: error CODE ...`) and gets no module.
+import "wasmgen.krs"
+
+fn base_name(path: str) -> str {
+    let p = replace(path, from_codes([92]), "/")
+    let parts = split(p, "/")
+    let last = parts[len(parts) - 1]
+    if ends_with(last, ".krs") { substr(last, 0, len(last) - 4) } else { last }
+}
+
+// The source of each file the checker read (the standard library from its folder).
+fn sources(ck: Checker, std_dir: str) -> List[str] {
+    var out: List[str] = []
+    for f in ck.files {
+        if f == "<prelude>" {
+            out.push(read_text(std_dir + "/prelude.krs"))
+        } else if starts_with(f, "<std/") {
+            out.push(read_text(std_dir + "/" + substr(f, 5, len(f) - 6)))
+        } else {
+            out.push(read_text(f))
+        }
+    }
+    out
+}
+
+let std_dir = args()[0]
+let out_dir = args()[1]
+var base = new_checker(std_dir)
+check_file(inout base, "<prelude>", read_text(std_dir + "/prelude.krs"))
+assert(not base.failed, "the prelude does not check: " + base.code + " " + base.msg)
+make_dir(out_dir)
+var failed = 0
+for k in 2..len(args()) {
+    let path = args()[k]
+    var ck = base
+    ck.imported[norm_path(path)] = true
+    check_file(inout ck, path, read_text(path))
+    if ck.failed {
+        print(path + ": error " + ck.code + " " + str(ck.elo) + " " + str(ck.ehi) + " " + ck.msg)
+        failed += 1
+        continue
+    }
+    let w = wasm_module(ck, sources(ck, std_dir))
+    if w.0 {
+        write_bytes(out_dir + "/" + base_name(path) + ".wasm", w.1)
+    } else {
+        print(path + ": error W0001 " + w.2)
+        failed += 1
+    }
+}
+if failed > 0 { print(str(failed) + " program(s) not compiled") }

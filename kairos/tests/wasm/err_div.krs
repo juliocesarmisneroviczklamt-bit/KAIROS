@@ -1,0 +1,5 @@
+fn half(a: i64, b: i64) -> i64 {
+    a / b
+}
+print(half(8, 2))   // out: 4
+print(half(1, 0))   // error: R0002

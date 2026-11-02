@@ -21,7 +21,29 @@ fn fin_lit(ck: Checker, digits: str, tv: i64) -> str {
     }
 }
 
-// The literals take their final types, and every node the file it comes from.
+// A type once inference is done: an integer literal's type left open is `i64`.
+fn fin_ty(ck: Checker, t0: Ty) -> Ty {
+    let t = resolve(ck, t0)
+    match t {
+        TVar(v) => if ck.kinds[v] == 1 { Ty.TInt } else { t },
+        TList(x) => Ty.TList(fin_ty(ck, x)),
+        TMap(k, x) => Ty.TMap(fin_ty(ck, k), fin_ty(ck, x)),
+        TTuple(xs) => {
+            var ys: List[Ty] = []
+            for x in xs { ys.push(fin_ty(ck, x)) }
+            Ty.TTuple(ys)
+        },
+        TFn(ps, r) => {
+            var ys: List[Ty] = []
+            for x in ps { ys.push(fin_ty(ck, x)) }
+            Ty.TFn(ys, fin_ty(ck, r))
+        },
+        TTensor(a, x) => Ty.TTensor(a, fin_ty(ck, x)),
+        _ => t,
+    }
+}
+
+// The literals and the nodes take their final types, and every node the file it comes from.
 fn fin(ck: Checker, h: H, file: i64) -> H {
     var out = h
     if h.kind == "intlit" {
@@ -34,6 +56,7 @@ fn fin(ck: Checker, h: H, file: i64) -> H {
         out.kids = kids
     }
     out.f = file
+    out.t = fin_ty(ck, h.t)
     out
 }
 

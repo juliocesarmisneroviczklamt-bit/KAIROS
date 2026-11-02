@@ -16,7 +16,9 @@ struct Ex {
 }
 
 fn typed(h: H, t: Ty) -> Ex {
-    Ex { h: h, t: t }
+    var ht = h
+    ht.t = t
+    Ex { h: ht, t: t }
 }
 
 // what a failed check returns (the error is in the checker)

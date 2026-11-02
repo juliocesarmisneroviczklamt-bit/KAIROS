@@ -1,0 +1,28 @@
+// Integers in the WebAssembly back end: the interpreter's arithmetic, digit for digit.
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn gcd(a: i64, b: i64) -> i64 {
+    var x = a
+    var y = b
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    x
+}
+
+print(fib(20))                          // out: 6765
+print(gcd(1071, 462), gcd(17, 5))       // out: 21 1
+print(-7 / 2, -7 % 2, 7 / -2, 7 % -2)   // out: -3 -1 -3 1
+print(2 ^ 10, 3 ^ 0, (-2) ^ 3, 1 ^ 99)  // out: 1024 1 -8 1
+print(abs(-5), max(3, 9), min(3, 9))    // out: 5 9 3
+print(9223372036854775807, -9223372036854775807 - 1, 0, -1)  // out: 9223372036854775807 -9223372036854775808 0 -1
+var acc = 1
+acc *= 7
+acc -= 2
+acc += 10
+acc /= 3
+print(acc, int(acc))                    // out: 5 5
