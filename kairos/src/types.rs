@@ -1850,6 +1850,8 @@ impl Checker {
             Builtin::MakeDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Unit),
             Builtin::Args => (self.fixed_args(&all, &[], sp, name)?, Ty::List(Box::new(Ty::Str))),
             Builtin::Today => (self.fixed_args(&all, &[], sp, name)?, Ty::Int),
+            Builtin::HttpGet => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Str),
+            Builtin::Download => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Int),
             Builtin::Keys | Builtin::Values | Builtin::Items | Builtin::Get | Builtin::Remove => {
                 arity(if b == Builtin::Get { 3 } else if b == Builtin::Remove { 2 } else { 1 })?;
                 let (hm, tm) = if b == Builtin::Remove {

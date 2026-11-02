@@ -80,6 +80,10 @@ pub enum Builtin {
     Args,
     /// `today()`: today's date (UTC) as YYYYMMDD
     Today,
+    /// `http_get(url)`: the body of a GET (text: UTF-8, or Latin-1 when it is not UTF-8)
+    HttpGet,
+    /// `download(url, path)`: saves the body of a GET in a file; the number of bytes
+    Download,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -185,6 +189,8 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("env", Builtin::Env),
     ("args", Builtin::Args),
     ("today", Builtin::Today),
+    ("http_get", Builtin::HttpGet),
+    ("download", Builtin::Download),
     ("keys", Builtin::Keys),
     ("values", Builtin::Values),
     ("items", Builtin::Items),

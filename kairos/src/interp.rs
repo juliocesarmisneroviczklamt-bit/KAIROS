@@ -68,6 +68,26 @@ fn decode_text(bytes: Vec<u8>) -> String {
     }
 }
 
+/// HTTP(S) through the system's `curl` (Windows 10+, macOS and Linux have it): the system's TLS,
+/// without linking a C library into Kairós. Retries what fails for the network; 4xx fails at once.
+fn curl(url: &str, out: Option<&str>) -> Result<Vec<u8>, String> {
+    if cfg!(target_family = "wasm") {
+        return Err("there is no network under WebAssembly".into());
+    }
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-sS", "-f", "-L", "--retry", "4", "--retry-delay", "2", "--connect-timeout", "30", "--max-time", "900"]);
+    cmd.args(["-A", concat!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) kairos/", env!("CARGO_PKG_VERSION"))]);
+    if let Some(p) = out {
+        cmd.args(["-o", p]);
+    }
+    cmd.arg(url);
+    match cmd.output() {
+        Ok(o) if o.status.success() => Ok(o.stdout),
+        Ok(o) => Err(format!("{url}: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("cannot run curl ({e}): downloads need curl installed")),
+    }
+}
+
 fn as_bool(v: Value) -> bool {
     matches!(v, Value::Bool(true))
 }
@@ -756,6 +776,23 @@ impl<'a> Interp<'a> {
             Builtin::Env => Ok(Value::Str(std::env::var(str_of(&v[0])).unwrap_or_default().into())),
             Builtin::Args => Ok(str_list(self.host.args())),
             Builtin::Today => Ok(Value::Int(i64::from(self.host.today_date()))),
+            Builtin::HttpGet => match curl(str_of(&v[0]), None) {
+                Ok(bytes) => Ok(Value::Str(decode_text(bytes).into())),
+                Err(e) => err("R0013", sp, e),
+            },
+            Builtin::Download => {
+                let (url, dest) = (str_of(&v[0]), str_of(&v[1]));
+                // into `dest.part`, renamed when complete: an interrupted download leaves no file
+                let part = format!("{dest}.part");
+                let res = curl(url, Some(&part)).and_then(|_| std::fs::rename(&part, dest).map_err(|e| format!("{dest}: {e}")));
+                match res.and_then(|_| std::fs::metadata(dest).map_err(|e| e.to_string())) {
+                    Ok(m) => Ok(Value::Int(m.len() as i64)),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&part);
+                        err("R0013", sp, e)
+                    }
+                }
+            }
             Builtin::Substr => {
                 let Value::Str(s) = &v[0] else { unreachable!("substr of a non-string") };
                 let a = as_int(v[1].clone()).max(0) as usize;

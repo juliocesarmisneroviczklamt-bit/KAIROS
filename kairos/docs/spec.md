@@ -180,10 +180,11 @@ Para coletar dados e escrever relatórios em Kairós, sem passar por outra lingu
 | `read_text(p)`, `write_text(p, s)`, `append_text(p, s)` | arquivo inteiro: UTF-8, ou Latin-1 quando não é UTF-8 (os arquivos da B3) |
 | `file_exists(p)`, `list_dir(p)`, `make_dir(p)` | pastas (`list_dir` vem em ordem alfabética) |
 | `args()`, `env(nome)`, `today()` | argumentos (`kairos run prog.krs a b`), variáveis de ambiente, a data de hoje (UTC, AAAAMMDD) |
+| `http_get(url)`, `download(url, p)` | o corpo de um GET como texto; ou salvo num arquivo (devolve os bytes). Usa o `curl` do sistema (Windows 10+, macOS, Linux), então HTTPS fica com o TLS do sistema e a Kairós continua Rust puro. Falha é R0013 |
 
 - **Escapes de texto:** `\n`, `\t`, `\r`, `\0`, `\"`, `\\` e `\u{e9}`, este com 1 a 6 dígitos hexadecimais.
 - **Erros de arquivo** (não existe, sem permissão…) param o programa com R0011 e a mensagem do sistema.
-- **Tempo:** o que vem de um arquivo não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo não decide pesos (E0301), a menos que se declare quando cada linha fica conhecida, com `observed`. `args()`, `env()` e `today()` são conhecidos antes de tudo.
+- **Tempo:** o que vem de um arquivo ou da rede não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo não decide pesos (E0301), a menos que se declare quando cada linha fica conhecida, com `observed`. `args()`, `env()` e `today()` são conhecidos antes de tudo.
 - **A cerca do holdout** (§7) vale para o módulo `b3`. Ler os arquivos de mercado diretamente fica fora dela, mas aparece no código.
 
 ### 4.7 Mapas (M9)
