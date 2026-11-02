@@ -204,3 +204,107 @@ fn data_eligible(d: LabData) -> Tensor[month, asset; bool] {
     }
     out
 }
+
+// ------------------------------------------------------------------ the CDI and NEFIN
+
+// The lines of a text file without their \r (as Rust's lines()).
+fn text_lines(s: str) -> List[str] {
+    var out: List[str] = []
+    for l in split(s, from_codes([10])) {
+        out.push(if ends_with(l, from_codes([13])) { substr(l, 0, len(l) - 1) } else { l })
+    }
+    if len(out) > 0 and out[len(out) - 1] == "" { let _ = out.pop() }
+    out
+}
+
+// A natural number written in decimal digits (and nothing else), or -1.
+fn digits_of(s: str) -> i64 {
+    if s == "" or len(s) > 18 { return -1 }
+    var v = 0
+    for c in codes(s) {
+        if c < 48 or c > 57 { return -1 }
+        v = v * 10 + c - 48
+    }
+    v
+}
+
+// raw/bcb/cdi.csv: the CDI of each day (a fraction; the file has percent), by date in order
+fn load_cdi(dir: str) -> Map[i64, f64] {
+    var m: Map[i64, f64] = [:]
+    let ls = text_lines(read_text(dir + "/raw/bcb/cdi.csv"))
+    for i in 1..len(ls) {
+        let p = split(ls[i], ",")
+        if len(p) < 2 { continue }
+        let d = digits_of(p[0])
+        let v = parse_float(p[1])
+        if d >= 0 and not is_nan(v) and trim(p[1]) == p[1] { m[d] = v / 100.0 }
+    }
+    m
+}
+
+// The CDI between each session and the one before (the first: its own day), compounded in the
+// order of the days, and of each month (Data::build).
+fn cdi_months(dates: List[i64], cal: Cal, m: Map[i64, f64]) -> List[f64] {
+    var ks = keys(m)
+    ks.sort()
+    var by_day: List[f64] = []
+    var j = 0
+    for i in 0..len(dates) {
+        let cur = dates[i]
+        var g = 1.0
+        if i == 0 {
+            if contains(m, cur) { g = 1.0 + m[cur] }
+            while j < len(ks) and ks[j] <= cur { j += 1 }
+        } else {
+            while j < len(ks) and ks[j] <= dates[i - 1] { j += 1 }
+            while j < len(ks) and ks[j] <= cur {
+                g = g * (1.0 + m[ks[j]])
+                j += 1
+            }
+        }
+        by_day.push(g - 1.0)
+    }
+    var out: List[f64] = []
+    for k in 0..len(cal.months) {
+        var p = 1.0
+        for i in cal.mfrom[k]..cal.mto[k] { p = p * (1.0 + by_day[i]) }
+        out.push(p - 1.0)
+    }
+    out
+}
+
+// A NEFIN CSV of monthly factors: AAAAMM -> [Rm_minus_Rf, SMB, HML, WML, IML, Risk_Free]
+fn load_factors(path: str) -> Map[i64, List[f64]] {
+    let ls = text_lines(read_text(path))
+    let q = from_codes([34])
+    var h: List[str] = []
+    for c in split(ls[0], ",") { h.push(replace(c, q, "")) }
+    let names = ["year", "month", "Rm_minus_Rf", "SMB", "HML", "WML", "IML", "Risk_Free"]
+    var col: List[i64] = []
+    for nm in names {
+        var k = -1
+        for i in 0..len(h) {
+            if h[i] == nm and k < 0 { k = i }
+        }
+        col.push(k)
+    }
+    var out: Map[i64, List[f64]] = [:]
+    for i in 1..len(ls) {
+        let r = split(ls[i], ",")
+        if col[0] >= len(r) or col[1] >= len(r) { continue }
+        let y = digits_of(trim(r[col[0]]))
+        let mo = digits_of(trim(r[col[1]]))
+        if y < 0 or mo < 0 { continue }
+        var f: List[f64] = []
+        for k in 2..8 { f.push(if col[k] < len(r) { parse_float(trim(r[col[k]])) } else { nan }) }
+        out[y * 100 + mo] = f
+    }
+    out
+}
+
+// b3.nefin(factor, vw:): Tensor[month; f64], NaN in the months NEFIN does not have
+fn data_nefin(cal: Cal, f: Map[i64, List[f64]], k: i64) -> Tensor[month; f64] {
+    var v: List[f64] = []
+    for m in cal.months { v.push(if contains(f, m) { f[m][k] } else { nan }) }
+    tensor(v, month)
+}

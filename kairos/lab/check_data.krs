@@ -15,3 +15,15 @@ print("monthly returns:", if diff == 0.0 and gaps == 0.0 { "the same" } else { "
 let ee = b3.eligible()
 let me = data_eligible(d)[month: 0 .. n]
 print("eligible:", if count(ee != me) == 0.0 { "the same" } else { "DIFFERENT " + str(count(ee != me)) }, count(ee))
+let cdi = tensor(cdi_months(d.dates, d.cal, load_cdi(args()[0])), month)[month: 0 .. n]
+print("cdi:", if sum(abs(cdi - b3.cdi())) == 0.0 { "the same" } else { "DIFFERENT" })
+let vw = load_factors(args()[0] + "/raw/nefin/nefin_factors_monthly.csv")
+let ew = load_factors(args()[0] + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv")
+fn same_t(a: Tensor[month; f64], b: Tensor[month; f64]) -> bool {
+    sum(abs(fill_nan(a, 0.0) - fill_nan(b, 0.0))) == 0.0 and count(is_nan(a) != is_nan(b)) == 0.0
+}
+fn mine(f: Map[i64, List[f64]], k: i64, cal: Cal, n: i64) -> Tensor[month; f64] {
+    data_nefin(cal, f, k)[month: 0 .. n]
+}
+let nef_ok = same_t(mine(vw, 0, d.cal, n), b3.nefin("rm_rf", vw: true)) and same_t(mine(vw, 1, d.cal, n), b3.nefin("smb", vw: true)) and same_t(mine(vw, 2, d.cal, n), b3.nefin("hml", vw: true)) and same_t(mine(vw, 3, d.cal, n), b3.nefin("wml", vw: true)) and same_t(mine(vw, 4, d.cal, n), b3.nefin("iml", vw: true)) and same_t(mine(vw, 5, d.cal, n), b3.nefin("rf", vw: true)) and same_t(mine(ew, 0, d.cal, n), b3.nefin("rm_rf")) and same_t(mine(ew, 1, d.cal, n), b3.nefin("smb")) and same_t(mine(ew, 2, d.cal, n), b3.nefin("hml")) and same_t(mine(ew, 3, d.cal, n), b3.nefin("wml")) and same_t(mine(ew, 4, d.cal, n), b3.nefin("iml")) and same_t(mine(ew, 5, d.cal, n), b3.nefin("rf"))
+print("nefin:", if nef_ok { "the same" } else { "DIFFERENT" })

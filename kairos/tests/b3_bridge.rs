@@ -94,8 +94,9 @@ fn run() {
     }
 }
 
-/// The lab's data written in Kairós (lab/data.krs: the panel, its calendar, the monthly returns
-/// and the NEFIN liquid universe) gives what the runtime's `b3.*` (Rust) gives, value for value.
+/// The lab's data written in Kairós (lab/data.krs: the panel, its calendar, the monthly returns,
+/// the NEFIN liquid universe, the CDI and NEFIN's factors) gives what the runtime's `b3.*` (Rust)
+/// gives, value for value.
 /// Skipped when the data folder is not there.
 #[test]
 fn the_lab_data_in_kairos_is_the_rust_one() {
@@ -127,7 +128,7 @@ fn run_data_check() {
         panic!("{}", s.render(&e));
     }
     let text = String::from_utf8(buf.borrow().clone()).expect("utf-8");
-    for what in ["monthly returns: the same", "eligible: the same"] {
+    for what in ["monthly returns: the same", "eligible: the same", "cdi: the same", "nefin: the same"] {
         assert!(text.contains(what), "`{what}` missing from the output:\n{text}");
     }
 }
