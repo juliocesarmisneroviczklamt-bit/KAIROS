@@ -142,6 +142,6 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 
 | marco | entrega |
 |---|---|
-| M13 | o back-end em Kairós: o compilador escrito em Kairós gera WebAssembly em vez de depender do interpretador Rust (em andamento: inteiros, floats, booleanos, textos, funções e controle de fluxo, em [`compiler/wasmgen.krs`](compiler/wasmgen.krs), com o runtime escrito em Kairós em [`compiler/rt.krs`](compiler/rt.krs): a escrita de floats igual à do Rust, pelo algoritmo Ryu, e o `%` exato de floats) |
+| M13 | o back-end em Kairós: o compilador escrito em Kairós gera WebAssembly em vez de depender do interpretador Rust (em andamento: inteiros, floats, booleanos, textos, funções e controle de fluxo, em [`compiler/wasmgen.krs`](compiler/wasmgen.krs), com o runtime escrito em Kairós em [`compiler/rt.krs`](compiler/rt.krs): a escrita de floats igual à do Rust, pelo algoritmo Ryu, o `%` exato de floats e a `libm` em Kairós em [`compiler/rt_math.krs`](compiler/rt_math.krs): `exp`, `ln`, `^`, `tanh`, `sigmoid` e `softplus` com os mesmos bits do interpretador) |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

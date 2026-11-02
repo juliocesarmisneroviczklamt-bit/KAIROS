@@ -1,0 +1,31 @@
+// The mathematics of floats in WebAssembly: exp, ln, ^, tanh, sigmoid, softplus and relu give the
+// interpreter's bits (libm, written in Kairós in the runtime).
+fn norm_pdf(x: f64) -> f64 {
+    exp(-0.5 * x * x) / sqrt(2.0 * 3.141592653589793)
+}
+
+fn grown(rate: f64, years: f64) -> f64 {
+    (1.0 + rate) ^ years
+}
+
+print(exp(1.0), exp(-1.0), exp(0.0), exp(710.0), exp(-746.0))
+print(ln(10.0), ln(1.0), ln(0.0), ln(-1.0), ln(5e-324))
+print(2.0 ^ 0.5, 10.0 ^ -3.0, (-8.0) ^ 3.0, (-8.0) ^ (1.0 / 3.0), 0.0 ^ -1.0, nan ^ 0.0)
+print(grown(0.1, 30.0), grown(0.0001, 10000.0), norm_pdf(1.96))
+print(tanh(0.5), tanh(-20.5), sigmoid(0.0), sigmoid(-3.0), softplus(1.0), softplus(40.0))
+print(relu(-0.0), relu(nan), relu(-1.5), relu(2.5))
+var acc = 0.0
+for i in 1..200 {
+    let x = float(i) / 17.0 - 5.0
+    acc += exp(x) - ln(abs(x) + 1.0) + x ^ 2.0 + tanh(x) * sigmoid(x) + softplus(x)
+}
+print(acc)
+
+// the output, line by line:
+// out: 2.7182818284590455 0.36787944117144233 1.0 inf 0.0
+// out: 2.302585092994046 0.0 -inf NaN -744.4400719213812
+// out: 1.4142135623730951 0.001 -512.0 NaN inf 1.0
+// out: 17.44940226888645 2.7181459268249255 0.058440944333451476
+// out: 0.46211715726000974 -1.0 0.5 0.04742587317756679 1.313261687518223 40.0
+// out: 0.0 0.0 0.0 2.5
+// out: 16982.092398694564

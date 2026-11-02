@@ -703,7 +703,7 @@ Cada execução gera um **recibo** com:
 
 Reduções são determinísticas por padrão; o modo `fast` é explícito e fica marcado no recibo.
 
-**Os mesmos bits em qualquer sistema (desde a 0.2.1).** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a biblioteca do sistema operacional, que muda de um sistema para outro no último bit. O resto já é exato pelo IEEE 754: `+ − × ÷`, `sqrt`, `%`. `floor`, `ceil` e `round` também usam a `libm` desde a 0.13: o `round` da biblioteca do MinGW, no Windows, dava 1.0 para 0.49999999999999994, e não 0.0. A formatação de números é a mesma em todo lugar.
+**Os mesmos bits em qualquer sistema (desde a 0.2.1).** `exp`, `ln` e `^` usam uma implementação matemática em Rust puro (`libm`), e não a biblioteca do sistema operacional, que muda de um sistema para outro no último bit. O resto já é exato pelo IEEE 754: `+ − × ÷`, `sqrt`, `%`. `floor`, `ceil` e `round` também usam a `libm` desde a 0.13: o `round` da biblioteca do MinGW, no Windows, dava 1.0 para 0.49999999999999994, e não 0.0. `relu(x)` é `x` quando `x > 0` e `0.0` nos outros casos, inclusive NaN e −0.0: o `max` do Rust deixa o sinal de max(−0.0, 0.0) por conta da plataforma. A formatação de números é a mesma em todo lugar.
 
 ## 12. Esboço do primeiro modelo inédito (M6)
 

@@ -135,7 +135,8 @@ impl Interp<'_> {
             MapFn::Abs => x.abs(),
             MapFn::Tanh => libm::tanh(x),
             MapFn::Sigmoid => sigmoid(x),
-            MapFn::Relu => x.max(0.0),
+            // not `x.max(0.0)`: the sign of max(-0.0, 0.0) is up to the platform
+            MapFn::Relu => if x > 0.0 { x } else { 0.0 },
             MapFn::Softplus => softplus(x),
             MapFn::FillNan => x,
         };

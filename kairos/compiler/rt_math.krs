@@ -1,0 +1,461 @@
+// The mathematics of floats for the runtime (M13), written in Kairós: `exp`, `ln`, `^`, `tanh`,
+// `sigmoid` and `softplus` as the interpreter computes them (the `libm` crate 0.2.16, a port of
+// FreeBSD's msun: e_exp.c, e_log.c, e_pow.c, s_expm1.c, s_log1p.c, s_tanh.c), operation by
+// operation, so the results are the same bits. These functions use only the language (`to_bits`,
+// `from_bits`, the bit operations), so they run in the interpreter too, where they are checked
+// against `libm` (kairos/tests/rt).
+//
+// A float's high word (32 bits) is an i64 here: `rt_hi` gives it signed, as C's int32_t.
+
+fn rt_hi(x: f64) -> i64 {
+    let h = shr(to_bits(x), 32)
+    if h >= 2147483648 { h - 4294967296 } else { h }
+}
+
+fn rt_lo(x: f64) -> i64 {
+    bit_and(to_bits(x), 4294967295)
+}
+
+// x with its low word 0
+fn rt_clear_lo(x: f64) -> f64 {
+    from_bits(bit_and(to_bits(x), -4294967296))
+}
+
+// x with the high word `h` (its 32 bits)
+fn rt_with_hi(x: f64, h: i64) -> f64 {
+    from_bits(bit_or(shl(bit_and(h, 4294967295), 32), bit_and(to_bits(x), 4294967295)))
+}
+
+// 2^e for a normal exponent e (-1022..1023)
+fn rt_pow2(e: i64) -> f64 {
+    from_bits(shl(1023 + e, 52))
+}
+
+// x * 2^n, in at most three steps so no step overflows or underflows too soon
+fn rt_scalbn(x0: f64, n0: i64) -> f64 {
+    var x = x0
+    var n = n0
+    if n > 1023 {
+        x = x * rt_pow2(1023)
+        n -= 1023
+        if n > 1023 {
+            x = x * rt_pow2(1023)
+            n -= 1023
+            if n > 1023 { n = 1023 }
+        }
+    } else if n < -1022 {
+        // 2^-1022 * 2^53
+        x = x * rt_pow2(-969)
+        n += 969
+        if n < -1022 {
+            x = x * rt_pow2(-969)
+            n += 969
+            if n < -1022 { n = -1022 }
+        }
+    }
+    x * rt_pow2(n)
+}
+
+// e^x: x = k ln2 + r with |r| <= ln2 / 2, then e^r by a rational approximation
+fn rt_exp(x0: f64) -> f64 {
+    var x = x0
+    let ln2hi = 6.93147180369123816490e-01
+    let ln2lo = 1.90821492927058770002e-10
+    var hx = bit_and(shr(to_bits(x), 32), 4294967295)
+    let sign = shr(hx, 31)
+    hx = bit_and(hx, 2147483647)
+    if hx >= 1082535723 {
+        if x != x { return x }
+        if x > 709.782712893383973096 { return x * rt_pow2(1023) }
+        if x < -708.39641853226410622 {
+            if x < -745.13321910194110842 { return 0.0 }
+        }
+    }
+    var hi = 0.0
+    var lo = 0.0
+    var k = 0
+    if hx > 1071001154 {
+        if hx >= 1072734898 {
+            k = int(1.44269504088896338700e+00 * x + (if sign == 1 { -0.5 } else { 0.5 }))
+        } else {
+            k = 1 - sign - sign
+        }
+        hi = x - float(k) * ln2hi
+        lo = float(k) * ln2lo
+        x = hi - lo
+    } else if hx > 1043333120 {
+        k = 0
+        hi = x
+        lo = 0.0
+    } else {
+        return 1.0 + x
+    }
+    let xx = x * x
+    let c = x - xx * (1.66666666666666019037e-01 + xx * (-2.77777777770155933842e-03 + xx * (6.61375632143793436117e-05 + xx * (-1.65339022054652515390e-06 + xx * 4.13813679705723846039e-08))))
+    let y = 1.0 + (x * c / (2.0 - c) - lo + hi)
+    if k == 0 { y } else { rt_scalbn(y, k) }
+}
+
+// ln x: x = 2^k (1 + f) with 1 + f in [sqrt(2)/2, sqrt(2)], then ln(1 + f) by s = f / (2 + f)
+fn rt_log(x0: f64) -> f64 {
+    var x = x0
+    var ui = to_bits(x)
+    var hx = bit_and(shr(ui, 32), 4294967295)
+    var k = 0
+    if hx < 1048576 or shr(hx, 31) != 0 {
+        if shl(ui, 1) == 0 { return -1.0 / (x * x) }
+        if shr(hx, 31) != 0 { return (x - x) / 0.0 }
+        // subnormal: scaled up by 2^54
+        k -= 54
+        x = x * rt_pow2(54)
+        ui = to_bits(x)
+        hx = bit_and(shr(ui, 32), 4294967295)
+    } else if hx >= 2146435072 {
+        return x
+    } else if hx == 1072693248 and shl(ui, 32) == 0 {
+        return 0.0
+    }
+    hx += 1072693248 - 1072079006
+    k += shr(hx, 20) - 1023
+    hx = bit_and(hx, 1048575) + 1072079006
+    ui = bit_or(shl(hx, 32), bit_and(ui, 4294967295))
+    x = from_bits(ui)
+    let f = x - 1.0
+    let hfsq = 0.5 * f * f
+    let s = f / (2.0 + f)
+    let z = s * s
+    let w = z * z
+    let t1 = w * (3.999999999940941908e-01 + w * (2.222219843214978396e-01 + w * 1.531383769920937332e-01))
+    let t2 = z * (6.666666666666735130e-01 + w * (2.857142874366239149e-01 + w * (1.818357216161805012e-01 + w * 1.479819860511658591e-01)))
+    let r = t2 + t1
+    let dk = float(k)
+    s * (hfsq + r) + dk * 1.90821492927058770002e-10 - hfsq + f + dk * 6.93147180369123816490e-01
+}
+
+// x ^ y: log2(x) in extra precision (t1 + t2), times y (in two parts), then 2^that
+fn rt_pow(x: f64, y: f64) -> f64 {
+    let hx = rt_hi(x)
+    let lx = rt_lo(x)
+    let hy = rt_hi(y)
+    let ly = rt_lo(y)
+    var ix = bit_and(hx, 2147483647)
+    let iy = bit_and(hy, 2147483647)
+    // x^0 = 1 even for NaN; 1^y = 1 even for NaN
+    if bit_or(iy, ly) == 0 { return 1.0 }
+    if hx == 1072693248 and lx == 0 { return 1.0 }
+    if ix > 2146435072 or (ix == 2146435072 and lx != 0) or iy > 2146435072 or (iy == 2146435072 and ly != 0) { return x + y }
+    // yisint: 0 y is not an integer, 1 an odd one, 2 an even one (only when x < 0)
+    var yisint = 0
+    if hx < 0 {
+        if iy >= 1128267776 {
+            yisint = 2
+        } else if iy >= 1072693248 {
+            let k = shr(iy, 20) - 1023
+            if k > 20 {
+                let j = shr(ly, 52 - k)
+                if bit_and(shl(j, 52 - k), 4294967295) == ly { yisint = 2 - bit_and(j, 1) }
+            } else if ly == 0 {
+                let j = shr(iy, 20 - k)
+                if shl(j, 20 - k) == iy { yisint = 2 - bit_and(j, 1) }
+            }
+        }
+    }
+    if ly == 0 {
+        if iy == 2146435072 {
+            // y = +-inf
+            if bit_or(ix - 1072693248, lx) == 0 { return 1.0 }
+            if ix >= 1072693248 { return if hy >= 0 { y } else { 0.0 } }
+            return if hy >= 0 { 0.0 } else { -y }
+        }
+        if iy == 1072693248 { return if hy >= 0 { x } else { 1.0 / x } }
+        if hy == 1073741824 { return x * x }
+        if hy == 1071644672 and hx >= 0 { return sqrt(x) }
+    }
+    var ax = abs(x)
+    if lx == 0 {
+        // x = +-0, +-inf, +-1
+        if ix == 2146435072 or ix == 0 or ix == 1072693248 {
+            var z = ax
+            if hy < 0 { z = 1.0 / z }
+            if hx < 0 {
+                if bit_or(ix - 1072693248, yisint) == 0 {
+                    z = (z - z) / (z - z)
+                } else if yisint == 1 {
+                    z = -z
+                }
+            }
+            return z
+        }
+    }
+    var s = 1.0
+    if hx < 0 {
+        if yisint == 0 { return (x - x) / (x - x) }
+        if yisint == 1 { s = -1.0 }
+    }
+    let huge = 1.0e300
+    let tiny = 1.0e-300
+    var t1 = 0.0
+    var t2 = 0.0
+    if iy > 1105199104 {
+        // |y| > 2^31
+        if iy > 1139802112 {
+            if ix <= 1072693247 { return if hy < 0 { huge * huge } else { tiny * tiny } }
+            if ix >= 1072693248 { return if hy > 0 { huge * huge } else { tiny * tiny } }
+        }
+        if ix < 1072693247 { return if hy < 0 { s * huge * huge } else { s * tiny * tiny } }
+        if ix > 1072693248 { return if hy > 0 { s * huge * huge } else { s * tiny * tiny } }
+        // |1 - x| <= 2^-20: log(x) by x - x^2/2 + x^3/3 - x^4/4
+        let t = ax - 1.0
+        let w = (t * t) * (0.5 - t * (0.3333333333333333333333 - t * 0.25))
+        let u = 1.44269502162933349609e+00 * t
+        let v = t * 1.92596299112661746887e-08 - w * 1.44269504088896338700e+00
+        t1 = rt_clear_lo(u + v)
+        t2 = v - (t1 - u)
+    } else {
+        var n = 0
+        if ix < 1048576 {
+            ax = ax * 9007199254740992.0
+            n -= 53
+            ix = rt_hi(ax)
+        }
+        n += shr(ix, 20) - 1023
+        let j = bit_and(ix, 1048575)
+        var k = 0
+        ix = bit_or(j, 1072693248)
+        if j <= 235662 {
+            k = 0
+        } else if j < 767610 {
+            k = 1
+        } else {
+            k = 0
+            n += 1
+            ix -= 1048576
+        }
+        ax = rt_with_hi(ax, ix)
+        let bp = if k == 1 { 1.5 } else { 1.0 }
+        let dp_h = if k == 1 { 5.84962487220764160156e-01 } else { 0.0 }
+        let dp_l = if k == 1 { 1.35003920212974897128e-08 } else { 0.0 }
+        // ss = s_h + s_l = (x - 1) / (x + 1) or (x - 1.5) / (x + 1.5)
+        let u = ax - bp
+        let v = 1.0 / (ax + bp)
+        let ss = u * v
+        let s_h = rt_clear_lo(ss)
+        let t_h = rt_with_hi(0.0, bit_or(shr(ix, 1), 536870912) + 524288 + shl(k, 18))
+        let t_l = ax - (t_h - bp)
+        let s_l = v * ((u - s_h * t_h) - s_h * t_l)
+        // log(ax)
+        let s2 = ss * ss
+        var r = s2 * s2 * (5.99999999999994648725e-01 + s2 * (4.28571428578550184252e-01 + s2 * (3.33333329818377432918e-01 + s2 * (2.72728123808534006489e-01 + s2 * (2.30660745775561754067e-01 + s2 * 2.06975017800338417784e-01)))))
+        r += s_l * (s_h + ss)
+        let s2h = s_h * s_h
+        let t_h2 = rt_clear_lo(3.0 + s2h + r)
+        let t_l2 = r - ((t_h2 - 3.0) - s2h)
+        let u2 = s_h * t_h2
+        let v2 = s_l * t_h2 + t_l2 * ss
+        // 2 / (3 log 2) * (ss + ...)
+        let p_h = rt_clear_lo(u2 + v2)
+        let p_l = v2 - (p_h - u2)
+        let z_h = 9.61796700954437255859e-01 * p_h
+        let z_l = -7.02846165095275826516e-09 * p_h + p_l * 9.61796693925975554329e-01 + dp_l
+        // log2(ax) = n + dp_h + z_h + z_l
+        let t = float(n)
+        t1 = rt_clear_lo(((z_h + z_l) + dp_h) + t)
+        t2 = z_l - (((t1 - t) - dp_h) - z_h)
+    }
+    // (y1 + y2) * (t1 + t2)
+    let y1 = rt_clear_lo(y)
+    let p_l = (y - y1) * t1 + y * t2
+    var p_h = y1 * t1
+    let z = p_l + p_h
+    var j = rt_hi(z)
+    let i = rt_lo(z)
+    if j >= 1083179008 {
+        // z >= 1024
+        if bit_or(j - 1083179008, i) != 0 { return s * huge * huge }
+        if p_l + 8.0085662595372944372e-017 > z - p_h { return s * huge * huge }
+    } else if bit_and(j, 2147483647) >= 1083231232 {
+        // z <= -1075
+        if bit_and(j, 4294967295) != 3230714880 or i != 0 { return s * tiny * tiny }
+        if p_l <= z - p_h { return s * tiny * tiny }
+    }
+    // 2^(p_h + p_l)
+    let i2 = bit_and(j, 2147483647)
+    var k = shr(i2, 20) - 1023
+    var n = 0
+    if i2 > 1071644672 {
+        // |z| > 0.5: n = [z + 0.5]
+        n = j + shr(1048576, k + 1)
+        k = shr(bit_and(n, 2147483647), 20) - 1023
+        let t = rt_with_hi(0.0, bit_and(n, bit_xor(shr(1048575, k), -1)))
+        n = shr(bit_or(bit_and(n, 1048575), 1048576), 20 - k)
+        if j < 0 { n = -n }
+        p_h = p_h - t
+    }
+    let t = rt_clear_lo(p_l + p_h)
+    let u = t * 6.93147182464599609375e-01
+    let v = (p_l - (t - p_h)) * 6.93147180559945286227e-01 + t * -1.90465429995776804525e-09
+    var z2 = u + v
+    let w = v - (z2 - u)
+    let tt = z2 * z2
+    let t1b = z2 - tt * (1.66666666666666019037e-01 + tt * (-2.77777777770155933842e-03 + tt * (6.61375632143793436117e-05 + tt * (-1.65339022054652515390e-06 + tt * 4.13813679705723846039e-08))))
+    let r = (z2 * t1b) / (t1b - 2.0) - (w + z2 * w)
+    z2 = 1.0 - (r - z2)
+    var jz = rt_hi(z2)
+    jz += n * 1048576
+    if jz < 1048576 {
+        z2 = rt_scalbn(z2, n)
+    } else {
+        z2 = rt_with_hi(z2, jz)
+    }
+    s * z2
+}
+
+// e^x - 1, exact near 0
+fn rt_expm1(x0: f64) -> f64 {
+    var x = x0
+    let ln2hi = 6.93147180369123816490e-01
+    let ln2lo = 1.90821492927058770002e-10
+    let ui = to_bits(x)
+    let hx = bit_and(shr(ui, 32), 2147483647)
+    let sign = shr(ui, 63)
+    if hx >= 1078159482 {
+        if x != x { return x }
+        if sign != 0 { return -1.0 }
+        if x > 7.09782712893383973096e+02 { return x * rt_pow2(1023) }
+    }
+    var hi = 0.0
+    var lo = 0.0
+    var k = 0
+    var c = 0.0
+    if hx > 1071001154 {
+        if hx < 1072734898 {
+            if sign == 0 {
+                hi = x - ln2hi
+                lo = ln2lo
+                k = 1
+            } else {
+                hi = x + ln2hi
+                lo = -ln2lo
+                k = -1
+            }
+        } else {
+            k = int(1.44269504088896338700e+00 * x + (if sign != 0 { -0.5 } else { 0.5 }))
+            let t = float(k)
+            hi = x - t * ln2hi
+            lo = t * ln2lo
+        }
+        x = hi - lo
+        c = (hi - x) - lo
+    } else if hx < 1016070144 {
+        return x
+    }
+    let hfx = 0.5 * x
+    let hxs = x * hfx
+    let r1 = 1.0 + hxs * (-3.33333333333331316428e-02 + hxs * (1.58730158725481460165e-03 + hxs * (-7.93650757867487942473e-05 + hxs * (4.00821782732936239552e-06 + hxs * -2.01099218183624371326e-07))))
+    let t = 3.0 - r1 * hfx
+    var e = hxs * ((r1 - t) / (6.0 - x * t))
+    if k == 0 { return x - (x * e - hxs) }
+    e = x * (e - c) - c
+    e -= hxs
+    if k == -1 { return 0.5 * (x - e) - 0.5 }
+    if k == 1 {
+        if x < -0.25 { return -2.0 * (e - (x + 0.5)) }
+        return 1.0 + 2.0 * (x - e)
+    }
+    let twopk = from_bits(shl(1023 + k, 52))
+    if k < 0 or k > 56 {
+        var y = x - e + 1.0
+        if k == 1024 {
+            y = y * 2.0 * rt_pow2(1023)
+        } else {
+            y = y * twopk
+        }
+        return y - 1.0
+    }
+    let uf = from_bits(shl(1023 - k, 52))
+    if k < 20 { return (x - e + (1.0 - uf)) * twopk }
+    (x - (e + uf) + 1.0) * twopk
+}
+
+// ln(1 + x), exact near 0
+fn rt_log1p(x: f64) -> f64 {
+    var ui = to_bits(x)
+    let hx = bit_and(shr(ui, 32), 4294967295)
+    var k = 1
+    var f = 0.0
+    var c = 0.0
+    if hx < 1071284858 or shr(hx, 31) > 0 {
+        if hx >= 3220176896 {
+            if x == -1.0 { return x / 0.0 }
+            return (x - x) / 0.0
+        }
+        if bit_and(shl(hx, 1), 4294967295) < 2034237440 { return x }
+        if hx <= 3218259652 {
+            k = 0
+            c = 0.0
+            f = x
+        }
+    } else if hx >= 2146435072 {
+        return x
+    }
+    if k > 0 {
+        ui = to_bits(1.0 + x)
+        var hu = bit_and(shr(ui, 32), 4294967295)
+        hu += 1072693248 - 1072079006
+        k = shr(hu, 20) - 1023
+        if k < 54 {
+            c = if k >= 2 { 1.0 - (from_bits(ui) - x) } else { x - (from_bits(ui) - 1.0) }
+            c = c / from_bits(ui)
+        } else {
+            c = 0.0
+        }
+        hu = bit_and(hu, 1048575) + 1072079006
+        ui = bit_or(shl(hu, 32), bit_and(ui, 4294967295))
+        f = from_bits(ui) - 1.0
+    }
+    let hfsq = 0.5 * f * f
+    let s = f / (2.0 + f)
+    let z = s * s
+    let w = z * z
+    let t1 = w * (3.999999999940941908e-01 + w * (2.222219843214978396e-01 + w * 1.531383769920937332e-01))
+    let t2 = z * (6.666666666666735130e-01 + w * (2.857142874366239149e-01 + w * (1.818357216161805012e-01 + w * 1.479819860511658591e-01)))
+    let r = t2 + t1
+    let dk = float(k)
+    s * (hfsq + r) + (dk * 1.90821492927058770002e-10 + c) - hfsq + f + dk * 6.93147180369123816490e-01
+}
+
+fn rt_tanh(x0: f64) -> f64 {
+    let ui = bit_and(to_bits(x0), 9223372036854775807)
+    let sign = to_bits(x0) < 0
+    let x = from_bits(ui)
+    let w = shr(ui, 32)
+    var t = 0.0
+    if w > 1071748074 {
+        if w > 1077149696 {
+            t = 1.0 - 0.0 / x
+        } else {
+            t = rt_expm1(2.0 * x)
+            t = 1.0 - 2.0 / (t + 2.0)
+        }
+    } else if w > 1070618798 {
+        t = rt_expm1(2.0 * x)
+        t = t / (t + 2.0)
+    } else if w >= 1048576 {
+        t = rt_expm1(-2.0 * x)
+        t = -t / (t + 2.0)
+    } else {
+        t = x
+    }
+    if sign { -t } else { t }
+}
+
+fn rt_sigmoid(x: f64) -> f64 {
+    if x >= 0.0 { return 1.0 / (1.0 + rt_exp(-x)) }
+    let e = rt_exp(x)
+    e / (1.0 + e)
+}
+
+// ln(1 + e^x) without overflow
+fn rt_softplus(x: f64) -> f64 {
+    if x > 30.0 { x } else { rt_log1p(rt_exp(x)) }
+}

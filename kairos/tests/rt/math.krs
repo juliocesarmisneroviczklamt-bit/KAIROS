@@ -1,0 +1,68 @@
+// rt_exp, rt_log and rt_pow (the runtime, in Kairós) against exp, ln and ^ of the interpreter
+// (libm), bit for bit: kairos run math.krs <how many>
+import "../../compiler/rt.krs"
+
+fn same(a: f64, b: f64) -> bool {
+    if is_nan(a) or is_nan(b) { return is_nan(a) and is_nan(b) }
+    to_bits(a) == to_bits(b)
+}
+var bad = 0
+var n = 0
+fn check1(what: str, x: f64, got: f64, want: f64) -> i64 {
+    if same(got, want) { return 0 }
+    print("DIFF", what, x, to_bits(x), got, want)
+    1
+}
+let special = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 3.0, -3.0, 10.0, 0.1, 1e-300, -1e-300, 5e-324, -5e-324,
+    1e300, -1e300, 709.782712893383973096, 709.79, -708.39641853226410622, -745.13321910194110842, -745.2, 700.0, -700.0,
+    1.7976931348623157e308, 2.2250738585072014e-308, nan, inf, -inf, 0.6931471805599453, 1.0000000001, 0.9999999999,
+    1e-10, -1e-10, 3.725290298461914e-9, 4.0, 0.25, 1.5, 7.0, 1e16, 9007199254740993.0, 4503599627370497.5, 1e-5, 33.0]
+for x in special {
+    n += 3
+    bad += check1("exp", x, rt_exp(x), exp(x))
+    bad += check1("ln", x, rt_log(x), ln(x))
+    for y in special {
+        n += 1
+        if not same(rt_pow(x, y), x ^ y) {
+            bad += 1
+            if bad < 40 { print("DIFF pow", x, y, rt_pow(x, y), x ^ y) }
+        }
+    }
+}
+var s = 88172645463325252
+fn next(v: i64) -> i64 {
+    var t = bit_xor(v, shr(v, 12))
+    t = bit_xor(t, shl(t, 25))
+    bit_xor(t, shr(t, 27))
+}
+for i in 0..parse_int(args()[0]) {
+    s = next(s)
+    let a = wrapping_mul(s, 2685821657736338717)
+    s = next(s)
+    let b = wrapping_mul(s, 2685821657736338717)
+    // any bits; moderate numbers; numbers near 1
+    let x1 = from_bits(a)
+    let x2 = float(bit_and(a, 1048575) - 524288) / 700.0
+    let x3 = 1.0 + float(bit_and(b, 65535) - 32768) * 1e-9
+    let y1 = from_bits(b)
+    let y2 = float(bit_and(b, 4095) - 2048) / 16.0
+    for x in [x1, x2, x3, abs(x2)] {
+        n += 2
+        if not same(rt_exp(x), exp(x)) {
+            bad += 1
+            if bad < 40 { print("DIFF exp", x, rt_exp(x), exp(x)) }
+        }
+        if not same(rt_log(x), ln(x)) {
+            bad += 1
+            if bad < 40 { print("DIFF ln", x, rt_log(x), ln(x)) }
+        }
+        for y in [y1, y2, float(bit_and(b, 63) - 32), 0.5 + float(bit_and(b, 7))] {
+            n += 1
+            if not same(rt_pow(x, y), x ^ y) {
+                bad += 1
+                if bad < 40 { print("DIFF pow", x, y, rt_pow(x, y), x ^ y) }
+            }
+        }
+    }
+}
+print(n, "values,", bad, "different")

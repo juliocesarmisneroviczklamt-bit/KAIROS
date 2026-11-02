@@ -656,6 +656,7 @@ fn float_op(inout g: WGen, o: str, e: H) {
     if o == "<=" { return op(inout g, 101) }
     if o == ">=" { return op(inout g, 102) }
     if o == "%" { return call_f(inout g, rt_fn(inout g, "rt_fmod")) }
+    if o == "^" { return call_f(inout g, rt_fn(inout g, "rt_pow")) }
     wg_fail(inout g, e, "the operator `" + o + "` on floats")
 }
 
@@ -984,9 +985,14 @@ fn float_builtin(inout g: WGen, b: str, args: List[H], e: H) {
             return
         }
     }
-    if b == "str" {
-        gen(inout g, args[0].kids[0])
-        return call_f(inout g, rt_fn(inout g, "rt_fmt_f64"))
+    // a function of the runtime (the mathematics of rt_math.krs: libm, in Kairós)
+    let in_rt = [("str", "rt_fmt_f64"), ("exp", "rt_exp"), ("ln", "rt_log"), ("tanh", "rt_tanh"), ("sigmoid", "rt_sigmoid"),
+        ("softplus", "rt_softplus")]
+    for s in in_rt {
+        if b == s.0 {
+            gen(inout g, args[0].kids[0])
+            return call_f(inout g, rt_fn(inout g, s.1))
+        }
     }
     // the others use the float twice: it goes to a local
     gen(inout g, args[0].kids[0])
@@ -1032,6 +1038,15 @@ fn float_builtin(inout g: WGen, b: str, args: List[H], e: H) {
         lget(inout g, x)
         lget(inout g, x)
         return op(inout g, 98)
+    }
+    if b == "relu" {
+        // x when x > 0, else 0.0 (for NaN and -0.0 too)
+        lget(inout g, x)
+        f64c(inout g, 0.0)
+        lget(inout g, x)
+        f64c(inout g, 0.0)
+        op(inout g, 100)
+        return op(inout g, 27)
     }
     if b == "fill_nan" {
         gen(inout g, args[1].kids[0])

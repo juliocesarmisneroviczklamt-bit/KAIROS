@@ -1,0 +1,57 @@
+//! The runtime of the WebAssembly modules (kairos/compiler/rt.krs) is written in Kairós: the
+//! writing of floats (Ryu), `%` on floats (fmod) and the mathematics of libm (exp, ln, ^, tanh,
+//! sigmoid, softplus). Run in the interpreter, the programs of tests/rt check each one against
+//! Rust and libm, bit for bit, on special values and on random ones, on every platform of CI.
+
+use kairos::session::Session;
+use std::cell::RefCell;
+use std::io::Write;
+use std::path::Path;
+use std::rc::Rc;
+
+struct Buf(Rc<RefCell<Vec<u8>>>);
+
+impl Write for Buf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs tests/rt/<program> with `count` random cases: it must find no difference.
+fn check(program: &str, count: usize) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("rt").join(program);
+    let src = std::fs::read_to_string(&path).unwrap();
+    let buf = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Session::new(Box::new(Buf(buf.clone())));
+    s.host().set_args(vec![count.to_string()]);
+    if let Err(e) = s.run(&path.to_string_lossy(), &src) {
+        panic!("{}", s.render(&e));
+    }
+    let out = String::from_utf8(buf.borrow().clone()).unwrap();
+    assert!(out.trim_end().ends_with(", 0 different"), "{program}:\n{out}");
+    println!("{program}: {}", out.trim_end());
+}
+
+#[test]
+fn floats_are_written_as_rust_writes_them() {
+    check("ryu.krs", 2000);
+}
+
+#[test]
+fn the_remainder_of_floats_is_exact() {
+    check("fmod.krs", 2000);
+}
+
+#[test]
+fn exp_ln_and_powers_are_the_bits_of_libm() {
+    check("math.krs", 300);
+}
+
+#[test]
+fn tanh_sigmoid_and_softplus_are_the_bits_of_libm() {
+    check("act.krs", 2000);
+}

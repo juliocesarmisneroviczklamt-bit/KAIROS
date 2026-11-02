@@ -8,6 +8,7 @@
 // A text is the address of an object: its length in bytes (32 bits, little-endian), then its
 // UTF-8 bytes. Texts never change once made.
 import "rt_ryu.krs"
+import "rt_math.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0
