@@ -1,0 +1,16 @@
+// An error in the weights function while the holdout is open: the holdout is spent, the ledger
+// records the failure, and the error's hint says so
+protocol "wasm-fail" {
+    research: until 202012
+    holdout: from 202101
+    rule: "r"
+}
+
+fn weights() -> Tensor[month, asset; f64] {
+    let xs = [1, 2, 3]
+    print(xs[size(b3.cdi(), month)])
+    zeros_like(b3.monthly_returns())
+}
+
+let h = b3.holdout("wasm-fail")
+print(open_once(h, || weights(), lag: 0).months)

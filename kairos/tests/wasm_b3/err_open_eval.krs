@@ -1,0 +1,13 @@
+// b3.evaluate inside the weights function: R0504, and the holdout is spent
+protocol "wasm-eval" {
+    research: until 202012
+    holdout: from 202101
+    rule: "r"
+}
+
+let h = b3.holdout("wasm-eval")
+print(open_once(h, || {
+    let w = zeros_like(b3.monthly_returns())
+    print(b3.evaluate(w).months)
+    w
+}, lag: 0).months)

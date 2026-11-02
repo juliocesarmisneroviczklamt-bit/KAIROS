@@ -1,0 +1,33 @@
+// Protocols and holdouts compiled to WebAssembly (M14, the rules of M5): the research sees the
+// data up to the end of its research period, the holdout opens once, and the ledger records it all
+protocol "wasm-demo" {
+    research: until 202012
+    holdout: from 202101
+    min_months: 24
+    rule: "accept if the holdout's CAPM alpha > 0"
+}
+
+fn weights() -> Tensor[month, asset; f64] {
+    let ret = b3.monthly_returns()
+    let elig = b3.eligible()
+    var w = zeros_like(ret)
+    for m in max(12, b3.month_index(200101))..size(ret, month) {
+        let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+        let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m - 2], 0.0), over: month) - 1.0
+        let s = where(alive, signal, nan)
+        let cnt = int(nan_count(s, over: asset))
+        if cnt < 15 { continue }
+        let k = int(round(float(cnt) / 3.0))
+        w[month: m] = where(top_k(s, k, over: asset), 1.0 / float(k), 0.0)
+    }
+    w
+}
+
+let research = b3.evaluate(weights(), cost_bps: 25.0, lag: 0)
+print("research", research.months, research.sharpe, research.trials, research.dsr)
+print("months seen", len(b3.months()))
+let h = b3.holdout("wasm-demo")
+let final = open_once(h, || weights(), cost_bps: 25.0, lag: 0)
+print("holdout", final.months, final.cagr, final.sharpe, final.alpha, final.t_alpha, final.trials, final.dsr)
+print(final)
+print("months seen after", len(b3.months()))

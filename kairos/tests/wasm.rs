@@ -364,28 +364,27 @@ fn programs_compiled_to_webassembly_run_like_the_interpreter() {
     })
 }
 
-/// What the interpreter does with a program that uses `b3` (the bridge in Rust), its ledger and
-/// its registry of trials in `results`: (stdout, the rendered error, exit code).
-fn run_interp_b3(path: &str, src: &str, results: &Path, name: &str) -> (String, String, i32) {
-    let buf = Rc::new(RefCell::new(Vec::new()));
-    let host = kairos::bridge::Host::new().with_results(results);
-    host.set_program(name);
-    let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
-    s.mark_imported(path);
-    let err = match s.run(path, src) {
-        Ok(_) => String::new(),
-        Err(d) => s.render(&d),
-    };
-    let code = if err.is_empty() { 0 } else { 1 };
-    (String::from_utf8(buf.borrow().clone()).unwrap(), err, code)
+/// What the interpreter (the `kairos` command, with the bridge in Rust) does with a program that
+/// uses `b3`, its ledger and its registry of trials in `results` (relative to the crate's folder):
+/// (stdout, stderr, exit code). The fence's note goes to stderr, as the module's does.
+fn run_kairos_b3(path: &str, results: &str) -> (String, String, i32) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kairos"))
+        .args(["run", path])
+        .env("KAIROS_RESULTS", results)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("the kairos command");
+    (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap(), out.status.code().unwrap_or(-1))
 }
 
 /// M14: `b3` in WebAssembly. The bridge written in Kairós (compiler/rt_b3.krs, over kairos/lab)
 /// is compiled with each program that uses `b3`: examples/momentum.krs and the programs of
-/// tests/wasm_b3, run in wasmi, print what the interpreter (with the bridge in Rust) prints, stop
-/// with the same errors, and leave the same registry of trials and the same holdout ledger, each
-/// in a folder of its own (data.krs under the fence of a pending protocol). Skipped without the
-/// B3 data and in a debug build (slow): `cargo test --release -p kairos --test wasm b3`.
+/// tests/wasm_b3, run in wasmi, print what the `kairos` command (with the bridge in Rust) prints,
+/// with the same notes and errors on stderr and the same exit code, and leave the same registry of
+/// trials and the same holdout ledger, each in a folder of its own: the data under the fence of a
+/// pending protocol, protocols and their holdouts (opened once, an error inside spends them).
+/// Skipped without the B3 data and in a debug build (slow): `cargo test --release -p kairos
+/// --test wasm b3`.
 #[test]
 fn b3_programs_compiled_to_webassembly_run_like_the_interpreter() {
     if cfg!(target_family = "wasm") || cfg!(debug_assertions) {
@@ -405,32 +404,32 @@ fn b3_programs_compiled_to_webassembly_run_like_the_interpreter() {
             "tests/wasm_b3/data.krs",
             "tests/wasm_b3/more.krs",
             "tests/wasm_b3/daily.krs",
+            "tests/wasm_b3/protocol.krs",
             "tests/wasm_b3/err_month.krs",
             "tests/wasm_b3/err_weights.krs",
+            "tests/wasm_b3/err_open_fail.krs",
+            "tests/wasm_b3/err_open_eval.krs",
+            "tests/wasm_b3/err_unripe.krs",
+            "tests/wasm_b3/err_twice.krs",
         ];
         let paths: Vec<String> = progs.iter().map(|p| root.join(p).to_string_lossy().into_owned()).collect();
         let out = root.join(tmp).join("modules");
         let mut args = vec![root.join("std").to_string_lossy().into_owned(), out.to_string_lossy().into_owned()];
         args.extend(paths.iter().cloned());
         assert_eq!(run_compiler("kw.krs", args), "", "the programs that use b3 compile to WebAssembly");
-        let ledger = "kind,protocol,sha256,holdout_from,data_until,date,note\nprotocol,teste,0123abcd,2020-01,,2026-01-01,a protocol of the tests\n";
-        let note = "note: this program sees the data up to 2019-12: the months from 2020-01 are the holdout of protocol \"teste\" (registered on 2026-01-01), which opens only through `open_once`\n";
+        let ledger = "kind,protocol,sha256,holdout_from,data_until,date,note
+protocol,teste,0123abcd,2020-01,,2026-01-01,a protocol of the tests
+";
         for path in &paths {
             let name = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
-            let fenced = name == "data";
             let (wdir, idir) = (format!("{tmp}/{name}-wasm"), format!("{tmp}/{name}-interp"));
             for d in [&wdir, &idir] {
                 std::fs::create_dir_all(root.join(d)).unwrap();
-                if fenced {
+                if name == "data" {
                     std::fs::write(root.join(d).join("holdout_ledger.csv"), ledger).unwrap();
                 }
             }
-            let src = std::fs::read_to_string(path).unwrap();
-            let mut interp = run_interp_b3(path, &src, &root.join(&idir), &name);
-            // the interpreter writes the fence's note to the process's standard error
-            if fenced {
-                interp.1 = format!("{note}{}", interp.1);
-            }
+            let interp = run_kairos_b3(path, &idir);
             let wasm = std::fs::read(out.join(format!("{name}.wasm"))).unwrap();
             let t = std::time::Instant::now();
             let got = run_wasm_env(&wasm, vec![format!("{name}.wasm")], &[("KAIROS_RESULTS", wdir.as_str())]);

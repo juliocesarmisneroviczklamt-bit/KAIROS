@@ -823,7 +823,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 `cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere o ponto fixo no wasmi.
 
-### 15.1 M14 (em andamento): closures, tensores e a ponte `b3`
+### 15.1 M14 (em andamento): closures, tensores, a ponte `b3` e os holdouts
 
 - **Closures** (lambdas com capturas, funções como valores) e **tensores com eixos nomeados** compilam. O runtime dos tensores é escrito em Kairós ([`rt_tensor.krs`](../compiler/rt_tensor.krs)), operação por operação como o `src/tensor.rs` do interpretador, e dá os mesmos bits.
 - **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](../compiler/rt_b3.krs), sobre [`kairos/lab`](../lab)) faz o que a ponte em Rust faz:
@@ -833,8 +833,14 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
   - grava e desconta testes do registro (`record_trial`, `deflate_trial`) e dá o SHA-256 dos arquivos de resultados.
 - `kw.krs` só inclui esse runtime nos programas que chegam a `b3`. O estado (os dados lidos, os meses visíveis) fica num endereço fixo da memória. Os dados são lidos uma vez por execução; os meses visíveis são calculados na primeira função que precisa deles (`tickers`, como na ponte em Rust, não toca no livro-razão).
 - `examples/momentum.krs` compilado para WebAssembly imprime os mesmos números. Também grava a mesma linha no registro de testes e no livro-razão que o interpretador grava. A cerca de um protocolo pendente corta os mesmos meses, com a mesma nota. Os erros da ponte saem com as mesmas mensagens e dicas. Quem confere: `cargo test --release -p kairos --test wasm b3`, com os dados (`tests/wasm_b3`: os tensores diários, a simulação mês a mês e o registro também).
-- De `b3`, compila tudo menos `holdout` e `open_once`.
-- Programas que declaram protocolos e usam `b3` são recusados com W0001, para não enfraquecer as garantias do M5.
+- **Protocolos e holdouts (M5) compilam com as mesmas garantias.**
+  - O programa vê os dados até o fim do período de pesquisa dos seus protocolos, que são registrados no livro-razão.
+  - `b3.holdout` recusa na hora um holdout já aberto, retirado ou visto (R0502).
+  - `open_once` grava a abertura antes de qualquer mês do holdout ser visto e mostra todos os dados só enquanto a função dos pesos roda. Depois avalia os pesos nos meses do holdout, com uma carteira nova a partir do primeiro deles, e grava o resultado no livro-razão.
+  - Recusa um holdout sem os meses que o protocolo pede (R0503, sem gravar nada) e `b3.evaluate` com o holdout aberto (R0504).
+  - Um erro dentro da função dos pesos gasta o holdout: o livro-razão grava a falha, e a dica do erro diz isso.
+  - Para isso, enquanto o holdout está aberto, o que vai para o stderr fica retido: um erro de execução passa antes por `rt_b3_failed`, que lê a mensagem inteira (mesmo a escrita em partes) e acrescenta a dica.
+  - O holdout é avaliado pelo simulador em Kairós, e o interpretador avalia pelo simulador em Rust: os mesmos bits.
 - O DSR do registro em Rust passou a usar o `exp` e o `ln` da `libm`: o do sistema muda no último bit de plataforma para plataforma, e o WebAssembly dava outro DSR no último bit.
 - Os nomes do runtime e os do programa dividem um espaço só. Um programa que usa `b3` e define um nome do laboratório (`Bar`, `load`…) é recusado com W0001.
 - **Builtins novos no runtime:**
@@ -846,7 +852,6 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 **Ainda não compila:**
 - `grad`;
-- protocolos e holdouts (`b3.holdout`, `open_once`);
 - `upper` e `lower`;
 - a internet.
 

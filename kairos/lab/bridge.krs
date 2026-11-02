@@ -26,11 +26,16 @@ fn window_end(d: LabData, m: i64, lag: i64) -> i64 {
 }
 
 fn make_plans(d: LabData, w: Tensor[month, asset; f64], n: i64, cfg: SimCfg) -> Plans {
+    plans_from(d, w, n, 0, cfg, if n < len(d.cal.months) { " visible to this program (see the note above)" } else { "" })
+}
+
+// The plans of the months from `from` on (a holdout: a fresh portfolio from its first month);
+// `cut`: what the error of the weights' shape adds.
+fn plans_from(d: LabData, w: Tensor[month, asset; f64], n: i64, from: i64, cfg: SimCfg, cut: str) -> Plans {
     var p = Plans { m: [], t: [], w: [], err: "" }
     let nm = len(d.cal.months)
     let nt = len(d.tks)
     if size(w, month) != n or size(w, asset) != nt {
-        let cut = if n < nm { " visible to this program (see the note above)" } else { "" }
         p.err = "the weights have " + str(size(w, month)) + " months x " + str(size(w, asset)) + " assets, but the B3 data has " + str(n) + " x " + str(nt) + cut
         return p
     }
@@ -67,7 +72,7 @@ fn make_plans(d: LabData, w: Tensor[month, asset; f64], n: i64, cfg: SimCfg) -> 
             p.err = "the weights of " + fmt_ym(d.cal.months[m]) + " add up to " + format_fixed(tot, 6) + ", more than 1"
             return p
         }
-        if len(ts) > 0 and (n == nm or window_end(d, m, cfg.lag) <= end) {
+        if len(ts) > 0 and m >= from and (n == nm or window_end(d, m, cfg.lag) <= end) {
             p.m.push(m)
             p.t.push(ts)
             p.w.push(ws)
@@ -110,12 +115,17 @@ fn sim_calendar(d: LabData, cdi_d: List[f64], n: i64, end: i64) -> Calendar {
 // The evaluation of weights w over the first n months: (R0102's message or "", the run, its
 // statistics).
 fn kairos_evaluate(d: LabData, cdi_d: List[f64], w: Tensor[month, asset; f64], n: i64, cfg: SimCfg) -> (str, SimRun, SimEval) {
-    let p = make_plans(d, w, n, cfg)
+    var p = make_plans(d, w, n, cfg)
+    if p.err == "" and not (cfg.cap_adv >= 0.0 and abs(cfg.cap_adv) != inf) { p.err = "`cap_adv` must be >= 0 (0: no limit), got " + str(cfg.cap_adv) }
+    simulate_plans(d, cdi_d, p, n, cfg)
+}
+
+// The simulation of the plans over the first n months, and its statistics.
+fn simulate_plans(d: LabData, cdi_d: List[f64], p: Plans, n: i64, cfg: SimCfg) -> (str, SimRun, SimEval) {
     let end = if n < len(d.cal.months) { d.cal.mfrom[n] } else { len(d.dates) }
     let none = SimRun { mi: [], ret: [], turnover: [], exposure: [], cost_paid: 0.0, traded: 0.0, tax_paid: 0.0, jcp_withheld: 0.0, final_value: 0.0, liq_value: 0.0, exempt_months: 0, taxed_months: 0, capped_frac: 0.0 }
     let zero = SimEval { cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan }
     if p.err != "" { return (p.err, none, zero) }
-    if not (cfg.cap_adv >= 0.0 and abs(cfg.cap_adv) != inf) { return ("`cap_adv` must be >= 0 (0: no limit), got " + str(cfg.cap_adv), none, zero) }
     let run = sim_run(sim_panel(d, end), sim_calendar(d, cdi_d, n, end), p.m, p.t, p.w, cfg)
     if len(run.ret) == 0 { return ("the simulation produced no months", run, zero) }
     ("", run, sim_eval(run))

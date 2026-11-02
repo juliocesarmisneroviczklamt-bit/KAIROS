@@ -29,6 +29,31 @@ struct B3State {
     ipca_read: bool,
     nefd: List[Map[i64, List[f64]]],    // the daily NEFIN factors by date: equally, value weighted
     nefd_state: List[i64],              // of each: 0 not read, 1 read, -1 not to be had
+    rows: List[LRow],           // the holdout ledger (read when first needed)
+    rows_read: bool,
+    protos: List[RtProto],      // the program's protocols
+    synced: bool,               // they are registered in the ledger
+    opening: i64,               // the protocol whose holdout `open_once` has open (-1: none)
+    err: str,                   // what went to the standard error while a holdout was open
+}
+
+// A protocol of the program (the checker's ProtoDef).
+struct RtProto {
+    name: str,
+    research_until: i64,
+    holdout_from: i64,
+    min_months: i64,
+    rule: str,
+}
+
+// the program's protocols, written by the back end: their fields apart by \x01, each protocol by
+// \x02
+fn wasm_b3_protocols() -> str {
+    ""
+}
+
+// while a holdout is open, the standard error is held and an error goes to rt_b3_failed first
+fn wasm_b3_capture(on: bool) {
 }
 
 // the state, kept at a fixed place of the module's memory (instructions of the back end)
@@ -79,6 +104,11 @@ fn rt_b3_hint(code: str, msg: str) -> str {
     if code == "R0100" { return "set KAIROS_DATA to the quant-b3 `data` folder (the one with processed/panel.bin), or run from the quant-b3 folder" }
     if code == "R0101" { return "e.g. `b3.month_index(200101)`" }
     if code == "R0500" { return "the ledger is a CSV file: fix or restore it (Kairós will not run evaluations without it)" }
+    if code == "R0502" and contains(msg, " was already seen by ") and contains(msg, "; a new holdout must start in ") { return "a holdout has to be data nobody has looked at: the future is always clean" }
+    if code == "R0502" { return "a holdout opens once: to test a new idea, declare a new protocol whose holdout starts after the months already seen" }
+    if code == "R0503" { return "nothing was opened or recorded: run again when the data has more months" }
+    if code == "R0504" and starts_with(msg, "`b3.evaluate` cannot run") { return "the function given to `open_once` only computes the weights; `open_once` evaluates them" }
+    if code == "R0504" { return "" }
     if starts_with(msg, "the weights have ") { return "build them from the data, e.g. `zeros_like(b3.monthly_returns())`" }
     if starts_with(msg, "invalid weight ") { return "weights are long-only fractions of wealth: finite and >= 0" }
     if starts_with(msg, "the weights of ") { return "Kairós evaluates long-only portfolios without leverage: what is not invested earns CDI" }
@@ -99,7 +129,20 @@ fn rt_b3_fail(code: str, msg: str, loc: str, pad: str) {
 fn rt_b3_new(results: str) -> B3State {
     let cal = Cal { months: [], mfrom: [], mto: [], date_month: [] }
     let d = LabData { dates: [], tks: [], cal: cal, mret: [], traded: [] }
-    B3State { results: results, loaded: false, d: d, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: -1, seen: [], trials: [], ipca: [:], ipca_read: false, nefd: [[:], [:]], nefd_state: [0, 0] }
+    B3State {
+        results: results, loaded: false, d: d, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: -1, seen: [], trials: [], ipca: [:], ipca_read: false,
+        nefd: [[:], [:]], nefd_state: [0, 0], rows: [], rows_read: false, protos: rt_b3_parse_protos(wasm_b3_protocols()), synced: false, opening: -1, err: "",
+    }
+}
+
+fn rt_b3_parse_protos(t: str) -> List[RtProto] {
+    var out: List[RtProto] = []
+    if t == "" { return out }
+    for p in split(t, from_codes([2])) {
+        let f = split(p, from_codes([1]))
+        out.push(RtProto { name: f[0], research_until: parse_int(f[1]), holdout_from: parse_int(f[2]), min_months: parse_int(f[3]), rule: f[4] })
+    }
+    out
 }
 
 // The data folder (the first with processed/panel.bin), or "".
@@ -155,32 +198,234 @@ fn rt_b3_data() -> (str, str, B3State) {
     ("", "", s)
 }
 
-// The state with the months the program sees: all of them, but those a pending protocol reserves
-// as its holdout (the ledger's fence, with a note when it cuts); the ledger records that the
-// program saw them.
+// The state with the months the program sees: up to the end of its protocols' research period,
+// and never into a holdout a pending protocol reserves (the ledger's fence), with a note when
+// they are cut; the ledger records that the program saw them. While `open_once` has a holdout
+// open, the program sees all the data.
 fn rt_b3_visible() -> (str, str, B3State) {
     let r = rt_b3_data()
-    if r.0 != "" or r.2.n >= 0 { return r }
+    if r.0 != "" { return r }
     var s = r.2
-    var rows: List[LRow] = []
-    if s.results != "" {
-        let lo = open_ledger(s.results, 201901)
-        if lo.0 != "" { return ("R0500", lo.0, s) }
-        rows = lo.1
+    if s.opening >= 0 {
+        s.n = len(s.d.cal.months)
+        return ("", "", s)
+    }
+    if s.n >= 0 { return r }
+    let y = rt_b3_sync(inout s)
+    if y.0 != "" {
+        wasm_b3_set(s)
+        return (y.0, y.1, s)
+    }
+    let q = from_codes([34])
+    var lim = -1
+    var why = ""
+    for p in s.protos {
+        if lim < 0 or p.research_until < lim {
+            lim = p.research_until
+            why = "the research period of protocol " + q + p.name + q + " ends there"
+        }
+    }
+    let e = rt_b3_ledger(inout s)
+    if e != "" {
+        wasm_b3_set(s)
+        return ("R0500", e, s)
+    }
+    let f = fence(s.rows)
+    if f.0 > 0 and (lim < 0 or f.0 < lim) {
+        lim = f.0
+        why = "the months from " + ledger_ym(f.1.holdout_from) + " are the holdout of protocol " + q + f.1.proto + q + " (registered on " + ledger_date(f.1.date) + "), which opens only through `open_once`"
     }
     let nm = len(s.d.cal.months)
-    let f = fence(rows)
-    let n = if f.0 > 0 { cal_idx_from(s.d.cal, next_ym(f.0)) } else { nm }
-    if n > 0 and s.results != "" { ledger_saw(s.results, inout rows, s.d.cal.months[n - 1], "program " + wasm_program()) }
+    let n = if lim >= 0 { cal_idx_from(s.d.cal, next_ym(lim)) } else { nm }
+    if n > 0 and s.results != "" { ledger_saw(s.results, inout s.rows, s.d.cal.months[n - 1], "program " + wasm_program()) }
     if n < nm {
         let last = if n > 0 { fmt_ym(s.d.cal.months[n - 1]) } else { "before the first month" }
-        let q = from_codes([34])
-        let why = "the months from " + ledger_ym(f.1.holdout_from) + " are the holdout of protocol " + q + f.1.proto + q + " (registered on " + ledger_date(f.1.date) + "), which opens only through `open_once`"
         wasm_eprint("note: this program sees the data up to " + last + ": " + why + from_codes([10]))
     }
     s.n = n
     wasm_b3_set(s)
     ("", "", s)
+}
+
+// ------------------------------------------------------------------ protocols and holdouts (M5)
+
+// The ledger, read once: "" or why it cannot be read.
+fn rt_b3_ledger(inout s: B3State) -> str {
+    if s.rows_read { return "" }
+    if s.results != "" {
+        let lo = open_ledger(s.results, 201901)
+        if lo.0 != "" { return lo.0 }
+        s.rows = lo.1
+    }
+    s.rows_read = true
+    ""
+}
+
+// The hash that names a protocol in the ledger: changing any term makes another protocol.
+fn rt_b3_proto_sha(p: RtProto) -> str {
+    let nl = from_codes([10])
+    var b = bytes()
+    put_str(inout b, "kairos protocol v1" + nl + p.name + nl + str(p.research_until) + nl + str(p.holdout_from) + nl + str(p.min_months) + nl + p.rule)
+    sha256_hex(b)
+}
+
+// Registers the program's protocols in the ledger (the first time each is seen): a protocol whose
+// holdout takes months already seen is refused (R0502).
+fn rt_b3_sync(inout s: B3State) -> (str, str) {
+    if s.synced or len(s.protos) == 0 { return ("", "") }
+    let e = rt_b3_ledger(inout s)
+    if e != "" { return ("R0500", e) }
+    for p in s.protos {
+        let m = ledger_register(s.results, inout s.rows, p.name, rt_b3_proto_sha(p), p.holdout_from, today(), p.rule)
+        if m != "" { return ("R0502", m) }
+    }
+    s.synced = true
+    ("", "")
+}
+
+// Why the holdout of p cannot be opened ("" if it can), and the protocol's hash.
+fn rt_b3_openable(rows: List[LRow], p: RtProto) -> (str, str) {
+    let sha = rt_b3_proto_sha(p)
+    let q = from_codes([34])
+    let op = ledger_find(rows, "opened", sha)
+    if op.kind != "" { return ("the holdout of protocol " + q + p.name + q + " was already opened on " + ledger_date(op.date) + " (" + op.note + ")", sha) }
+    let wd = ledger_find(rows, "withdrawn", sha)
+    if wd.kind != "" { return ("protocol " + q + p.name + q + " was withdrawn on " + ledger_date(wd.date), sha) }
+    if p.holdout_from <= watermark(rows) {
+        return ("the holdout of protocol " + q + p.name + q + " (from " + ledger_ym(p.holdout_from) + ") is no longer clean: those months were seen by " + ledger_seen_by(rows, p.holdout_from), sha)
+    }
+    ("", sha)
+}
+
+// b3.holdout("name"): fails right away if that holdout can no longer be opened, so a long research
+// run does not end in R0502.
+fn rt_b3_holdout(k: i64) -> (str, str, i64) {
+    var s = rt_b3_get()
+    let y = rt_b3_sync(inout s)
+    if y.0 != "" {
+        wasm_b3_set(s)
+        return (y.0, y.1, k)
+    }
+    let e = rt_b3_ledger(inout s)
+    wasm_b3_set(s)
+    if e != "" { return ("R0500", e, k) }
+    let o = rt_b3_openable(s.rows, s.protos[k])
+    if o.0 != "" { return ("R0502", o.0, k) }
+    ("", "", k)
+}
+
+// open_once(h, || weights(), ...): records the opening before any month of the holdout is seen,
+// lets the program see all the data while the weights function runs, evaluates the weights on
+// the holdout's months (a fresh portfolio from its first month: a single trial, whose DSR is its
+// PSR) and writes the result in the ledger. An error in the weights function spends the holdout
+// all the same (rt_b3_failed).
+fn rt_b3_open_once(k: i64, f: fn() -> Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    let none = Evaluation { months: 0, cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan, trials: 0, dsr: nan }
+    let q = from_codes([34])
+    var s = rt_b3_get()
+    if s.opening >= 0 { return ("R0504", "the holdout of protocol " + q + s.protos[s.opening].name + q + " is already open: holdouts are not opened inside one another", none) }
+    let y = rt_b3_sync(inout s)
+    wasm_b3_set(s)
+    if y.0 != "" { return (y.0, y.1, none) }
+    let dr = rt_b3_data()
+    if dr.0 != "" { return (dr.0, dr.1, none) }
+    s = dr.2
+    let e = rt_b3_ledger(inout s)
+    if e != "" {
+        wasm_b3_set(s)
+        return ("R0500", e, none)
+    }
+    let p = s.protos[k]
+    let o = rt_b3_openable(s.rows, p)
+    if o.0 != "" {
+        wasm_b3_set(s)
+        return ("R0502", o.0, none)
+    }
+    let h = p.holdout_from
+    let nm = len(s.d.cal.months)
+    let have = nm - min(cal_idx_from(s.d.cal, h), nm)
+    let last = if nm > 0 { s.d.cal.months[nm - 1] } else { 0 }
+    if have == 0 or have < p.min_months {
+        wasm_b3_set(s)
+        if have == 0 { return ("R0503", "the holdout of protocol " + q + p.name + q + " starts in " + ledger_ym(h) + ", but the data ends in " + ledger_ym(last) + ": there is nothing to open yet", none) }
+        return ("R0503", "the holdout of protocol " + q + p.name + q + " has " + str(have) + " month(s) of data (" + ledger_ym(h) + ".." + ledger_ym(last) + "), and the protocol asks for at least " + str(p.min_months) + " before opening", none)
+    }
+    s.rows.push(LRow { kind: "opened", proto: p.name, sha256: o.1, holdout_from: h, data_until: last, date: today(), note: "opening: the weights function is running" })
+    if s.results != "" { ledger_save(s.results, s.rows) }
+    s.opening = k
+    s.err = ""
+    wasm_b3_set(s)
+    // the holdout's months exist only while the weights function runs
+    wasm_b3_capture(true)
+    let w = f()
+    wasm_b3_capture(false)
+    s = rt_b3_get()
+    if s.err != "" {
+        wasm_eprint(s.err)
+        s.err = ""
+        wasm_b3_set(s)
+    }
+    // the weights on the holdout's months (the program still sees them: the statistics read them)
+    let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
+    let r = simulate_plans(s.d, s.cdi_d, plans_from(s.d, w, nm, cal_idx_from(s.d.cal, h), cfg, " (inside `open_once` the program sees all the data)"), nm, cfg)
+    var note = ""
+    var res = ("", "", none)
+    if r.0 != "" {
+        note = "failed: R0102 " + r.0
+        res = ("R0102", r.0, none)
+    } else {
+        var excess: List[f64] = []
+        for i in 0..len(r.1.ret) { excess.push(r.1.ret[i] - s.cdi_m[r.1.mi[i]]) }
+        let t = new_trial("kairos-holdout", p.name, "", "", excess)
+        let psr = deflate(t, [t]).1
+        let x = r.2
+        let ev = Evaluation { months: len(r.1.ret), cagr: x.cagr, vol: x.vol, sharpe: x.sharpe, max_dd: x.max_dd, beta: x.beta, alpha: x.alpha, t_alpha: x.t_alpha, turnover: x.turnover, cost_bps: x.cost_bps, trials: 1, dsr: psr }
+        note = str(ev.months) + " months; CAGR " + format_fixed(100.0 * x.cagr, 2) + "%; Sharpe " + format_fixed(x.sharpe, 2) + "; alpha " + format_fixed(100.0 * x.alpha, 2) + "% a.a. (t " + format_fixed(x.t_alpha, 2) + "); PSR " + format_fixed(100.0 * psr, 0) + "%"
+        res = ("", "", ev)
+    }
+    s = rt_b3_get()
+    s.opening = -1
+    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, o.1, note) }
+    wasm_b3_set(s)
+    res
+}
+
+// What the program writes to the standard error while a holdout is open is held: an error there
+// spends the holdout, and its message says so.
+fn rt_b3_capture(addr: i64, n: i64) {
+    var s = rt_b3_get()
+    s.err = s.err + rt_text_of(addr, n)
+    wasm_b3_set(s)
+}
+
+// A runtime error while the weights function ran with the holdout open: the opening is recorded
+// as failed, and the error's hint says that the holdout is spent (as the interpreter does).
+fn rt_b3_failed(addr: i64, n: i64) {
+    wasm_b3_capture(false)
+    var s = rt_b3_get()
+    let text = s.err + rt_text_of(addr, n)
+    s.err = ""
+    let nl = from_codes([10])
+    let q = from_codes([34])
+    // "runtime error[CODE]: MSG", then where, then the hint, if any
+    let first = substr(text, 0, find(text, nl))
+    let a = find(first, "[")
+    let b = find(first, "]: ")
+    let code = substr(first, a + 1, b - a - 1)
+    let msg = substr(first, b + 3, len(first) - b - 3)
+    let p = s.protos[s.opening]
+    s.opening = -1
+    if s.results != "" { ledger_set_opened_note(s.results, inout s.rows, rt_b3_proto_sha(p), "failed: R0505 the weights function failed while the holdout was open: " + code + " " + msg) }
+    wasm_b3_set(s)
+    let spent = "the holdout of protocol " + q + p.name + q + " was open, so it is spent: the failure is recorded in the ledger"
+    let rest = substr(text, len(first) + 1, len(text) - len(first) - 1)
+    let pad = substr(rest, 0, max(find(rest, "-->"), 0))
+    // a hint goes on in a line of its own; without one, the hint is that
+    if find(text, nl + pad + " = hint: ") >= 0 {
+        wasm_fail(text + spent + nl)
+    } else {
+        wasm_fail(text + pad + " = hint: " + spent + nl)
+    }
 }
 
 // ------------------------------------------------------------------ data
@@ -423,6 +668,11 @@ fn rt_b3_nefin_daily(k: i64, vw: bool) -> (str, str, Tensor[month, session; f64]
 fn rt_b3_run(w: Tensor[month, asset; f64], cfg: SimCfg, trial: bool) -> (str, str, SimRun, SimEval, (i64, f64), i64) {
     let none = SimRun { mi: [], ret: [], turnover: [], exposure: [], cost_paid: 0.0, traded: 0.0, tax_paid: 0.0, jcp_withheld: 0.0, final_value: 0.0, liq_value: 0.0, exempt_months: 0, taxed_months: 0, capped_frac: 0.0 }
     let zero = SimEval { cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan }
+    let g = rt_b3_get()
+    if g.opening >= 0 {
+        let q = from_codes([34])
+        return ("R0504", "`b3.evaluate` cannot run while the holdout of protocol " + q + g.protos[g.opening].name + q + " is open", none, zero, (0, nan), 0)
+    }
     let s0 = rt_b3_visible()
     if s0.0 != "" { return (s0.0, s0.1, none, zero, (0, nan), 0) }
     var s = s0.2

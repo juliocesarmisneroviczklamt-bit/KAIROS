@@ -33,6 +33,7 @@ struct WGen {
     objs: Map[str, i64],            // a constant text -> the address of its object
     vobjs: Map[str, i64],           // "enum variant" -> the constant of a variant without fields
     prog: str,                      // the program's name (its file without .krs: `b3` records it)
+    hooks: List[i64],               // rt_b3_capture and rt_b3_failed, for holdouts (or none)
     // the function being generated
     code: List[i64],
     ltypes: List[i64],              // the type of each local (the parameters first)
@@ -113,6 +114,11 @@ fn is_intrinsic(g: WGen, id: i64) -> bool {
 // The address where the state of `b3` (rt_b3.krs) is kept: 0 until it is read.
 fn b3_state_at() -> i64 {
     192
+}
+
+// The flag that holds the standard error while a holdout is open (rt_b3.krs).
+fn b3_capture_at() -> i64 {
+    196
 }
 
 // A function of the runtime (rt.krs), by name.
@@ -385,6 +391,7 @@ fn vt(t: Ty) -> i64 {
         TBytes => wt_i32(),
         TFn(_, _) => wt_i32(),
         TTensor(_, _) => wt_i32(),
+        THoldout => wt_i64(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -1828,6 +1835,22 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
     }
     // a tensor of the runtime (RtT) as the program's tensor: the same object, one more reference
     if starts_with(name, "wasm_t_") { return call_f(inout g, f_incref()) }
+    // the program's protocols, as a constant text: fields apart by \x01, protocols by \x02
+    if name == "wasm_b3_protocols" {
+        var ps: List[str] = []
+        for p in g.ck.protocols {
+            ps.push(join([p.name, str(p.research_until), str(p.holdout_from), str(p.min_months), p.rule], from_codes([1])))
+        }
+        return i32c(inout g, intern_obj(inout g, join(ps, from_codes([2]))))
+    }
+    // holding the standard error (an open holdout): a flag at a fixed address
+    if name == "wasm_b3_capture" {
+        let v = new_local(inout g, wt_i32())
+        lset(inout g, v)
+        i32c(inout g, b3_capture_at())
+        lget(inout g, v)
+        return store_at(inout g, wt_i32(), 0)
+    }
     // a text to the standard error; a text to the standard error, then exit code 1
     if name == "wasm_eprint" or name == "wasm_fail" {
         let p = new_local(inout g, wt_i32())
@@ -1853,9 +1876,8 @@ fn host_w(inout g: WGen, e: H) {
     let parts = split(e.text, " ")
     let what = parts[0]
     let known = ["monthly_returns", "eligible", "cdi", "ipca", "month_index", "nefin", "months", "tickers", "issuers", "classes", "daily", "sessions",
-        "session_dates", "nefin_daily", "evaluate", "simulate", "record_trial", "deflate_trial", "results_sha256"]
+        "session_dates", "nefin_daily", "evaluate", "simulate", "record_trial", "deflate_trial", "results_sha256", "holdout", "open_once"]
     if not contains(known, what) { return wg_fail(inout g, e, "`b3." + what + "`") }
-    if len(g.ck.protocols) > 0 { return wg_fail(inout g, e, "`b3` in a program with protocols") }
     let name = "rt_b3_" + what
     if not contains(g.ck.fn_ids, name) {
         // the runtime of `b3` was not checked with the program: kw.krs checks it and comes back
@@ -1866,8 +1888,9 @@ fn host_w(inout g: WGen, e: H) {
         return
     }
     let id = g.ck.fn_ids[name]
-    // the arguments, borrowed (nefin, nefin_daily, daily: the factor or the field first)
-    if what == "nefin" or what == "nefin_daily" or what == "daily" { i64c(inout g, parse_int(parts[1])) }
+    // the arguments, borrowed (nefin, nefin_daily, daily, holdout: the factor, the field or the
+    // protocol first)
+    if what == "nefin" or what == "nefin_daily" or what == "daily" or what == "holdout" { i64c(inout g, parse_int(parts[1])) }
     var tmps: List[(i64, Ty)] = []
     for i in 0..len(e.kids) {
         var safe = true
@@ -4520,9 +4543,25 @@ fn gen_fn(inout g: WGen, id: i64) {
 fn runtime_fns(inout g: WGen) {
     let i32t = wt_i32()
     let i64t = wt_i64()
-    // write: an iovec at 0, fd_write(fd, 0, 1, 8)
+    // write: an iovec at 0, fd_write(fd, 0, 1, 8); the standard error held while a holdout is open
     g.code = []
     g.depth = 0
+    if len(g.hooks) == 2 {
+        lget(inout g, 0)
+        i32c(inout g, 2)
+        op(inout g, 70)
+        i32c(inout g, b3_capture_at())
+        load_at(inout g, i32t, 0)
+        op(inout g, 113)
+        open(inout g, 4, 0)
+        lget(inout g, 1)
+        op(inout g, 173)
+        lget(inout g, 2)
+        op(inout g, 173)
+        call_f(inout g, g.hooks[0])
+        op(inout g, 15)
+        close(inout g)
+    }
     i32c(inout g, 0)
     lget(inout g, 1)
     op_u(inout g, 54, 2)
@@ -4539,8 +4578,19 @@ fn runtime_fns(inout g: WGen) {
     op(inout g, 26)
     op(inout g, 11)
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t, i32t, i32t], []), locals: [], code: g.code })
-    // fail: the message to stderr, exit code 1
+    // fail: the message to stderr, exit code 1 (while a holdout is open, rt_b3_failed first)
     g.code = []
+    if len(g.hooks) == 2 {
+        i32c(inout g, b3_capture_at())
+        load_at(inout g, i32t, 0)
+        open(inout g, 4, 0)
+        lget(inout g, 0)
+        op(inout g, 173)
+        lget(inout g, 1)
+        op(inout g, 173)
+        call_f(inout g, g.hooks[1])
+        close(inout g)
+    }
     i32c(inout g, 2)
     lget(inout g, 0)
     lget(inout g, 1)
@@ -4690,12 +4740,17 @@ fn runtime_fns(inout g: WGen) {
 // message).
 fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog,
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog, hooks: [],
         code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], live: [], pool: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
         efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()
     for im in wasi_imports() { g.m.imports.push(("wasi_snapshot_preview1", im.0, wtype(inout g.m, im.1, im.2))) }
+    // a program with protocols that reaches `b3`: while `open_once` has a holdout open, what goes
+    // to the standard error is held, and a runtime error first records that the holdout is spent
+    if len(ck.protocols) > 0 and contains(ck.fn_ids, "rt_b3_failed") {
+        g.hooks = [fn_index(inout g, ck.fn_ids["rt_b3_capture"]), fn_index(inout g, ck.fn_ids["rt_b3_failed"])]
+    }
     runtime_fns(inout g)
     // _start: the top-level statements, the top-level variables as its locals; the functions
     // they call are compiled after it, each one when first called

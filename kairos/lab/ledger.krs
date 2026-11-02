@@ -199,7 +199,63 @@ fn open_ledger(results: str, split_ym: i64) -> (str, List[LRow]) {
 fn ledger_saw(results: str, inout rows: List[LRow], until: i64, who: str) {
     if until > watermark(rows) {
         rows.push(LRow { kind: "seen", proto: "", sha256: "", holdout_from: 0, data_until: until, date: today(), note: who })
-        make_dir(results)
-        write_text(results + "/holdout_ledger.csv", render_ledger(rows))
+        ledger_save(results, rows)
     }
+}
+
+fn ledger_save(results: str, rows: List[LRow]) {
+    make_dir(results)
+    write_text(results + "/holdout_ledger.csv", render_ledger(rows))
+}
+
+fn ledger_no_row() -> LRow {
+    LRow { kind: "", proto: "", sha256: "", holdout_from: 0, data_until: 0, date: 0, note: "" }
+}
+
+// The first row of a kind with a hash (a row of kind "" if there is none).
+fn ledger_find(rows: List[LRow], kind: str, sha: str) -> LRow {
+    for r in rows {
+        if r.kind == kind and r.sha256 == sha { return r }
+    }
+    ledger_no_row()
+}
+
+// Who first saw month ym, for messages ("" if nobody did): `the opening of the holdout of "x" on
+// 2026-11-01`.
+fn ledger_seen_by(rows: List[LRow], ym: i64) -> str {
+    let q = from_codes([34])
+    for r in rows {
+        if (r.kind == "seen" or r.kind == "opened") and r.data_until >= ym {
+            if r.kind == "seen" { return "a Kairós program on " + ledger_date(r.date) + " (" + r.note + ")" }
+            return "the opening of the holdout of " + q + r.proto + q + " on " + ledger_date(r.date)
+        }
+    }
+    ""
+}
+
+// Registers a protocol (once). Its holdout has to start after every month already seen: "" or
+// why it does not.
+fn ledger_register(results: str, inout rows: List[LRow], name: str, sha: str, holdout_from: i64, date: i64, rule: str) -> str {
+    if has_row(rows, "protocol", sha) { return "" }
+    let w = watermark(rows)
+    if holdout_from <= w {
+        let q = from_codes([34])
+        return "the holdout of protocol " + q + name + q + " starts in " + ledger_ym(holdout_from) + ", but the data up to " + ledger_ym(w) + " was already seen by " + ledger_seen_by(rows, holdout_from) + "; a new holdout must start in " + ledger_ym(next_ym(w)) + " or later"
+    }
+    rows.push(LRow { kind: "protocol", proto: name, sha256: sha, holdout_from: holdout_from, data_until: 0, date: date, note: rule })
+    ledger_save(results, rows)
+    ""
+}
+
+// The note of the (last) opening of a protocol: its result, once known.
+fn ledger_set_opened_note(results: str, inout rows: List[LRow], sha: str, note: str) {
+    var k = len(rows) - 1
+    while k >= 0 {
+        if rows[k].kind == "opened" and rows[k].sha256 == sha {
+            rows[k].note = note
+            k = -1
+        }
+        k -= 1
+    }
+    ledger_save(results, rows)
 }

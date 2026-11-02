@@ -1,0 +1,23 @@
+// A holdout opens once (R0502 the second time, across runs too)
+protocol "wasm-twice" {
+    research: until 202012
+    holdout: from 202101
+    min_months: 1
+    rule: "r"
+}
+
+fn weights() -> Tensor[month, asset; f64] {
+    let ret = b3.monthly_returns()
+    let elig = b3.eligible()
+    var w = zeros_like(ret)
+    for m in 1..size(ret, month) {
+        let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+        w[month: m] = where(alive, 1.0 / count(alive), 0.0)
+    }
+    w
+}
+
+let h1 = b3.holdout("wasm-twice")
+print(open_once(h1, || weights(), lag: 1).months)
+let h2 = b3.holdout("wasm-twice")
+print("not here")

@@ -1,0 +1,10 @@
+// A holdout without the months its protocol asks for stays closed (R0503): nothing is recorded
+protocol "wasm-unripe" {
+    research: until 202512
+    holdout: from 202601
+    min_months: 24
+    rule: "r"
+}
+
+let h = b3.holdout("wasm-unripe")
+print(open_once(h, || zeros_like(b3.monthly_returns()), lag: 0).months)
