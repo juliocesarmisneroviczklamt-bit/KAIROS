@@ -1033,7 +1033,7 @@ impl<'a> An<'a> {
             HostFn::MonthlyReturns => data(0),
             // row t: the NEFIN universe of t's year, fixed with the previous year's liquidity
             HostFn::Eligible => data(-1),
-            HostFn::Cdi => data(0),
+            HostFn::Cdi | HostFn::Ipca => data(0),
             HostFn::Months | HostFn::Tickers => TV::ALWAYS,
             HostFn::MonthIndex => TV { time: vals[0].time, rows: None, int: Lin::Unknown },
             HostFn::RecordTrial => TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown },

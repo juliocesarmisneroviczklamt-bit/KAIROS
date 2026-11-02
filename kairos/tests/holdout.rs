@@ -269,6 +269,8 @@ fn the_ledger_starts_with_the_labs_search() {
     })
 }
 
+/// The same weights are one strategy, one trial, however they are executed (here: another
+/// delay); other weights are another trial.
 #[test]
 fn without_a_results_folder_the_trials_are_counted_in_memory() {
     big_stack(|| {
@@ -277,9 +279,9 @@ fn without_a_results_folder_the_trials_are_counted_in_memory() {
         let buf = Rc::new(RefCell::new(Vec::new()));
         let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
         let src = format!(
-            "{WEIGHTS}let a = b3.evaluate(weights(), lag: 0)\nlet b = b3.evaluate(weights(), lag: 0)\nlet c = b3.evaluate(weights(), lag: 1)\nprint(a.trials, b.trials, c.trials)\nprint(a.dsr >= 0.0 and a.dsr <= 1.0)\n"
+            "{WEIGHTS}let a = b3.evaluate(weights(), lag: 0)\nlet b = b3.evaluate(weights(), lag: 0)\nlet c = b3.evaluate(weights(), lag: 1)\nlet d = b3.evaluate(weights() * 0.5, lag: 0)\nprint(a.trials, b.trials, c.trials, d.trials)\nprint(a.dsr >= 0.0 and a.dsr <= 1.0)\n"
         );
         s.run("t.krs", &src).map_err(|e| s.render(&e)).unwrap();
-        assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "1 1 2\ntrue\n");
+        assert_eq!(String::from_utf8(buf.borrow().clone()).unwrap(), "1 1 1 2\ntrue\n");
     })
 }

@@ -437,6 +437,7 @@ impl Interp<'_> {
             HostFn::MonthlyReturns => Value::Tensor(host.monthly_returns(protos).map_err(herr)?),
             HostFn::Eligible => Value::Tensor(host.eligible(protos).map_err(herr)?),
             HostFn::Cdi => Value::Tensor(host.cdi(protos).map_err(herr)?),
+            HostFn::Ipca => Value::Tensor(host.ipca(protos).map_err(herr)?),
             HostFn::Months => Value::List(Rc::new(host.months(protos).map_err(herr)?.into_iter().map(Value::Int).collect())),
             HostFn::Tickers => {
                 Value::List(Rc::new(host.tickers().map_err(herr)?.into_iter().map(|s| Value::Str(s.into())).collect()))
@@ -474,6 +475,9 @@ impl Interp<'_> {
                         "cost_bps" => Value::Float(ev.cost_bps),
                         "tax_paid" => Value::Float(sim.tax_paid),
                         "final_value" => Value::Float(sim.final_value),
+                        "liq_value" => Value::Float(sim.liq_value),
+                        "exempt_months" => Value::Int(sim.exempt_months),
+                        "taxed_months" => Value::Int(sim.taxed_months),
                         "trials" => Value::Int(ev.trials),
                         "dsr" => Value::Float(ev.dsr),
                         other => {

@@ -84,6 +84,9 @@ pub struct SimSeries {
     pub turnover: Vec<f64>,
     pub tax_paid: f64,
     pub final_value: f64,
+    pub liq_value: f64,
+    pub exempt_months: i64,
+    pub taxed_months: i64,
 }
 
 /// The lab's registry of trials, inside the results folder.
@@ -112,6 +115,8 @@ pub struct Host {
     ledger: RefCell<Option<Ledger>>,
     /// the registry of trials when there is no results folder
     trials: RefCell<Vec<Trial>>,
+    /// weights already counted as a trial (a strategy is one trial, however it is executed)
+    strategies: RefCell<std::collections::HashSet<String>>,
     /// name of the program in the registry of trials
     program: RefCell<String>,
     /// how many of the program's protocols are already registered in the ledger
@@ -545,6 +550,14 @@ impl Host {
         Ok(Rc::new(TensorVal::new_f(vec![AX_MONTH], vec![n], v)))
     }
 
+    /// `Tensor[month; f64]`: monthly inflation (IPCA); NaN in months not published yet.
+    pub fn ipca(&self, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
+        let n = self.visible(protos)?;
+        let d = self.data()?;
+        let v = d.cal.months[..n].iter().map(|m| d.ipca.get(m).copied().unwrap_or(f64::NAN)).collect();
+        Ok(Rc::new(TensorVal::new_f(vec![AX_MONTH], vec![n], v)))
+    }
+
     pub fn months(&self, protos: &[ProtocolDef]) -> Result<Vec<i64>, HostErr> {
         let n = self.visible(protos)?;
         Ok(self.data()?.cal.months[..n].iter().map(|&m| m as i64).collect())
@@ -674,9 +687,10 @@ impl Host {
         let periodo = format!("{}..{}", util::fmt_ym(d.cal.months[first]), util::fmt_ym(d.cal.months[last]));
         let costs = if cfg.real_costs { "custo real".to_string() } else { format!("custo {} bps", cfg.cost_bps) };
         let ir = if cfg.tax { "com IR" } else { "sem IR" };
-        let params = format!("pesos {}; {costs}; lag {}; capital {}; {ir}", &weights_sha(w, n)[..12], cfg.lag, cfg.capital);
+        let wsha = weights_sha(w, n)[..12].to_string();
+        let params = format!("pesos {wsha}; {costs}; lag {}; capital {}; {ir}", cfg.lag, cfg.capital);
         let t = Trial::new("kairos", &self.program(), &params, &periodo, &excess);
-        let (trials, dsr) = self.record(t)?;
+        let (trials, dsr) = self.record(t, &wsha)?;
         e.trials = trials;
         e.dsr = dsr;
         let series = SimSeries {
@@ -687,6 +701,9 @@ impl Host {
             turnover: out.turnover.clone(),
             tax_paid: out.tax_paid,
             final_value: out.final_value,
+            liq_value: out.liq_value,
+            exempt_months: out.exempt_months as i64,
+            taxed_months: out.taxed_months as i64,
         };
         Ok((e, series))
     }
@@ -720,18 +737,24 @@ impl Host {
         }
     }
 
-    /// Records a research trial (once per distinct return series: the same strategy evaluated
-    /// again, here or by the lab in Rust, is not a new trial) and deflates its Sharpe ratio by
-    /// the number of trials in the registry.
-    fn record(&self, t: Trial) -> Result<(i64, f64), HostErr> {
+    /// Records a research trial and deflates its Sharpe ratio by the number of trials in the
+    /// registry. A strategy (the same weights) is one trial, however it is executed: costs, delay,
+    /// capital and IR do not make new ones. Nor does the same return series again (the same
+    /// strategy evaluated before, here or by the lab in Rust).
+    fn record(&self, t: Trial, wsha: &str) -> Result<(i64, f64), HostErr> {
+        let tag = format!("pesos {wsha};");
+        let counted = self.strategies.borrow().contains(wsha);
         let same = |x: &Trial| {
-            x.n == t.n && (x.sr_m - t.sr_m).abs() <= 1e-6 && (x.skew - t.skew).abs() <= 1e-4 && (x.kurt - t.kurt).abs() <= 1e-4
+            counted
+                || (x.estudo == "kairos" && x.params.starts_with(&tag))
+                || (x.n == t.n && (x.sr_m - t.sr_m).abs() <= 1e-6 && (x.skew - t.skew).abs() <= 1e-4 && (x.kurt - t.kurt).abs() <= 1e-4)
         };
+        self.strategies.borrow_mut().insert(wsha.to_string());
         let all = match self.results_dir() {
             Some(dir) => {
                 let path = dir.join(REGISTRY);
                 let all = registry::load(&path);
-                if all.iter().any(same) {
+                if counted || all.iter().any(same) {
                     all
                 } else {
                     std::fs::create_dir_all(dir).map_err(|e| herr("R0500", format!("cannot create {}: {e}", dir.display())))?;
@@ -740,7 +763,7 @@ impl Host {
             }
             None => {
                 let mut mem = self.trials.borrow_mut();
-                if !mem.iter().any(same) {
+                if !counted && !mem.iter().any(same) {
                     let key = |x: &Trial| (x.estudo.clone(), x.nome.clone(), x.params.clone(), x.periodo.clone());
                     mem.retain(|x| key(x) != key(&t));
                     mem.push(t.clone());

@@ -83,6 +83,9 @@ struct Simulation {
     cost_bps: f64,                  // average cost per traded real, in basis points
     tax_paid: f64,                  // R$
     final_value: f64,               // R$
+    liq_value: f64,                 // R$, selling everything at the end (paying the deferred IR)
+    exempt_months: i64,             // months with sales, exempt (up to R$ 20 thousand) or taxed
+    taxed_months: i64,
     trials: i64,
     dsr: f64,
 }

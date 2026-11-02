@@ -152,6 +152,8 @@ pub enum HostFn {
     MonthlyReturns,
     Eligible,
     Cdi,
+    /// monthly inflation (IPCA)
+    Ipca,
     Months,
     Tickers,
     MonthIndex,

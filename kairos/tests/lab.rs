@@ -283,3 +283,10 @@ fn the_momentum_study_in_kairos_prints_the_rust_report() {
 fn the_risk_study_in_kairos_prints_the_rust_report() {
     same_report("risk.krs", "risco_relatorio.txt");
 }
+
+/// `quant-b3 realista` → results/realista_relatorio.txt
+#[test]
+#[ignore]
+fn the_realistic_study_in_kairos_prints_the_rust_report() {
+    same_report("realistic.krs", "realista_relatorio.txt");
+}

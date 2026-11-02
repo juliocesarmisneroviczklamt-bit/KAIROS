@@ -923,9 +923,9 @@ impl Checker {
                 nargs(0)?;
                 host(HostFn::Eligible, vec![], Ty::Tensor(month_asset, Box::new(Ty::Bool)))
             }
-            "cdi" => {
+            "cdi" | "ipca" => {
                 nargs(0)?;
-                host(HostFn::Cdi, vec![], Ty::Tensor(vec![AX_MONTH], Box::new(Ty::Float)))
+                host(if method == "cdi" { HostFn::Cdi } else { HostFn::Ipca }, vec![], Ty::Tensor(vec![AX_MONTH], Box::new(Ty::Float)))
             }
             "months" => {
                 nargs(0)?;
@@ -1036,7 +1036,7 @@ impl Checker {
                 host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
             }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial, ipca")),
         }
     }
 

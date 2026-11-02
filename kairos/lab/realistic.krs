@@ -1,0 +1,117 @@
+// Study B of the lab, in Kairós (quant-b3's src/realistic.rs, which this file replaces): how much
+// of long-only momentum is left with realistic execution and the individual investor's IR.
+// Real cost = B3 fees (0.03%) + half the real spread + impact 0.5·σ·√(order/volume). Capital in
+// today's reais, deflated by the IPCA to the start of the simulation.
+//
+//     kairos run kairos/lab/realistic.krs
+import "portfolios.krs"
+import "stats.krs"
+import "fmt.krs"
+
+let real = b3.sessions()
+let months = b3.months()
+let cdi_all = b3.cdi()
+let forms = momentum_forms(nefin_universe(500000.0), 15, 0.0)
+let w_d = daily_ew(forms.winners, forms.has)
+let start = b3.month_index(200101)
+let n = size(w_d, month)
+
+// the winners in equal weights, and with exposure managed by their volatility (study A)
+var plain = zeros_like(b3.monthly_returns())
+var managed = zeros_like(b3.monthly_returns())
+var first = -1
+for m in start..n {
+    if not forms.has[month: m] { continue }
+    if first < 0 { first = m }
+    let vw = realized_vol(w_d[month: m - 8 ..= m - 1], real[month: m - 8 ..= m - 1], 126)
+    let expo = if is_nan(vw) { 1.0 } else { min(0.15 / vw, 1.0) }
+    let k = forms.k[month: m]
+    plain[month: m] = where(forms.winners[month: m], 1.0 / k, 0.0)
+    managed[month: m] = where(forms.winners[month: m], expo / k, 0.0)
+}
+// inflation from the first month to today
+let ipca = b3.ipca()
+var defl = 1.0
+for m in first..n { defl *= 1.0 + fill_nan(ipca[month: m], 0.0) }
+
+print("")
+print("================ B. EXECUÇÃO REALISTA + IR (pessoa física) ================")
+print("IPCA de " + ym_text(months[first]) + " até hoje: " + fixed(defl, 2) + "x. Os capitais estão em reais de hoje (R$ 300 mil hoje = R$ " + fixed(300000.0 / defl, 0) + " em " + ym_text(months[first]) + ").")
+print("Custo real = emolumentos B3 0,03% + meio spread (melhor compra/venda no fechamento) + impacto 0,5·σ·√(ordem/volume diário).")
+print("IR: regras de hoje no período todo: 15% sobre o ganho líquido do mês, isento se as vendas do mês somam até R$ 20 mil, prejuízo compensa ganho futuro, JCP com 15% retido, dividendo isento.")
+
+// the months a simulation covered, and its returns
+fn simulated(s: Simulation) -> List[i64] {
+    var mi = []
+    for m in 0..size(s.ret, month) {
+        if not is_nan(s.ret[month: m]) { mi.push(m) }
+    }
+    mi
+}
+fn values(x: Tensor[month; f64], mi: List[i64]) -> List[f64] {
+    var out = []
+    for m in mi { out.push(x[month: m]) }
+    out
+}
+
+// 1) costs and delay, no IR, R$ 300 thousand of today
+print("")
+print("1) Custos e atraso de execução (sem IR, R$ 300 mil de hoje)")
+print(left("estratégia", 31) + " " + left("execução", 34) + " " + right("CAGR", 8) + " " + right("Sharpe*", 8) + " " + right("maxDD", 8) + " " + right("custo/lado", 12) + " " + right("giro", 7))
+let c300 = 300000.0 / defl
+for st in [("vencedores", plain), ("vencedores c/ controle de vol", managed)] {
+    for ex in [("custo fixo 25 bps, no fechamento", false, 0), ("custo real, no fechamento", true, 0), ("custo real, 1 pregão de atraso", true, 1)] {
+        let o = b3.simulate(st.1, cost_bps: 25.0, real_costs: ex.1, lag: ex.2, capital: c300)
+        let mi = simulated(o)
+        let r = values(o.ret, mi)
+        let c = values(cdi_all, mi)
+        var exc = []
+        for i in 0..len(r) { exc.push(r[i] - c[i]) }
+        print(left(st.0, 31) + " " + left(ex.0, 34) + " " + right(pct(cagr(r, 12.0)), 8) + " " + right(fixed(avg(exc) / sd(exc) * sqrt(12.0), 2), 8) + " " + right(pct(max_dd(r)), 8) + " " + right(fixed(o.cost_bps, 0), 9) + " bps " + right(fixed(100.0 * avg(values(o.turnover, mi)), 0), 6) + "%")
+    }
+}
+
+// 2) IR by the size of the capital (real cost, 1 session of delay)
+print("")
+print("2) IR por tamanho de capital (custo real, 1 pregão de atraso)")
+print(left("capital hoje", 12) + " " + left("estratégia", 31) + " " + right("antes IR", 10) + " " + right("após IR*", 12) + " " + right("vendendo tudo", 14) + " " + right("meses isent/trib", 16) + " " + right("custo/lado", 11))
+fn growth_rate(final_value: f64, initial: f64, months: i64) -> f64 {
+    (final_value / initial) ^ (12.0 / float(months)) - 1.0
+}
+var ref_months = []
+for cap in [50000.0, 300000.0, 3000000.0] {
+    let c0 = cap / defl
+    for st in [("vencedores", plain), ("vencedores c/ controle de vol", managed)] {
+        let pre = b3.simulate(st.1, real_costs: true, lag: 1, capital: c0)
+        let pos = b3.simulate(st.1, real_costs: true, lag: 1, capital: c0, tax: true)
+        let mi = simulated(pos)
+        let k = len(mi)
+        print("R$ " + left(fixed(cap / 1000.0, 0) + " mil", 9) + " " + left(st.0, 31) + " " + right(pct(growth_rate(pre.final_value, c0, k)), 10) + " " + right(pct(growth_rate(pos.final_value, c0, k)), 12) + " " + right(pct(growth_rate(pos.liq_value, c0, k)), 14) + " " + right(str(pos.exempt_months), 9) + "/" + left(str(pos.taxed_months), 6) + " " + right(fixed(pos.cost_bps, 0), 7) + " bps")
+        if len(ref_months) == 0 { ref_months = mi }
+    }
+}
+print("* após IR pago mês a mês, sem vender a carteira no fim (o IR do ganho não realizado fica diferido).")
+
+// 3) references over the same months, after IR
+let vrm = b3.nefin("rm_rf", vw: true)
+let vrf = b3.nefin("rf", vw: true)
+var w_cdi = 1.0
+var w_mkt = 1.0
+var w_ipca = 1.0
+for m in ref_months {
+    w_cdi *= 1.0 + cdi_all[month: m]
+    w_mkt *= if is_nan(vrm[month: m] + vrf[month: m]) { 1.0 + cdi_all[month: m] } else { 1.0 + vrm[month: m] + vrf[month: m] }
+    w_ipca *= 1.0 + fill_nan(ipca[month: m], 0.0)
+}
+fn after_ir(w: f64) -> f64 {
+    if w > 1.0 { 1.0 + 0.85 * (w - 1.0) } else { w }
+}
+let k = len(ref_months)
+fn yearly(w: f64, k: i64) -> f64 {
+    w ^ (12.0 / float(k)) - 1.0
+}
+print("")
+print("3) Referências no mesmo período (" + ym_text(months[ref_months[0]]) + " a " + ym_text(months[ref_months[k - 1]]) + "), compradas no início e vendidas no fim:")
+print("   CDI (tipo Tesouro Selic, 15% de IR no resgate): " + pct(yearly(w_cdi, k)) + " antes do IR, " + pct(yearly(after_ir(w_cdi), k)) + " depois")
+print("   Mercado NEFIN (tipo ETF de índice, 15% no resgate, sem isenção): " + pct(yearly(w_mkt, k)) + " antes, " + pct(yearly(after_ir(w_mkt), k)) + " depois")
+print("   Inflação (IPCA): " + pct(yearly(w_ipca, k)) + " ao ano")
