@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.16.0**, com o roteiro M1–M16 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.17.0**, com o roteiro M1–M17 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -18,7 +18,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.16.0**, com 
 - M13: o back-end escrito em Kairós, que gera WebAssembly ([`compiler/wasmgen.krs`](compiler/wasmgen.krs)) e compila o próprio compilador;
 - M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador;
 - M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust;
-- M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust.
+- M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust;
+- M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -169,10 +170,14 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **`read_line()` e `print_raw(s)`:** entrada padrão e escrita sem quebra de linha, para o REPL e para qualquer programa.
 - **Nas releases:** `kairos-selfhost.wasm`, o comando escrito em Kairós e compilado pelo compilador em Kairós, para qualquer runtime WASI.
 
+**M17 (a memória dos módulos)**
+- **O alocador do runtime, escrito em Kairós, reaproveita a memória entre tamanhos:** blocos grandes de tamanho exato, juntados quando se tocam; objetos pequenos em placas; listas e `Bytes` que crescem no lugar, sem cópia ([spec §18](docs/spec.md)).
+- **O `momentum` em WebAssembly caiu de 1.565 MB para 542 MB**, com os mesmos números bit a bit.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M17 | memória: um alocador que reaproveita blocos entre tamanhos (o `momentum` em WebAssembly ocupa hoje 1,5 GB) |
+| M18 | o elemento ternário `t3`: tensores de pesos {−1, 0, +1}, 5 por byte, e `contract` só com somas e subtrações (como no BitNet b1.58); uma carteira comprada/vendida/fora é um tensor `t3` |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

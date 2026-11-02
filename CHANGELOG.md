@@ -2,6 +2,22 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.17.0 — M17: um alocador que reaproveita a memória
+
+**Os programas compilados para WebAssembly passaram a usar uma fração da memória, com os mesmos números.** O `momentum` sobre os dados reais da B3 terminava com 1.565 MB, dos quais 1.283 MB estavam livres mas presos: cada bloco liberado ficava na lista do seu tamanho (uma potência de 2) e nunca era juntado a outro, então uma lista que cresce dobrando deixava um rastro de blocos de todos os tamanhos. Agora o mesmo programa termina com 542 MB (−65%) e roda um pouco mais rápido. O modelo do M6 (treinado com `grad`) caiu de 2,75 GB para 1,1 GB.
+
+O alocador do runtime ([`compiler/rt.krs`](kairos/compiler/rt.krs)) continua escrito em Kairós:
+
+- **Objetos pequenos** (até 32 KiB) continuam em blocos de 2^k bytes, com uma lista livre por tamanho. Uma lista vazia corta uma placa de 64 KiB tirada dos blocos grandes.
+- **Blocos grandes** (listas, `Bytes`, textos e mapas de mais de 32 KiB, e as placas) têm o tamanho pedido, arredondado para 8. Os livres ficam numa lista em ordem de endereço, e dois blocos livres que se tocam viram um. Um pedido leva o fim do primeiro bloco livre que caiba. Sem nenhum, a memória vem do fim do heap, e um bloco livre que termina ali cresce para dentro dela.
+- **Uma lista ou um `Bytes` que cresce** cresce no lugar, sem cópia, quando a memória logo depois dele está livre ou é o fim do heap.
+- **Um arquivo é lido num bloco do tamanho dele.** O `panel.bin` de 83 MB ocupava 128 MB.
+
+Testes:
+- `tests/wasm/heap.krs` cobre listas que crescem juntas, blocos liberados e tomados de novo, `Bytes`, textos e mapas grandes, com a mesma saída do interpretador;
+- o teste `b3` do back-end falha se o `momentum` voltar a passar de 750 MB;
+- o compilador continua compilando a si mesmo num ponto fixo.
+
 ## 0.16.0 — M16: o comando `kairos` escrito em Kairós
 
 **O comando `kairos` inteiro agora também existe em Kairós.** [`compiler/kairos.krs`](kairos/compiler/kairos.krs) faz o que o executável Rust faz, com a mesma saída, os mesmos erros e o mesmo código de saída. Compilado para WebAssembly pelo compilador em Kairós, vira um `kairos.wasm` sem nenhuma linha de Rust, que roda em qualquer runtime WASI. Esta release traz esse arquivo pronto (`kairos-0.16.0-selfhost-wasm.tar.gz`).

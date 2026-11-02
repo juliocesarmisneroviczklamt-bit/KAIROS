@@ -758,7 +758,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M14 | o back-end WebAssembly completo: closures, tensores, `b3`, holdouts, `grad` (§15) | ✅ o `momentum`, o modelo do M6 e o MLP compilados dão os mesmos números e gravam o mesmo registro e o mesmo livro-razão |
 | M15 | o interpretador escrito em Kairós (§16) | ✅ os 158 programas de teste (55 com `b3`) saem iguais pelo `ki.wasm` |
 | M16 | o comando `kairos` escrito em Kairós (§17) | ✅ subcomandos, `exec` e REPL iguais aos do executável Rust, em WebAssembly sem Rust |
-| M17 | memória: um alocador que reaproveita blocos entre tamanhos | o `momentum` em WebAssembly com uma fração dos 1,5 GB de hoje, com os mesmos números |
+| M17 | memória: um alocador que reaproveita blocos entre tamanhos (§18) | ✅ o `momentum` em WebAssembly cai de 1.565 MB para 542 MB, com os mesmos números |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -802,7 +802,7 @@ wasmtime --dir=. saida/programa.wasm argumentos...                # qualquer run
 - uma função toma emprestados os seus argumentos;
 - um valor compartilhado é copiado antes de mudar (a semântica de valor da linguagem, como o `Rc::make_mut` do interpretador).
 
-Na última referência, o objeto é liberado e o bloco volta a uma lista de blocos livres do seu tamanho. Cada tipo ganha as suas funções de liberar, copiar, escrever e comparar, geradas conforme o programa as usa.
+Na última referência, o objeto é liberado e o bloco volta ao alocador (§18). Cada tipo ganha as suas funções de liberar, copiar, escrever e comparar, geradas conforme o programa as usa.
 
 **`inout`.** O valor sai do seu lugar (uma variável, um campo, um elemento, em qualquer profundidade), entra na chamada e volta junto com o resultado, pelos retornos múltiplos do WebAssembly. É como o interpretador faz: primeiro os valores, depois os lugares.
 
@@ -962,3 +962,22 @@ wasmtime run -W max-wasm-stack=4194304 --dir=. saida/kairos.wasm run programa.kr
   - `read_line() -> str`: uma linha da entrada padrão, com a quebra de linha; `""` no fim da entrada (ou se a linha não for UTF-8);
   - `print_raw(s: str)`: escreve o texto na saída padrão sem quebra de linha, de imediato.
 - **Conferido:** `cargo test --release -p kairos --test wasm the_command_written` compila o comando para WebAssembly e o compara com o executável Rust. Cobre os subcomandos sobre programas de teste, o `exec` de imagens (inclusive malformadas) e sessões de REPL dadas pela entrada padrão. As únicas diferenças vêm do hospedeiro: o texto de um erro do sistema, e o `list_dir`, que o node no Windows não implementa.
+
+## 18. A memória dos módulos (M17, v0.17.0)
+
+O alocador do runtime dos módulos WebAssembly ([`compiler/rt.krs`](../compiler/rt.krs), escrito em Kairós) reaproveita a memória entre tamanhos:
+
+- **Objetos pequenos** (até 32 KiB) ficam em blocos de 2^k bytes (16 no mínimo), com uma lista de blocos livres por tamanho. O primeiro bloco de cada lista fica em `64 + 4k`, e cada bloco guarda o próximo. Uma lista vazia corta uma placa de 64 KiB tirada dos blocos grandes.
+- **Blocos grandes** (mais de 32 KiB, e as placas) têm o tamanho pedido, arredondado para 8:
+  - os livres formam uma lista em ordem de endereço (a primeira em `128`; cada bloco guarda o seu tamanho e o próximo), e dois blocos livres que se tocam viram um;
+  - um pedido leva o fim do primeiro bloco livre que caiba, e assim a lista não muda de ordem;
+  - sem nenhum, a memória vem do fim do heap (em `132`, até onde os blocos grandes o conhecem), e um bloco livre que termina ali cresce para dentro dela.
+- **Uma lista ou um `Bytes` que cresce** cresce no lugar, sem cópia, quando a memória logo depois dele está livre ou é o fim do heap (`rt_big_grow`).
+- **Um arquivo é lido num bloco do tamanho dele**, mais um byte para ver o fim.
+
+Antes, cada bloco liberado ficava na lista do seu tamanho, uma potência de 2, e nunca era juntado a outro. Uma lista que cresce dobrando deixava um rastro de blocos de todos os tamanhos. O `momentum` compilado terminava com 1.565 MB, dos quais 1.283 MB livres mas presos. Agora termina com 542 MB, com os mesmos números bit a bit, o mesmo registro e o mesmo livro-razão. O modelo do M6 (treinado com `grad`) caiu de 2,75 GB para 1,1 GB.
+
+**Conferido:**
+- `tests/wasm/heap.krs` exercita listas que crescem juntas, blocos liberados e tomados de novo, `Bytes`, textos e mapas grandes;
+- o teste `b3` do back-end falha se o `momentum` voltar a passar de 750 MB;
+- o compilador continua compilando a si mesmo num ponto fixo, e o interpretador e o comando escritos em Kairós continuam iguais aos do Rust.
