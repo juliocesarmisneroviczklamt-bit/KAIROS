@@ -263,14 +263,15 @@ impl Checker {
         self.main.n_slots
     }
 
-    /// What a check registered from (structs, enums, axes, protocols, functions) counts: the
-    /// declarations `since` a previous mark, as text (`kairos types`; M12 compares the checker
-    /// written in Kairós with this).
-    pub fn mark(&self) -> [usize; 5] {
-        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len()]
+    /// What a check registered from (structs, enums, axes, protocols, functions, top-level
+    /// variables) counts: the declarations `since` a previous mark, as text (`kairos types`; M12
+    /// compares the checker written in Kairós with this), then the type of every variable of
+    /// each new function (its parameters first) and of the new top-level variables.
+    pub fn mark(&self) -> [usize; 6] {
+        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len(), self.main.slot_tys.len()]
     }
 
-    pub fn declarations_since(&self, m: [usize; 5]) -> String {
+    pub fn declarations_since(&self, m: [usize; 6]) -> String {
         let mut out = String::new();
         for s in &self.structs[m[0]..] {
             let fs: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect();
@@ -312,6 +313,17 @@ impl Checker {
             let tp = if tps.is_empty() { String::new() } else { format!("[{}]", tps.join(", ")) };
             out.push_str(&format!("fn {}{tp}({}) -> {}
 ", f.name, ps.join(", "), self.show(&f.ret)));
+        }
+        let shown = |ts: &[Ty]| ts.iter().map(|t| self.show(t)).collect::<Vec<_>>().join(", ");
+        for (f, b) in self.sigs[m[4]..].iter().zip(&self.bodies[m[4]..]) {
+            if let Some(b) = b {
+                out.push_str(&format!("body {}({})
+", f.name, shown(&b.slot_types)));
+            }
+        }
+        if self.main.slot_tys.len() > m[5] {
+            out.push_str(&format!("main({})
+", shown(&self.main.slot_tys[m[5]..])));
         }
         out
     }

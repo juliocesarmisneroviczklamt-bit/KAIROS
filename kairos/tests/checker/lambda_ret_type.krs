@@ -1,0 +1,2 @@
+fn apply(f: fn(i64) -> str, x: i64) -> str { f(x) }
+let s = apply(|x| x + 1, 2)

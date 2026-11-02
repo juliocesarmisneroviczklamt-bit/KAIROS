@@ -1,0 +1,3 @@
+let a = contains("abc", "b")
+let b = contains([1, 2], 3)
+let c = contains([1, 2], "x")

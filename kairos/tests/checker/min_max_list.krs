@@ -1,0 +1,3 @@
+let a = minimum([1, 2])
+let b = maximum([1.5])
+let c = minimum(["a"])

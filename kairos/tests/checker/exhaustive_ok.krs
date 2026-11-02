@@ -1,0 +1,4 @@
+enum E { A, B(i64), C(str, f64) }
+fn f(e: E) -> f64 { match e { E.A => 0.0, B(n) => float(n), C(_, x) => x } }
+let b = match false { true => 1, false => 2 }
+let t = match (1, 2) { (a, b) => a + b }

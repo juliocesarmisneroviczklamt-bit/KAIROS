@@ -1,0 +1,7 @@
+struct W { a: f64, b: f64 }
+let w = W { a: 1.0, b: 2.0 }
+let v = w * 2.0 - w / 3.0
+let u = -w
+let s = abs(w)
+let z = zeros_like(w)
+let q = sqrt(w)

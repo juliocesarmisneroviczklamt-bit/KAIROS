@@ -1,0 +1,3 @@
+fn bump(inout a: i64) { a += 1 }
+var x = 1
+x.bump()

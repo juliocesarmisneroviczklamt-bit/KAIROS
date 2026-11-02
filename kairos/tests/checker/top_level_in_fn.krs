@@ -1,0 +1,2 @@
+let top = 1
+fn f() -> i64 { top }

@@ -1,0 +1,2 @@
+var a = 1
+let x = b3.month_index(inout a)

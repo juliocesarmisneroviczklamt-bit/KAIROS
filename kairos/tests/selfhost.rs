@@ -138,12 +138,14 @@ fn the_parser_in_kairos_is_the_rust_one() {
     })
 }
 
-/// The checker written in Kairós (kairos/compiler/check.krs) registers what each file declares
-/// (structs, enums, axes, protocols, the functions' signatures, through its imports) as the Rust
-/// checker does, and fails with the same errors there. The bodies come in a later part: a file
-/// whose error is in a body is left out here.
+/// The checker written in Kairós (kairos/compiler/check.krs and body.krs) registers what each
+/// file declares (structs, enums, axes, protocols, the functions' signatures, through its
+/// imports), gives every variable of every function and of the top level the type the Rust
+/// checker gives it, and fails with the same first error. A file using what it does not check
+/// yet (the operations on tensors) stops with K0000 and is left out; so is a file only the Rust
+/// checker rejects (the temporal analysis is not ported yet).
 #[test]
-fn the_declarations_in_kairos_are_the_rust_ones() {
+fn the_checker_in_kairos_is_the_rust_one() {
     // the checker reads the prelude first (hundreds of lines): too deep for the parser
     // interpreted unoptimized on WebAssembly's 4 MiB stack; the other targets run it
     if cfg!(target_family = "wasm") {
@@ -168,8 +170,12 @@ fn the_declarations_in_kairos_are_the_rust_ones() {
             }
         }
         assert_eq!(sections.len(), files.len());
-        let (mut compared, mut errors) = (0, 0);
+        let (mut compared, mut bodies, mut errors, mut left_out) = (0, 0, 0, 0);
         for (path, krs) in &sections {
+            if krs.starts_with("error K0000") {
+                left_out += 1;
+                continue;
+            }
             let src = std::fs::read_to_string(path).unwrap();
             let mut s = Session::new(Box::new(std::io::sink()));
             s.mark_imported(path);
@@ -179,10 +185,11 @@ fn the_declarations_in_kairos_are_the_rust_ones() {
                 assert_eq!(krs, &rust, "the checkers differ on {path}");
             } else if !rust.starts_with("error") {
                 compared += 1;
-                assert_eq!(krs, &rust, "the declarations differ in {path}");
+                bodies += krs.lines().filter(|l| l.starts_with("body ")).count();
+                assert_eq!(krs, &rust, "the checkers differ in {path}");
             }
         }
-        assert!(compared > 80, "the repository's programs ({compared})");
-        println!("{compared} files with the same declarations, {errors} with the same errors");
+        assert!(compared > 80 && bodies > 1000, "the repository's programs ({compared} files, {bodies} functions)");
+        println!("{compared} files with the same types ({bodies} functions), {errors} with the same errors, {left_out} not checked yet");
     })
 }

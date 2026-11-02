@@ -1,0 +1,2 @@
+enum E { A(i64) }
+let e = E.A(1, 2)

@@ -1,0 +1,10 @@
+var m: Map[str, List[i64]] = [:]
+m["a"] = [1]
+let ks = keys(m)
+let vs = values(m)
+let it = items(m)
+let g = get(m, "a", [])
+m.remove("a")
+let c = contains(m, "a")
+let n = len(m)
+let x = m["b"]

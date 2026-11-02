@@ -1,0 +1,2 @@
+struct W { a: f64 }
+let x = floor(W { a: 1.0 })

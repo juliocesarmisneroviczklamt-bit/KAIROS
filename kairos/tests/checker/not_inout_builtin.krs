@@ -1,0 +1,2 @@
+var xs = [1]
+let n = len(xs, inout xs)

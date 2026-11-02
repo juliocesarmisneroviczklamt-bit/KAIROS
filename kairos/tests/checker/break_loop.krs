@@ -1,0 +1,6 @@
+fn f(xs: List[i64]) -> i64 { var s = 0
+ for x in xs { if x < 0 { break }
+ if x == 0 { continue }
+ s += x }
+ while true { break }
+ s }

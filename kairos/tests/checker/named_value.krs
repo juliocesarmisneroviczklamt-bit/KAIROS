@@ -1,0 +1,2 @@
+let f = |x: i64| x
+let y = f(x: 1)

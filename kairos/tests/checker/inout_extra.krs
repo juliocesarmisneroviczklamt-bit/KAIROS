@@ -1,0 +1,3 @@
+fn f(a: i64) {}
+var x = 1
+f(inout x)

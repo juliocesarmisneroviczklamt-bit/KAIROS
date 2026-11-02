@@ -1,0 +1,6 @@
+var xs = []
+xs.push("a")
+let p = xs.pop()
+xs.sort()
+xs.reverse()
+xs.push(1)

@@ -1,0 +1,6 @@
+let n = 2
+let z = n * 2
+var xs = []
+xs.push(1.5)
+let e = []
+let f = |x| x

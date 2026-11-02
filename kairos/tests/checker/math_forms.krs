@@ -1,0 +1,8 @@
+let a = abs(-3)
+let b = sqrt(2.0)
+let c = exp(1.0)
+let d = floor(2.5)
+let e = is_nan(nan)
+let f = fill_nan(nan, 0.0)
+let g = round(1)
+let h = sqrt(4)

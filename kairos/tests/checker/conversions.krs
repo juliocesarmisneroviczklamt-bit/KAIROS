@@ -1,0 +1,4 @@
+let a = float(3)
+let b = int(2.5)
+let c = str([1, 2])
+let d = float("x")

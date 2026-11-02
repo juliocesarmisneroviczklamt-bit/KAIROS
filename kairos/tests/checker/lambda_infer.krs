@@ -1,0 +1,7 @@
+let k = 3
+let f = |x| x + k
+let ys = map([1, 2], f)
+let g = |a: f64, b| a * b
+let z = g(1.0, 2.0)
+let h = || 1
+let w = h()

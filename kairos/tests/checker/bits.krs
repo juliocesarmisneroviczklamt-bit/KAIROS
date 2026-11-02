@@ -1,0 +1,5 @@
+let a = bit_and(1, 2)
+let b = shl(1, 3)
+let c = to_hex(255, 2)
+let d = is_alphabetic(65)
+let e = wrapping_mul(1, 2.0)

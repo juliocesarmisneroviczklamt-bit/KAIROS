@@ -1,0 +1,2 @@
+fn f(inout a: i64) {}
+let g = f

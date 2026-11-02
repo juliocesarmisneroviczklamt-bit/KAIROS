@@ -1,0 +1,2 @@
+struct P { x: i64 }
+let p = P { x: 1, x: 2 }

@@ -1,0 +1,6 @@
+let m = b3.months()
+let t = b3.tickers()
+let i = b3.month_index(201901)
+let s = b3.results_sha256("x")
+let d = b3.deflate_trial([1.0])
+let r = b3.record_trial("a", "b", "c", "d", [1.0])

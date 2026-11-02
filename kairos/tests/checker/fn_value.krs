@@ -1,0 +1,4 @@
+fn add(a: i64, b: i64) -> i64 { a + b }
+let g = add
+let h = g(1, 2)
+let consts = (nan, inf, pi)

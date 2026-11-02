@@ -1,0 +1,4 @@
+let ys = map([1, 2], |x| x * 2)
+let zs = filter([1.5, 2.5], |x| x > 2.0)
+let ws = map(["a"], |s| len(s))
+let bad = filter([1], |x| x)

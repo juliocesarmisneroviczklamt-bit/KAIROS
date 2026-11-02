@@ -1,0 +1,1 @@
+let s = sum([1.0], over: asset, over: asset)

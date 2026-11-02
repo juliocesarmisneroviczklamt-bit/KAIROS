@@ -1,0 +1,2 @@
+fn f(h: Holdout) -> Holdout { h }
+fn g(h: Holdout) -> (Holdout, Holdout) { (h, h) }

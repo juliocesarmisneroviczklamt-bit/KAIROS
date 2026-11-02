@@ -1,0 +1,1 @@
+let ys = map([1, 2], |x: str| x)

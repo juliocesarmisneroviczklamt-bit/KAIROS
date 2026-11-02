@@ -1,0 +1,5 @@
+fn mk(n: i64) -> fn(i64) -> i64 { |x| x + n }
+let add2 = mk(2)
+let r = add2(3)
+let compose = |f: fn(i64) -> i64, g: fn(i64) -> i64| |x: i64| f(g(x))
+let h = compose(add2, add2)

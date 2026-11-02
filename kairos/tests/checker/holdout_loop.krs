@@ -1,0 +1,3 @@
+protocol "p" { research: until 201812  holdout: from 201901  rule: "r" }
+let h = b3.holdout("p")
+for i in 0..2 { let a = h }

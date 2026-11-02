@@ -1,0 +1,8 @@
+var b = bytes()
+b.put_u8(1)
+b.put_f64(1.5)
+b.put_str("x")
+let x = get_u32(b, 0)
+let y = get_f32(b, 0)
+let s = get_str(b, 0, 1)
+b.put_f32(1)

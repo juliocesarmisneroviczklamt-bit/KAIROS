@@ -1,0 +1,2 @@
+var xs = [1.0]
+let s = sum(xs, over: inout xs)

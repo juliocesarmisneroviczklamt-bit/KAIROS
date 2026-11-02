@@ -1,0 +1,8 @@
+let a = file_exists("x")
+let b = list_dir(".")
+let c = read_lines("f", [(1, "x")])
+let d = args()
+let e = today()
+let f = http_get_all(["u"], 2)
+let g = download("u", "f")
+let h = env(1)

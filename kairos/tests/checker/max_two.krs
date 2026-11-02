@@ -1,0 +1,3 @@
+let a = max(1, 2)
+let b = min(1.5, 2.5)
+let c = max(1, 2.5)

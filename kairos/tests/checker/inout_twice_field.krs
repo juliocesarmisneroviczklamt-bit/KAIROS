@@ -1,0 +1,4 @@
+struct P { a: List[i64], b: List[i64] }
+fn f(inout a: List[i64], inout b: List[i64]) {}
+var p = P { a: [], b: [] }
+f(inout p.a, inout p.b)

@@ -1,0 +1,7 @@
+struct W { a: f64, b: List[f64] }
+fn step[P](inout p: P, g: P, lr: f64) { p = p - lr * g }
+var w = W { a: 1.0, b: [2.0] }
+let g = W { a: 0.5, b: [1.0] }
+step(inout w, g, 0.1)
+var t = (1.0, 2.0)
+step(inout t, (0.1, 0.2), 0.5)

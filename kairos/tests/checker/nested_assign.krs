@@ -1,0 +1,5 @@
+struct P { xs: List[(i64, str)] }
+var p = P { xs: [(1, "a")] }
+p.xs[0].1 = "b"
+p.xs[0].0 += 2
+p.xs[0].0 = "c"

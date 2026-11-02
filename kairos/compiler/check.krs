@@ -1,6 +1,7 @@
 // The type checker of Kairós, written in Kairós (M12). It is src/types.rs; this first part
 // registers what a program declares (structs, enums, axes, protocols, the signatures of its
-// functions, with their imports) with the same types and the same errors.
+// functions, with their imports) with the same types and the same errors. The bodies are in
+// body.krs.
 import "parser.krs"
 import "builtins.krs"
 
@@ -54,6 +55,40 @@ struct FnSig {
     type_params: List[i64],
 }
 
+// A variable in scope.
+struct Local {
+    slot: i64,
+    ty: Ty,
+    mutable: bool,
+    affine: bool,       // a holdout (M5): usable once, never inside a loop or a lambda
+    loop_depth: i64,    // the loop nesting where it was declared
+    captured: bool,     // copied into a lambda
+}
+
+// The top level, a function or a lambda being checked.
+struct Ctx {
+    scopes: List[Map[str, Local]],
+    n_slots: i64,
+    ret: Ty,
+    kind: i64,                      // 0 the top level, 1 a function, 2 a lambda
+    captures: List[(i64, i64)],     // (outer slot, inner slot), for lambdas
+    loops: i64,
+    consumed: Map[i64, bool],       // the affine locals already used (slots)
+    slot_tys: List[Ty],             // the type of each slot
+}
+
+fn ctx_new(kind: i64, ret: Ty) -> Ctx {
+    let s: Map[str, Local] = [:]
+    Ctx { scopes: [s], n_slots: 0, ret: ret, kind: kind, captures: [], loops: 0, consumed: [:], slot_tys: [] }
+}
+
+fn new_slot(inout c: Ctx, t: Ty) -> i64 {
+    let slot = c.n_slots
+    c.n_slots += 1
+    c.slot_tys.push(t)
+    slot
+}
+
 struct Checker {
     structs: List[StructDef],
     struct_ids: Map[str, i64],
@@ -73,6 +108,14 @@ struct Checker {
     builtins: Map[str, bool],
     imported: Map[str, bool],
     std_dir: str,
+    // the contexts being checked (innermost last), the top level between batches, the names
+    // of top-level variables (for a hint), the slot types of each function's checked body
+    ctxs: List[Ctx],
+    main: Ctx,
+    top_names: Map[str, bool],
+    bodies: List[List[Ty]],
+    has_body: List[bool],
+    skip_bodies: bool,      // only the declarations (while the tensor checks are not ported)
     // the first error
     failed: bool,
     code: str,
@@ -92,6 +135,7 @@ fn new_checker(std_dir: str) -> Checker {
         structs: [], struct_ids: [:], enums: [], enum_ids: [:], axes: axes, axis_ids: axis_ids, protocols: [],
         sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
         builtins: b, imported: [:], std_dir: std_dir,
+        ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [], skip_bodies: false,
         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
     }
 }
@@ -569,6 +613,8 @@ fn declare_items(inout ck: Checker, items: List[Node]) {
         ck.generic_scope = [:]
         ck.fn_ids[it.text] = len(ck.sigs)
         ck.sigs.push(FnSig { name: it.text, params: params, ret: ret, type_params: tps })
+        ck.bodies.push([])
+        ck.has_body.push(false)
     }
 }
 
@@ -630,33 +676,10 @@ fn resolve_import(inout ck: Checker, from: str, path: str, lo: i64, hi: i64) -> 
     ("", "")
 }
 
-// Checks a file: its imports first (each file once), then its own declarations.
-fn check_file(inout ck: Checker, name: str, src: str) {
-    let r = parse_program(src)
-    if not r.0 {
-        ck_fail(inout ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
-        return
-    }
-    var items = []
-    for it in r.1 {
-        if it.kind == "import" {
-            let rp = resolve_import(inout ck, name, unhex(it.text), it.lo, it.hi)
-            if ck.failed { return }
-            if contains(ck.imported, rp.1) { continue }
-            ck.imported[rp.1] = true
-            check_file(inout ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, read_text(rp.0))
-            if ck.failed { return }
-        } else {
-            items.push(it)
-        }
-    }
-    declare_items(inout ck, items)
-}
-
 // ------------------------------------------------------------------ the description
 
 fn mark(ck: Checker) -> List[i64] {
-    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs)]
+    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs), len(ck.main.slot_tys)]
 }
 
 fn hex_of(s: str) -> str {
@@ -701,6 +724,20 @@ fn declarations_since(ck: Checker, m: List[i64]) -> List[str] {
         for p in f.params { ps.push((if p.2 { "inout " } else { "" }) + p.0 + ": " + show(ck, p.1)) }
         let tp = if len(tps) == 0 { "" } else { "[" + join(tps, ", ") + "]" }
         out.push("fn " + f.name + tp + "(" + join(ps, ", ") + ") -> " + show(ck, f.ret))
+    }
+    // the type of every variable of each new function (its parameters first)
+    for i in m[4]..len(ck.sigs) {
+        if ck.has_body[i] {
+            var ts = []
+            for t in ck.bodies[i] { ts.push(show(ck, t)) }
+            out.push("body " + ck.sigs[i].name + "(" + join(ts, ", ") + ")")
+        }
+    }
+    // and of the new top-level variables
+    if len(ck.main.slot_tys) > m[5] {
+        var ts = []
+        for i in m[5]..len(ck.main.slot_tys) { ts.push(show(ck, ck.main.slot_tys[i])) }
+        out.push("main(" + join(ts, ", ") + ")")
     }
     out
 }

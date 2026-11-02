@@ -1,0 +1,4 @@
+let a = len("abc")
+let b = len([1])
+let c = len(bytes())
+let d = len(3)

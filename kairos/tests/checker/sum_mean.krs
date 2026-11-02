@@ -1,0 +1,5 @@
+let a = sum([1, 2])
+let b = sum([1.5])
+let c = mean([1.0])
+let d = prod([2.0])
+let e = mean([1])

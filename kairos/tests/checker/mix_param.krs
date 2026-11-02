@@ -1,0 +1,3 @@
+fn f(x: f64) -> f64 { x }
+let n = 3
+let y = f(n)
