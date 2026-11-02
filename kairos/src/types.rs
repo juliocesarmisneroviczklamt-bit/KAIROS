@@ -1744,6 +1744,16 @@ impl Checker {
                 self.default_nums(&t);
                 (vec![HArg::Val(h)], Ty::Str)
             }
+            Builtin::Substr => {
+                arity(3)?;
+                let (hs, ts) = self.expr(all[0].0, Some(&Ty::Str))?;
+                self.expect_ty(&ts, &Ty::Str, all[0].0.span)?;
+                let (ha, ta) = self.expr(all[1].0, Some(&Ty::Int))?;
+                self.expect_ty(&ta, &Ty::Int, all[1].0.span)?;
+                let (hc, tc) = self.expr(all[2].0, Some(&Ty::Int))?;
+                self.expect_ty(&tc, &Ty::Int, all[2].0.span)?;
+                (vec![HArg::Val(hs), HArg::Val(ha), HArg::Val(hc)], Ty::Str)
+            }
             Builtin::FormatFixed => {
                 arity(2)?;
                 let (hx, tx) = self.expr(all[0].0, Some(&Ty::Float))?;

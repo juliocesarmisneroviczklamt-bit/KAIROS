@@ -456,6 +456,10 @@ impl Interp<'_> {
             }
             HostFn::Daily { field } => Value::Tensor(host.daily(field, protos).map_err(herr)?),
             HostFn::Sessions => Value::Tensor(host.sessions(protos).map_err(herr)?),
+            HostFn::ResultsSha256 => {
+                let Value::Str(name) = &v[0] else { unreachable!("a file name") };
+                Value::Str(host.results_sha256(name).into())
+            }
             HostFn::Issuers | HostFn::Classes => {
                 let names = host.asset_names(matches!(hf, HostFn::Issuers)).map_err(herr)?;
                 Value::List(Rc::new(names.into_iter().map(|s| Value::Str(s.into())).collect()))
@@ -494,6 +498,14 @@ impl Interp<'_> {
                     });
                 }
                 Value::Struct(result, Rc::new(fields))
+            }
+            HostFn::DeflateTrial => {
+                let excess: Vec<f64> = match &v[0] {
+                    Value::List(xs) => xs.iter().map(float_of).collect(),
+                    other => unreachable!("expected a list, got {other:?}"),
+                };
+                let (n, sr0, dsr) = host.deflate_trial(&excess);
+                Value::List(Rc::new(vec![Value::Float(n as f64), Value::Float(sr0), Value::Float(dsr)]))
             }
             HostFn::RecordTrial => {
                 let s = |x: &Value| match x {

@@ -999,14 +999,28 @@ impl Checker {
                 }
                 host(HostFn::RecordTrial, xs, Ty::Str)
             }
-            "daily_returns" | "daily_volume" | "daily_price" => {
+            "daily_returns" | "daily_volume" | "daily_price" | "daily_dividends" => {
                 nargs(0)?;
                 let field = match method {
                     "daily_returns" => 0,
                     "daily_volume" => 1,
-                    _ => 2,
+                    "daily_price" => 2,
+                    _ => 3,
                 };
                 host(HostFn::Daily { field }, vec![], Ty::Tensor(vec![AX_MONTH, AX_SESSION, AX_ASSET], Box::new(Ty::Float)))
+            }
+            "deflate_trial" => {
+                nargs(1)?;
+                let want = Ty::List(Box::new(Ty::Float));
+                let (h, t) = self.expr(&args[0].expr, Some(&want))?;
+                self.expect_ty(&t, &want, args[0].expr.span)?;
+                host(HostFn::DeflateTrial, vec![h], Ty::List(Box::new(Ty::Float)))
+            }
+            "results_sha256" => {
+                nargs(1)?;
+                let (h, t) = self.expr(&args[0].expr, Some(&Ty::Str))?;
+                self.expect_ty(&t, &Ty::Str, args[0].expr.span)?;
+                host(HostFn::ResultsSha256, vec![h], Ty::Str)
             }
             "sessions" => {
                 nargs(0)?;
@@ -1061,7 +1075,7 @@ impl Checker {
                 host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
             }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial, ipca")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout, daily_returns, daily_volume, daily_price, sessions, session_dates, issuers, classes, nefin, nefin_daily, simulate, record_trial, ipca, daily_dividends, results_sha256, deflate_trial")),
         }
     }
 

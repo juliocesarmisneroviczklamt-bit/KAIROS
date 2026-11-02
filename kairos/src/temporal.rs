@@ -77,6 +77,17 @@ pub enum At {
     Late,
 }
 
+thread_local! {
+    /// Loop symbols bounded by another symbol: `s ≤ t + c` (for `for s in a..b` whose last value is
+    /// `t + c`), so that the time of a value that mixes both is still a month.
+    static BOUNDS: std::cell::RefCell<HashMap<u32, (u32, i64)>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// `end(s + x) ⊔ end(t + y)` when `s ≤ t + c`: `end(t + max(y, c + x))`.
+fn bounded(s: u32, x: i64, t: u32, y: i64) -> Option<Lin> {
+    BOUNDS.with(|b| b.borrow().get(&s).filter(|(u, _)| *u == t).and_then(|(_, c)| c.checked_add(x)).map(|cx| Lin::Sym(t, y.max(cx))))
+}
+
 fn join_at(a: At, b: At) -> At {
     use At::*;
     match (a, b) {
@@ -84,6 +95,10 @@ fn join_at(a: At, b: At) -> At {
         (Late, _) | (_, Late) => Late,
         (End(Lin::Const(x)), End(Lin::Const(y))) => End(Lin::Const(x.max(y))),
         (End(Lin::Sym(s, x)), End(Lin::Sym(t, y))) if s == t => End(Lin::Sym(s, x.max(y))),
+        (End(Lin::Sym(s, x)), End(Lin::Sym(t, y))) => match bounded(s, x, t, y).or_else(|| bounded(t, y, s, x)) {
+            Some(l) => End(l),
+            None => End(Lin::Unknown),
+        },
         _ => End(Lin::Unknown),
     }
 }
@@ -1046,7 +1061,7 @@ impl<'a> An<'a> {
             HostFn::Cdi | HostFn::Ipca => data(0),
             HostFn::Months | HostFn::Tickers => TV::ALWAYS,
             HostFn::MonthIndex => TV { time: vals[0].time, rows: None, int: Lin::Unknown },
-            HostFn::RecordTrial => TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown },
+            HostFn::RecordTrial | HostFn::DeflateTrial => TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown },
             HostFn::Evaluate { .. } | HostFn::Simulate { .. } => {
                 self.check_weights(&vals[0], sp)?;
                 // the evaluation of a whole history is known at its end
@@ -1055,7 +1070,7 @@ impl<'a> An<'a> {
             HostFn::Holdout { .. } => TV::ALWAYS,
             // the sessions of month t are known at end(t); the calendar and the companies always
             HostFn::Daily { .. } | HostFn::Nefin { .. } | HostFn::NefinDaily { .. } => data(0),
-            HostFn::Sessions | HostFn::SessionDates | HostFn::Issuers | HostFn::Classes => TV::ALWAYS,
+            HostFn::Sessions | HostFn::SessionDates | HostFn::Issuers | HostFn::Classes | HostFn::ResultsSha256 => TV::ALWAYS,
             HostFn::OpenOnce { .. } => {
                 // the holdout trades the same way: no look-ahead there either
                 self.check_weights(&vals[1], sp)?;
@@ -1313,7 +1328,12 @@ impl<'a> An<'a> {
                 // how many times the body runs depends on the bounds
                 let saved = self.pc;
                 self.pc = saved.join(a.time).join(b.time);
-                self.loop_fix(f, Some(sym), Some(*slot), body, None, last)?;
+                if let Lin::Sym(t, c) = last {
+                    BOUNDS.with(|bs| bs.borrow_mut().insert(sym, (t, c)));
+                }
+                let r = self.loop_fix(f, Some(sym), Some(*slot), body, None, last);
+                BOUNDS.with(|bs| bs.borrow_mut().remove(&sym));
+                r?;
                 if !jumps(body, 0, true) {
                     self.pc = saved;
                 }

@@ -298,6 +298,13 @@ fn the_smallcaps_study_in_kairos_prints_the_rust_report() {
     same_report("smallcaps.krs", "smallcaps_relatorio.txt");
 }
 
+/// `quant-b3 busca` → results/busca_relatorio.txt (the registry is upserted with the same rows)
+#[test]
+#[ignore]
+fn the_alpha_search_in_kairos_prints_the_rust_report() {
+    same_report("search.krs", "busca_relatorio.txt");
+}
+
 /// The small segment (lab/universe.krs `small_universe`) is quant-b3's `small_segment`.
 #[test]
 fn the_small_segment_in_kairos_is_the_rust_one() {

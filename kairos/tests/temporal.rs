@@ -298,3 +298,33 @@ let ev = b3.evaluate(w, lag: 0)
         "known at end(m)",
     );
 }
+
+/// A two-pass statistic over a window (the mean, then the deviations from it): the second pass
+/// mixes each row with the result of the first, and both are known when the window's last row is.
+#[test]
+fn a_two_pass_statistic_over_a_window_is_proven_causal() {
+    let spread = "fn spread(r: Tensor[month, asset; f64]) -> Tensor[asset; f64] {
+    var s = zeros(asset: size(r, asset))
+    for k in 0..size(r, month) { s = s + fill_nan(r[month: k], 0.0) }
+    let mu = s / float(size(r, month))
+    var ss = zeros(asset: size(r, asset))
+    for k in 0..size(r, month) {
+        let e = fill_nan(r[month: k], 0.0) - mu
+        ss = ss + e * e
+    }
+    sqrt(ss / float(size(r, month)))
+}
+";
+    ok(&format!(
+        "{spread}{}",
+        strategy("    weights[month: m] = where(elig[month: m] and spread(ret[month: m - 12 ..= m - 1]) < 0.1, 0.01, 0.0)")
+    ));
+    fails(
+        &format!(
+            "{spread}{}",
+            strategy("    weights[month: m] = where(elig[month: m] and spread(ret[month: m - 12 ..= m]) < 0.1, 0.01, 0.0)")
+        ),
+        "E0301",
+        "known at end(m)",
+    );
+}

@@ -39,6 +39,8 @@ pub enum Builtin {
     MergeDays,
     /// `format_fixed(x, d)`: `x` with `d` decimals, rounded exactly (as Rust's `{:.d}`)
     FormatFixed,
+    /// `substr(s, start, count)`: characters `start .. start + count` of `s` (clamped)
+    Substr,
     Assert,
     // ---- M2: reductions (lists and tensors)
     Mean,
@@ -111,6 +113,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("int", Builtin::ToInt),
     ("str", Builtin::ToStr),
     ("format_fixed", Builtin::FormatFixed),
+    ("substr", Builtin::Substr),
     ("nan_quantile", Builtin::NanQuantile),
     ("merge_days", Builtin::MergeDays),
     ("assert", Builtin::Assert),
@@ -173,8 +176,13 @@ pub enum HostFn {
     /// holdout_from, rule
     OpenOnce { result: u32 },
     /// M8, daily data as `Tensor[month, session, asset]`: 0 returns, 1 traded volume (R$),
-    /// 2 unadjusted close price
+    /// 2 unadjusted close price, 3 dividends + JCP (fraction of the price)
     Daily { field: u8 },
+    /// `b3.results_sha256("file")`: SHA-256 of a file in the results folder ("" if missing)
+    ResultsSha256,
+    /// `b3.deflate_trial(excess)`: [trials in the registry, Sharpe chance gives (a year), DSR],
+    /// without recording anything
+    DeflateTrial,
     /// `Tensor[month, session; bool]`: the sessions that exist
     Sessions,
     /// company and class of each asset

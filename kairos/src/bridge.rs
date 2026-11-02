@@ -107,7 +107,7 @@ pub struct Host {
     elig: OnceCell<Rc<TensorVal>>,
     cdi: OnceCell<Rc<TensorVal>>,
     /// daily returns, volumes and prices (M8)
-    daily: [OnceCell<Rc<TensorVal>>; 3],
+    daily: [OnceCell<Rc<TensorVal>>; 4],
     sess: OnceCell<Rc<TensorVal>>,
     dates: OnceCell<Rc<TensorVal>>,
     /// daily NEFIN factors (equally weighted, value weighted), read on first use
@@ -439,7 +439,7 @@ impl Host {
     pub fn daily(&self, field: u8, protos: &[ProtocolDef]) -> Result<Rc<TensorVal>, HostErr> {
         let n = self.visible(protos)?;
         let d = self.data()?;
-        let k = field.min(2) as usize;
+        let k = field.min(3) as usize;
         let full = Self::cached(&self.daily[k], || {
             let (nm, nt, s) = (d.cal.months.len(), d.panel.tks.len(), sessions_per_month(d));
             let mut v = vec![f64::NAN; nm * s * nt];
@@ -451,13 +451,33 @@ impl Host {
                     v[(m * s + j) * nt + t] = match k {
                         0 => day.r,
                         1 => day.vol,
-                        _ => day.px as f64,
+                        2 => day.px as f64,
+                        // added in f32, as the lab's dividend yield does
+                        _ => (day.div + day.jcp) as f64,
                     };
                 }
             }
             TensorVal::new_f(vec![AX_MONTH, AX_SESSION, AX_ASSET], vec![nm, s, nt], v)
         });
-        Ok(self.view(10 + k as u8, n, full))
+        Ok(self.view(if k == 3 { 15 } else { 10 + k as u8 }, n, full))
+    }
+
+    /// A series deflated against the registry as it is (nothing recorded): (trials, the Sharpe
+    /// chance gives the best of them, a year; DSR).
+    pub fn deflate_trial(&self, excess: &[f64]) -> (usize, f64, f64) {
+        let t = Trial::new("kairos", "deflate", "", "", excess);
+        let all = match self.results_dir() {
+            Some(dir) => registry::load(&dir.join(REGISTRY)),
+            None => self.trials.borrow().clone(),
+        };
+        let df = if all.is_empty() { registry::deflate(&t, std::slice::from_ref(&t)) } else { registry::deflate(&t, &all) };
+        (df.n_trials, df.sr0_ann, df.dsr)
+    }
+
+    /// SHA-256 (hex) of a file of the results folder; empty if it is not there.
+    pub fn results_sha256(&self, name: &str) -> String {
+        let Some(dir) = self.results_dir() else { return String::new() };
+        std::fs::read(dir.join(name)).map(|b| search::sha256_hex(&b)).unwrap_or_default()
     }
 
     /// `Tensor[month, session; bool]`: the trading sessions each month has.

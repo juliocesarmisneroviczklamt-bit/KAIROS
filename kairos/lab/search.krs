@@ -1,0 +1,443 @@
+// The lab's alpha search, in Kairós (quant-b3's src/search.rs, which this file replaces),
+// following results/protocolo_busca.md, registered before running. The signals use only data up
+// to the end of the month before the portfolio (the temporal checker proves it).
+//
+//     kairos run kairos/lab/search.krs
+import "portfolios.krs"
+import "stats.krs"
+import "fmt.krs"
+
+let protocol_sha = "e83eb42722ba9da5850c3793b483ec1acc9a928846267319877b060e4cd89771"
+let min_px = 1.0
+let min_stocks = 15
+
+let ret = b3.monthly_returns()
+let mret = fill_nan(ret, 0.0)
+let traded = not is_nan(ret)
+let cdi = b3.cdi()
+let months = b3.months()
+let univ = nefin_universe(500000.0)
+let lastpx = last_price()
+let daily = b3.daily_returns()
+let divs = b3.daily_dividends()
+let real = b3.sessions()
+let n = size(ret, month)
+let na = size(ret, asset)
+let start = b3.month_index(200101)
+let split = b3.month_index(201901)
+
+// the equal-weighted market of the universe (for residual momentum)
+var mkt = zeros(month: n) + nan
+for m in 1..n {
+    let al = univ[month: m] and traded[month: m - 1]
+    let c = sum(where(al, 1.0, 0.0))
+    if c >= 10.0 { mkt[month: m] = sum(where(al, mret[month: m], 0.0)) / c }
+}
+
+// ------------------------------------------------------------------ signals
+
+// The last `n_days` sessions of the months given, per asset: `Tensor[day, asset]`, NaN where the
+// asset did not trade and outside those sessions.
+fn trailing(x: Tensor[month, session, asset; f64], real: Tensor[month, session; bool], n_days: i64) -> Tensor[day, asset; f64] {
+    let flat = merge_days(x)
+    let rl = to_list(merge_days(real))
+    var flags = []
+    for k in 0..len(rl) { flags.push(0.0) }
+    var left = n_days
+    var j = len(rl) - 1
+    while j >= 0 and left > 0 {
+        if rl[j] {
+            flags[j] = 1.0
+            left -= 1
+        }
+        j -= 1
+    }
+    where(tensor(flags, day) > 0.5, flat, nan)
+}
+
+struct Daily252 {
+    n: Tensor[asset; f64],      // days traded in the window
+    vol: Tensor[asset; f64],    // standard deviation of the daily returns
+    max52: Tensor[asset; f64],  // price over its maximum (with dividends: returns compounded)
+    dy: Tensor[asset; f64],     // dividends + JCP over the window
+}
+
+fn daily252(r: Tensor[day, asset; f64], dv: Tensor[day, asset; f64]) -> Daily252 {
+    let cnt = nan_count(r, over: day)
+    let mu = nan_sum(r, over: day) / cnt
+    let vol = sqrt(nan_sum((r - mu) * (r - mu), over: day) / (cnt - 1.0))
+    var lvl = zeros_like(cnt) + 1.0
+    var mx = lvl
+    for k in 0..size(r, day) {
+        lvl = lvl * (1.0 + fill_nan(r[day: k], 0.0))
+        mx = max(mx, lvl)
+    }
+    Daily252 { n: cnt, vol: vol, max52: lvl / mx, dy: nan_sum(where(is_nan(r), nan, dv), over: day) }
+}
+
+// Residual momentum (Blitz, Huij & Martens): the CAPM residuals of t-12..t-2 over their standard
+// deviation in t-36..t-1, against the universe's equal-weighted market; at least 24 months. The
+// regression is the lab's: Gauss-Jordan with partial pivoting on [X'X | I], asset by asset.
+fn resmom(mret: Tensor[month, asset; f64], traded: Tensor[month, asset; bool], mkt: Tensor[month; f64], cdi: Tensor[month; f64]) -> Tensor[asset; f64] {
+    let na = size(mret, asset)
+    let z = zeros(asset: na)
+    var s00 = z
+    var s01 = z
+    var s10 = z
+    var s11 = z
+    var t0 = z
+    var t1 = z
+    var cnt = z
+    let nw = size(mret, month)
+    for j in 0..nw {
+        let ok = traded[month: j] and not is_nan(mkt[month: j])
+        let x = mkt[month: j] - cdi[month: j]
+        let y = mret[month: j] - cdi[month: j]
+        s00 = where(ok, s00 + 1.0 * 1.0, s00)
+        s01 = where(ok, s01 + 1.0 * x, s01)
+        s10 = where(ok, s10 + x * 1.0, s10)
+        s11 = where(ok, s11 + x * x, s11)
+        t0 = where(ok, t0 + 1.0 * y, t0)
+        t1 = where(ok, t1 + x * y, t1)
+        cnt = where(ok, cnt + 1.0, cnt)
+    }
+    // [a b | c d] / [e f | g h] = [X'X | I]
+    var a = s00
+    var b = s01
+    var c = z + 1.0
+    var d = z
+    var e = s10
+    var f = s11
+    var g = z
+    var h = z + 1.0
+    // column 0: the row with the largest |pivot| (the last one on ties)
+    let swap = abs(e) >= abs(a)
+    let (a1, b1, c1, d1) = (where(swap, e, a), where(swap, f, b), where(swap, g, c), where(swap, h, d))
+    let (e1, f1, g1, h1) = (where(swap, a, e), where(swap, b, f), where(swap, c, g), where(swap, d, h))
+    var bad = abs(a1) < 1e-14
+    let p0 = a1
+    let (a2, b2, c2, d2) = (a1 / p0, b1 / p0, c1 / p0, d1 / p0)
+    let k0 = e1
+    let (e2, f2, g2, h2) = (e1 - k0 * a2, f1 - k0 * b2, g1 - k0 * c2, h1 - k0 * d2)
+    // column 1
+    bad = bad or abs(f2) < 1e-14
+    let p1 = f2
+    let (e3, f3, g3, h3) = (e2 / p1, f2 / p1, g2 / p1, h2 / p1)
+    let k1 = b2
+    let (a3, b3x, c3, d3) = (a2 - k1 * e3, b2 - k1 * f3, c2 - k1 * g3, d2 - k1 * h3)
+    // the inverse is [c3 d3; g3 h3]
+    let beta0 = c3 * t0 + d3 * t1
+    let beta1 = g3 * t0 + h3 * t1
+    // the residuals' standard deviation, and their sum over t-12..t-2
+    var es = z
+    var num = z
+    for j in 0..nw {
+        let ok = traded[month: j] and not is_nan(mkt[month: j])
+        let x = mkt[month: j] - cdi[month: j]
+        let y = mret[month: j] - cdi[month: j]
+        let e0 = y - beta0 - beta1 * x
+        es = where(ok, es + e0, es)
+        if j >= nw - 12 and j <= nw - 2 {
+            num = where(ok, num + e0, num)
+        }
+    }
+    let em = es / cnt
+    var ss = z
+    for j in 0..nw {
+        let ok = traded[month: j] and not is_nan(mkt[month: j])
+        let x = mkt[month: j] - cdi[month: j]
+        let y = mret[month: j] - cdi[month: j]
+        let e0 = y - beta0 - beta1 * x
+        ss = where(ok, ss + (e0 - em) * (e0 - em), ss)
+    }
+    let sd = sqrt(ss / (cnt - 1.0))
+    where(cnt >= 24.0 and not bad and sd > 0.0, num / sd, nan)
+}
+
+// ------------------------------------------------------------------ the candidates
+
+let ids = ["MOM", "RESMOM", "MAX52", "LOWVOL", "DY", "MOM+LOWVOL", "TENDENCIA"]
+let descs = ["momentum 12-2", "momentum residual (CAPM, 36m)", "perto da máxima de 52 semanas", "baixa volatilidade (252d)", "dividend yield (252d)", "momentum + baixa vol", "tendência: mercado ou CDI"]
+
+// the top third of a signal (larger = better), equal weights; when at least 15 have a signal
+fn top_third(sig: Tensor[asset; f64], min_stocks: i64) -> Tensor[asset; f64] {
+    let cnt = int(sum(where(is_nan(sig), 0.0, 1.0)))
+    if cnt < min_stocks { return zeros_like(sig) }
+    let k3 = int(round(float(cnt) / 3.0))
+    where(top_k(sig, k3, over: asset), 1.0 / float(k3), 0.0)
+}
+
+// the six stock portfolios, month by month
+var w_mom = zeros_like(ret)
+var w_res = zeros_like(ret)
+var w_max = zeros_like(ret)
+var w_low = zeros_like(ret)
+var w_dy = zeros_like(ret)
+var w_mlv = zeros_like(ret)
+for m in start..n {
+    let alive = univ[month: m] and traded[month: m - 1] and lastpx[month: m - 1] >= min_px
+    let mom = prod(1.0 + mret[month: m - 12 ..= m - 2], over: month) - 1.0
+    let rmom = resmom(mret[month: m - 36 ..= m - 1], traded[month: m - 36 ..= m - 1], mkt[month: m - 36 ..= m - 1], cdi[month: m - 36 ..= m - 1])
+    let dd = daily252(trailing(daily[month: m - 14 ..= m - 1], real[month: m - 14 ..= m - 1], 252), trailing(divs[month: m - 14 ..= m - 1], real[month: m - 14 ..= m - 1], 252))
+    let both = alive and dd.n >= 150.0
+    // only finite signals count
+    w_mom[month: m] = top_third(where(alive, mom, nan), min_stocks)
+    w_res[month: m] = top_third(where(alive and not is_nan(rmom - rmom), rmom, nan), min_stocks)
+    w_max[month: m] = top_third(where(both, dd.max52, nan), min_stocks)
+    w_low[month: m] = top_third(where(both, 0.0 - dd.vol, nan), min_stocks)
+    w_dy[month: m] = top_third(where(both, dd.dy, nan), min_stocks)
+    w_mlv[month: m] = top_third(0.5 * (rank(where(both, mom, nan), over: asset) + rank(where(both, 0.0 - dd.vol, nan), over: asset)), min_stocks)
+}
+
+// ------------------------------------------------------------------ results
+
+// the simulated months and their returns
+struct Series {
+    mis: List[i64],
+    rs: List[f64],
+}
+fn series_of(s: Simulation) -> Series {
+    var mis = []
+    var rs = []
+    for m in 0..size(s.ret, month) {
+        if not is_nan(s.ret[month: m]) {
+            mis.push(m)
+            rs.push(s.ret[month: m])
+        }
+    }
+    Series { mis: mis, rs: rs }
+}
+
+// Trend: NEFIN's market (VW) when it beat the CDI over the previous 12 months, else the CDI;
+// 10 bps on every switch.
+fn trend_series(start: i64, cdi: Tensor[month; f64]) -> Series {
+    let vrm = b3.nefin("rm_rf", vw: true)
+    let vrf = b3.nefin("rf", vw: true)
+    var mis = []
+    var rs = []
+    var prev = 0       // 0: none yet, 1: inside, 2: outside
+    for m in max(start, 12)..size(cdi, month) {
+        var missing = false
+        for j in m - 12 ..= m {
+            if is_nan(vrf[month: j]) { missing = true }
+        }
+        if missing { continue }
+        var mk = 1.0
+        var cd = 1.0
+        for j in m - 12 .. m {
+            mk *= 1.0 + vrm[month: j] + vrf[month: j]
+            cd *= 1.0 + cdi[month: j]
+        }
+        let inside = mk > cd
+        var r = if inside { vrm[month: m] + vrf[month: m] } else { cdi[month: m] }
+        let now = if inside { 1 } else { 2 }
+        if prev != 0 and prev != now { r -= 0.0010 }
+        prev = now
+        mis.push(m)
+        rs.push(r)
+    }
+    Series { mis: mis, rs: rs }
+}
+
+// The statistics of a subperiod (early: before the split): CAPM against NEFIN's market (VW),
+// the hedged series and its IR, the 4-factor alpha.
+struct Ev {
+    ok: bool,
+    cagr: f64,
+    sharpe: f64,
+    mdd: f64,
+    beta: f64,
+    alpha: f64,
+    t_alpha: f64,
+    ir: f64,
+    a4: str,
+    hedged: List[f64],
+}
+fn evaluate(s: Series, early: bool, split: i64, cdi: Tensor[month; f64]) -> Ev {
+    let vrm = b3.nefin("rm_rf", vw: true)
+    let vrf = b3.nefin("rf", vw: true)
+    let rm = b3.nefin("rm_rf")
+    let smb = b3.nefin("smb")
+    let hml = b3.nefin("hml")
+    let iml = b3.nefin("iml")
+    let rf = b3.nefin("rf")
+    var r = []
+    var c = []
+    var y = []
+    var x = []
+    var y4 = []
+    var f1 = []
+    var f2 = []
+    var f3 = []
+    var f4 = []
+    for i in 0..len(s.mis) {
+        let m = s.mis[i]
+        if (m < split) == early and not is_nan(vrf[month: m]) and not is_nan(rf[month: m]) {
+            r.push(s.rs[i])
+            c.push(cdi[month: m])
+            y.push(s.rs[i] - vrf[month: m])
+            x.push(vrm[month: m])
+            y4.push(s.rs[i] - rf[month: m])
+            f1.push(rm[month: m])
+            f2.push(smb[month: m])
+            f3.push(hml[month: m])
+            f4.push(iml[month: m])
+        }
+    }
+    let none = Ev { ok: false, cagr: nan, sharpe: nan, mdd: nan, beta: nan, alpha: nan, t_alpha: nan, ir: nan, a4: "", hedged: [] }
+    if len(r) < 24 { return none }
+    let o = ols_nw(y, [x], nw_lags(len(y)))
+    if not o.ok { return none }
+    var h = []
+    for i in 0..len(y) { h.push(y[i] - o.coef[1] * x[i]) }
+    var ex = []
+    for i in 0..len(r) { ex.push(r[i] - c[i]) }
+    let o4 = ols_nw(y4, [f1, f2, f3, f4], nw_lags(len(y4)))
+    Ev {
+        ok: true,
+        cagr: cagr(r, 12.0),
+        sharpe: avg(ex) / sd(ex) * sqrt(12.0),
+        mdd: max_dd(r),
+        beta: o.coef[1],
+        alpha: o.coef[0] * 12.0,
+        t_alpha: o.t[0],
+        ir: avg(h) / sd(h) * sqrt(12.0),
+        a4: if o4.ok { pct(o4.coef[0] * 12.0) + " (" + fixed(o4.t[0], 2) + ")" } else { "" },
+        hedged: h,
+    }
+}
+
+// the base execution: R$ 300 thousand of today, real costs, one session of delay, no IR
+let ipca = b3.ipca()
+var defl = 1.0
+for m in start..n { defl *= 1.0 + fill_nan(ipca[month: m], 0.0) }
+let capital = 300000.0 / defl
+
+struct Res {
+    k: i64,             // the candidate (index in `ids`)
+    s: Series,
+    cost: f64,
+    research: Ev,
+    holdout: Ev,
+}
+// Every candidate is simulated before anything is chosen: what is simulated never depends on a
+// result. (The registry gets each candidate's hedged research series below, as the lab does.)
+let weights = [w_mom, w_res, w_max, w_low, w_dy, w_mlv]
+var sims = []
+for k in 0..6 {
+    sims.push(b3.simulate(weights[k], real_costs: true, lag: 1, capital: capital, trial: false))
+}
+var res = []
+for k in 0..7 {
+    let s = if k == 6 { trend_series(start, cdi) } else { series_of(sims[k]) }
+    let cost = if k == 6 { 10.0 } else { sims[k].cost_bps }
+    let research = evaluate(s, true, split, cdi)
+    if not research.ok { continue }
+    res.push(Res { k: k, s: s, cost: cost, research: research, holdout: evaluate(s, false, split, cdi) })
+}
+
+// ------------------------------------------------------------------ the report
+let sha = b3.results_sha256("protocolo_busca.md")
+let verdict = if sha == protocol_sha { "confere com o registrado" } else { "ATENÇÃO: NÃO CONFERE" }
+print("")
+print("================ BUSCA DE ALPHA (protocolo registrado) ================")
+print("Protocolo: results" + "\\" + "protocolo_busca.md  SHA-256 " + substr(sha, 0, 16) + "  (" + verdict + ")")
+print("Alpha = CAPM contra o mercado NEFIN (VW, proxy de ETF). IR = Sharpe da série hedgeada. Sharpe* = sobre o CDI.")
+let vrm_all = b3.nefin("rm_rf", vw: true)
+let vrf_all = b3.nefin("rf", vw: true)
+for period in [("PESQUISA 2001-2018", true), ("HOLDOUT 2019-hoje (olhado uma vez)", false)] {
+    let early = period.1
+    print("")
+    print("--- " + period.0 + " ---")
+    print(left("id", 11) + " " + left("sinal", 31) + " " + right("CAGR", 7) + " " + right("Sharpe*", 7) + " " + right("maxDD", 7) + " " + right("beta", 5) + " " + right("alpha CAPM (t)", 15) + " " + right("IR", 6) + " " + right("alpha 4F (t)", 15) + " " + right("custo", 9))
+    for r in res {
+        let e = if early { r.research } else { r.holdout }
+        if not e.ok { continue }
+        print(left(ids[r.k], 11) + " " + left(descs[r.k], 31) + " " + right(pct(e.cagr), 7) + " " + right(fixed(e.sharpe, 2), 7) + " " + right(pct(e.mdd), 7) + " " + right(fixed(e.beta, 2), 5) + " " + right(pct(e.alpha) + " (" + fixed(e.t_alpha, 2) + ")", 15) + " " + right(fixed(e.ir, 2), 6) + " " + right(e.a4, 15) + " " + right(fixed(r.cost, 0), 5) + " bps")
+    }
+    var mk = []
+    var cc = []
+    for m in start..n {
+        if (m < split) == early and not is_nan(vrf_all[month: m]) {
+            mk.push(vrm_all[month: m] + vrf_all[month: m])
+            cc.push(cdi[month: m])
+        }
+    }
+    var ex = []
+    for i in 0..len(mk) { ex.push(mk[i] - cc[i]) }
+    print(left("MERCADO", 11) + " " + left("NEFIN value-weighted", 31) + " " + right(pct(cagr(mk, 12.0)), 7) + " " + right(fixed(avg(ex) / sd(ex) * sqrt(12.0), 2), 7) + " " + right(pct(max_dd(mk)), 7) + "   (CDI " + pct(cagr(cc, 12.0)) + ")")
+}
+
+// the registry: every candidate, its hedged research series
+print("")
+for r in res {
+    let _ = b3.record_trial("busca", ids[r.k], "protocolo e83eb427 alpha CAPM hedgeado", "2001-2018", r.research.hedged)
+}
+
+// the selection and the validation, by the registered rule
+var chosen = -1
+for i in 0..len(res) {
+    if res[i].research.t_alpha > 2.0 and (chosen < 0 or res[i].research.ir >= res[chosen].research.ir) { chosen = i }
+}
+var sel = 0
+var validated = false
+var motivo = ""
+if chosen < 0 {
+    for i in 0..len(res) {
+        if res[i].research.ir >= res[sel].research.ir { sel = i }
+    }
+    motivo = "nenhum candidato com alpha CAPM t > 2 na pesquisa: nenhum alpha encontrado"
+} else {
+    sel = chosen
+    let c = res[chosen]
+    let df = b3.deflate_trial(c.research.hedged)
+    let hold_ok = c.holdout.ok and c.holdout.alpha > 0.0
+    let dsr_ok = df[2] >= 0.90
+    let hold = if c.holdout.ok { pct(c.holdout.alpha) } else { "" }
+    motivo = "selecionado " + ids[c.k] + " (IR pesquisa " + fixed(c.research.ir, 2) + ", t=" + fixed(c.research.t_alpha, 2) + "); holdout alpha " + hold + " -> " + (if hold_ok { "ok" } else { "falhou" }) + "; DSR " + fixed(100.0 * df[2], 0) + "% com " + str(int(df[0])) + " tentativas (acaso ~" + fixed(df[1], 2) + ") -> " + (if dsr_ok { "ok" } else { "falhou" })
+    validated = hold_ok and dsr_ok
+}
+print("Decisão pela regra registrada: " + motivo)
+let s_id = ids[res[sel].k]
+let s_desc = descs[res[sel].k]
+if validated {
+    print("RESULTADO: ALPHA VALIDADO: " + s_id + " (" + s_desc + ")")
+} else {
+    print("RESULTADO: nenhum alpha validado; candidato em observação: " + s_id + " (" + s_desc + ")")
+}
+
+fn after_ir(w: f64) -> f64 {
+    if w > 1.0 { 1.0 + 0.85 * (w - 1.0) } else { w }
+}
+fn yearly(w: f64, k: f64) -> f64 {
+    w ^ (12.0 / k) - 1.0
+}
+// In practice (a selected stock portfolio): after the individual investor's IR, against an ETF
+// and the CDI. Every stock candidate is simulated and the chosen one is shown, so the
+// simulations do not depend on the choice.
+let caps = [100000.0, 300000.0]
+var taxed = []
+for k in 0..6 {
+    var by_cap = []
+    for cap in caps {
+        by_cap.push(b3.simulate(weights[k], real_costs: true, lag: 1, capital: cap / defl, tax: true, trial: false))
+    }
+    taxed.push(by_cap)
+}
+if res[sel].k != 6 {
+    print("")
+    print("Na prática (período todo, custo real, 1 pregão de atraso, depois do IR de pessoa física):")
+    for c in 0..len(caps) {
+        let cap = caps[c]
+        let o = taxed[res[sel].k][c]
+        let ss = series_of(o)
+        let k = float(len(ss.mis))
+        var w_cdi = 1.0
+        var w_mkt = 1.0
+        for m in ss.mis {
+            w_cdi *= 1.0 + cdi[month: m]
+            w_mkt *= if is_nan(vrf_all[month: m]) { 1.0 + cdi[month: m] } else { 1.0 + vrm_all[month: m] + vrf_all[month: m] }
+        }
+        print("  R$ " + fixed(cap / 1000.0, 0) + " mil de hoje: " + s_id + " " + pct(yearly(o.final_value / (cap / defl), k)) + " ao ano | ETF " + pct(yearly(after_ir(w_mkt), k)) + " | CDI " + pct(yearly(after_ir(w_cdi), k)) + " (meses isentos " + str(o.exempt_months) + "/" + str(o.exempt_months + o.taxed_months) + ")")
+    }
+}

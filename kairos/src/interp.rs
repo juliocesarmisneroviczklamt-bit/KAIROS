@@ -581,6 +581,12 @@ impl<'a> Interp<'a> {
                 other => unreachable!("int of {other:?}"),
             },
             Builtin::ToStr => Ok(Value::Str(self.display(&v[0], true).into())),
+            Builtin::Substr => {
+                let Value::Str(s) = &v[0] else { unreachable!("substr of a non-string") };
+                let a = as_int(v[1].clone()).max(0) as usize;
+                let c = as_int(v[2].clone()).max(0) as usize;
+                Ok(Value::Str(s.chars().skip(a).take(c).collect::<String>().into()))
+            }
             Builtin::FormatFixed => {
                 let x = float(&v[0]);
                 let d = as_int(v[1].clone()).clamp(0, 30) as usize;
