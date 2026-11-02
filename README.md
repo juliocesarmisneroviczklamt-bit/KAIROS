@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.8.0 (M8)
+## Estado: v0.10.0 (M10)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -33,9 +33,11 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR), pré-registrado | ✅ rejeitado pela própria regra ([relatório](kairos/research/m6-report.md)); holdout reservado até 2028-11 |
 | M7 | back-end nativo (Cranelift) + `kairos-bench` | ✅ 1,20× Rust na média geométrica, com os mesmos bits |
 | M8 | o laboratório escrito em Kairós: universo, estatística, carteiras e os 5 estudos | ✅ cada estudo imprime o relatório do Rust linha por linha |
-| M9 | arquivos e texto: CSV, JSON, datas; paper trading e coleta de dados em Kairós | próximo |
-| M10 | o simulador (custos, impacto, IR) escrito em Kairós | |
-| M11 | auto-hospedagem: o compilador da Kairós escrito em Kairós | |
+| M9 | arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós (JSON, CSV, datas) | ✅ registro de tentativas e coleta macro em Kairós, iguais ao Rust |
+| M10 | a base de dados montada em Kairós: COTAHIST, eventos da B3, painel | ✅ `bars.bin`, cache de eventos e `panel.bin` iguais aos do Rust, byte a byte |
+| M11 | o simulador (custos, impacto, IR) escrito em Kairós | próximo |
+| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós | |
+| — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3
 
@@ -153,6 +155,19 @@ kairos run kairos/lab/search.krs       # busca de alpha do protocolo registrado 
 ```
 
 O universo líquido do NEFIN, em [`universe.krs`](kairos/lab/universe.krs), dá exatamente o do Rust: 41.106 pares ativo-mês, sem nenhuma diferença. O compilador também prova que ele só usa o passado. As estatísticas de [`stats.krs`](kairos/lab/stats.krs), MQO com Newey-West incluído, são bit a bit iguais às do Rust. Rodar os estudos não infla o registro: uma estratégia conta como uma tentativa, por mais vezes que seja executada.
+
+## A base de dados em Kairós (M10)
+
+Os dados do laboratório (cotações da B3 desde 1995, eventos corporativos, CDI, IPCA e fatores do NEFIN) são baixados e montados por programas Kairós, e cada etapa grava os mesmos bytes que o Rust gravava:
+
+```text
+kairos run kairos/lab/fetch_cotahist.krs   # ZIPs anuais da B3
+kairos run kairos/lab/ingest.krs           # COTAHIST -> data/processed/bars.bin
+kairos run kairos/lab/fetch_events.krs     # proventos, desdobramentos, cisões... (API da B3)
+kairos run kairos/lab/fetch_macro.krs      # CDI, IPCA, NEFIN
+kairos run kairos/lab/build.krs            # retorno total diário -> data/processed/panel.bin
+kairos run kairos/lab/update.krs           # tudo isso, incremental, como a atualização diária
+```
 
 ## Como usar
 

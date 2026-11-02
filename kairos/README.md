@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.8.0**, com o roteiro M1–M8 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.10.0**, com o roteiro M1–M10 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -10,7 +10,9 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.8.0**, com o
 - M5: holdout de uso único + registro de tentativas;
 - M6: primeiro modelo, pré-registrado e avaliado;
 - M7: código nativo com Cranelift;
-- M8: o laboratório escrito em Kairós ([`lab/`](lab)).
+- M8: o laboratório escrito em Kairós ([`lab/`](lab));
+- M9: arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós;
+- M10: a base de dados do laboratório montada em Kairós.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -114,11 +116,20 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **`import "arquivo.krs"`**, dados diários `Tensor[month, session, asset]`, `b3.simulate` e `b3.record_trial`.
 - **Uma estratégia é uma tentativa,** por mais vezes que seja executada.
 
+**M9 (arquivos, texto, mapas e internet)**
+- **Texto e arquivos** (`split`, `lines`, `read_text`, `write_text`, `list_dir`…), **`Map[K, V]`** e **HTTP** pelo `curl` do sistema.
+- **Biblioteca padrão escrita em Kairós:** [`std/json.krs`](std/json.krs), [`std/csv.krs`](std/csv.krs), [`std/dates.krs`](std/dates.krs) e [`std/base64.krs`](std/base64.krs).
+- **Registro de tentativas** ([`lab/registry.krs`](lab/registry.krs)) e **coleta macro** ([`lab/fetch_macro.krs`](lab/fetch_macro.krs)) iguais aos do Rust.
+
+**M10 (a base de dados em Kairós)**
+- **COTAHIST → `bars.bin` → eventos → `panel.bin`**, byte a byte iguais aos do Rust: [`lab/ingest.krs`](lab/ingest.krs), [`lab/build.krs`](lab/build.krs), [`lab/update.krs`](lab/update.krs).
+- **Runtime:** `read_lines` (texto de largura fixa, inclusive dentro de ZIPs), `Bytes` (formatos binários), operações de bits, downloads em paralelo.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M9 | arquivos e texto (CSV, JSON, datas): paper trading e coleta de dados em Kairós |
-| M10 | o simulador (custos, impacto, IR) escrito em Kairós |
-| M11 | auto-hospedagem: o compilador da Kairós escrito em Kairós |
+| M11 | o simulador (custos, impacto, IR) escrito em Kairós |
+| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós |
+| — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

@@ -2,7 +2,7 @@
   "name": "kairos",
   "displayName": "Kairós",
   "description": "Suporte à linguagem Kairós (.krs): reconhecimento de arquivos, cores de sintaxe, comentários, colchetes e blocos ```krs no Markdown.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "kairos-lang",
   "license": "MIT",
   "homepage": "https://github.com/juliocesarmisneroviczklamt-bit/KAIROS",

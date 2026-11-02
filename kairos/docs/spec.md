@@ -738,6 +738,8 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M6 | primeiro modelo inédito (carteira com IR suave) | ✅ protocolo publicado antes (commit `52a186d`, `research/m6-protocol.md`); walk-forward provado causal; simulador real com custos e IR; 3 tentativas no registro; DSR 0,8%: **rejeitado** pela própria regra ([relatório](../research/m6-report.md)); holdout (o futuro, ≥ 24 meses) reservado no livro-razão |
 | M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ✅ JIT de funções escalares puras, com os mesmos bits e erros do interpretador; `kairos-bench`: 1,20× Rust na média geométrica de 6 programas (1,00× a 1,50×); `t3` fica para depois (§9.1) |
 | M8 | o laboratório escrito em Kairós: `import`, dados diários, `b3.simulate`, registro (§10) | ✅ os 5 estudos do `quant-b3` (`lab/*.krs`) imprimem o relatório do Rust linha por linha; universo NEFIN igual (41.106 pares); estatística bit a bit; o registro não muda |
-| M9 | arquivos e texto: leitura e escrita, CSV, JSON, datas | o paper trading e a coleta de dados escritos em Kairós |
-| M10 | o simulador em Kairós (custos, impacto, IR) | os relatórios continuam idênticos com o simulador escrito em Kairós |
-| M11 | auto-hospedagem | o compilador da Kairós, escrito em Kairós, compila a si mesmo |
+| M9 | arquivos, texto, mapas, internet; biblioteca padrão escrita em Kairós (§4.6–4.8) | ✅ o registro de tentativas e a coleta macro em Kairós dão os mesmos relatórios e arquivos do Rust |
+| M10 | a base de dados em Kairós: COTAHIST, eventos da B3, painel (§4.9) | ✅ `bars.bin` (220 MB), cache de eventos, `panel.bin` (80 MB) e diagnósticos iguais aos do Rust, byte a byte |
+| M11 | o simulador em Kairós (custos, impacto, IR) | os relatórios continuam idênticos com o simulador escrito em Kairós |
+| M12 | auto-hospedagem | o compilador da Kairós, escrito em Kairós, compila a si mesmo |
+| — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |

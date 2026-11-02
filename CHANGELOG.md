@@ -2,6 +2,35 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.10.0 — M10: a base de dados do laboratório montada em Kairós
+
+**Do download ao painel, os dados do laboratório agora são montados por programas Kairós.** Cada etapa grava os mesmos bytes que o Rust gravava.
+
+| etapa | programa ([`kairos/lab/`](kairos/lab)) | conferido contra o Rust |
+|---|---|---|
+| ZIPs anuais da COTAHIST | `fetch_cotahist.krs` | o mesmo ZIP baixado; ano já completo não é baixado de novo |
+| COTAHIST → `bars.bin` | `ingest.krs` | 220 MB iguais, byte a byte: 2,3 milhões de pregões, 2.241 séries, 381 trocas de código encadeadas por ISIN, em 42 s |
+| eventos da API da B3 | `fetch_events.krs` | os arquivos de cache iguais, byte a byte, e os mesmos nomes de arquivo (hash FNV-1a) nos 2.632 já baixados |
+| CDI, IPCA, NEFIN | `fetch_macro.krs` | os 6 arquivos iguais; o CDI também se atualiza só no fim |
+| eventos + `bars.bin` → `panel.bin` | `build.krs` | `panel.bin` (80 MB), os 3 CSVs de diagnóstico e as estatísticas iguais, em 16 s |
+| a atualização diária | `update.krs` | as mesmas etapas que o paper trading roda antes de operar |
+
+- **O painel em Kairós:** proventos e JCP, desdobramentos e grupamentos, cisões, subscrições, desdobramentos inferidos (marcador EB/EG ou razão enorme exata) e saltos sem explicação neutralizados. Reproduz até o jeito do `serde` de ignorar um arquivo de eventos inteiro quando um campo vem com o tipo errado.
+- **Runtime:**
+  - `read_lines(arquivo, filtros)` lê texto de largura fixa, inclusive de dentro de ZIPs, filtrando por coluna durante a leitura: os 86 MB da COTAHIST 2026 viram 296.697 linhas em 1 s;
+  - o tipo `Bytes` (`put_*`/`get_*` de u8, u32, u64, i64, f32, f64 e texto; `write_bytes`/`read_bytes`) lê e grava os formatos binários do laboratório;
+  - operações de bits, aritmética que dá a volta (`wrapping_add/mul`), `to_hex`, `file_size`, `file_date` e `http_get_all` (vários downloads em paralelo);
+  - `substr` em texto ASCII corta os bytes direto.
+- **Biblioteca padrão:**
+  - `std/base64.krs`;
+  - `std/json.krs` ganhou `json_try`, que devolve o erro em vez de parar, e lê com o rigor do `serde_json`.
+- **Testes:**
+  - um mercado sintético que exercita todas as regras do painel tem de dar o mesmo `panel.bin` e os mesmos CSVs do Rust, nos 12 ambientes do CI;
+  - os mesmos testes rodam com os dados reais (`--ignored`).
+- **Ainda em Rust:**
+  - o simulador e o registro, chamados pelo módulo `b3` (o próximo marco);
+  - o paper trading. Ele precisa ver os dados de nov/2026 em diante, que a Kairós esconde até o holdout do M6 abrir (~2028-11). A decisão sobre isso é do usuário.
+
 ## 0.9.0 — M9: arquivos, texto, mapas, internet e a biblioteca padrão em Kairós
 
 **A Kairós passa a ler e escrever arquivos, baixar da internet e processar texto, e a biblioteca padrão é escrita nela mesma.** Com isso, mais duas partes do laboratório saíram do Rust: o registro de tentativas e a coleta dos dados macro.
