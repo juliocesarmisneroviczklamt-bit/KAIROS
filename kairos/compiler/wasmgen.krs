@@ -342,6 +342,7 @@ fn vt(t: Ty) -> i64 {
         TStruct(_) => wt_i32(),
         TList(_) => wt_i32(),
         TEnum(_) => wt_i32(),
+        TMap(_, _) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -356,6 +357,7 @@ fn heap(t: Ty) -> bool {
         TStruct(_) => true,
         TList(_) => true,
         TEnum(_) => true,
+        TMap(_, _) => true,
         _ => false,
     }
 }
@@ -510,11 +512,12 @@ fn cell_store(inout g: WGen, c: Cell) {
 }
 
 // The cell of a place. Each object on the way is made unique first (copied when shared), so
-// changing the cell changes no other value.
-fn place_cell(inout g: WGen, p: H) -> Cell {
+// changing the cell changes no other value. With `insert`, a map at the end gets the key when it
+// does not have it (an assignment: `m[k] = v`).
+fn place_cell(inout g: WGen, p: H, insert: bool) -> Cell {
     if p.kind == "plocal" { return Cell { local: true, at: g.slot_local[p.n], off: 0, ty: g.slot_ty[p.n] } }
     if p.kind == "pfield" {
-        let b = place_cell(inout g, p.kids[0])
+        let b = place_cell(inout g, p.kids[0], false)
         cell_load(inout g, b)
         call_f(inout g, glue_fn(inout g, "unique", b.ty))
         cell_store(inout g, b)
@@ -524,14 +527,11 @@ fn place_cell(inout g: WGen, p: H) -> Cell {
         return Cell { local: false, at: a, off: 8 + 8 * p.n, ty: field_tys(g, b.ty)[p.n] }
     }
     if p.kind == "pindex" {
-        let b = place_cell(inout g, p.kids[0])
-        if not is_list(b.ty) {
-            wg_fail(inout g, p, "changing a value in a map")
-            return b
-        }
+        let b = place_cell(inout g, p.kids[0], false)
         cell_load(inout g, b)
         call_f(inout g, glue_fn(inout g, "unique", b.ty))
         cell_store(inout g, b)
+        if is_map(b.ty) { return map_cell(inout g, p, b, insert) }
         let o = new_local(inout g, wt_i32())
         cell_load(inout g, b)
         lset(inout g, o)
@@ -645,7 +645,7 @@ fn gen(inout g: WGen, e: H) {
         if k == "assign" and p.kind == "plocal" { return set_slot(inout g, p.n) }
         let tv = new_local(inout g, if w > 0 { w } else { wt_i32() })
         if w > 0 { lset(inout g, tv) }
-        let c = place_cell(inout g, p)
+        let c = place_cell(inout g, p, k == "assign")
         if g.failed { return }
         if k == "assign" {
             if heap(c.ty) {
@@ -683,9 +683,10 @@ fn gen(inout g: WGen, e: H) {
     }
     if k == "list" { return list_lit(inout g, e) }
     if k == "variant" { return variant_lit(inout g, e) }
+    if k == "map" { return map_lit(inout g, e) }
     if k == "index" {
         if is_list(e.kids[0].t) { return index_list(inout g, e) }
-        return wg_fail(inout g, e, "maps")
+        return index_map(inout g, e)
     }
     if k == "forlist" { return for_list(inout g, e) }
     if k == "struct" or k == "tuple" {
@@ -1190,6 +1191,7 @@ fn builtin_w(inout g: WGen, e: H) {
     let args = e.kids
     if b == "push" { return push_w(inout g, e) }
     if b == "pop" { return pop_w(inout g, e) }
+    if b == "remove" { return remove_w(inout g, e) }
     for a in args {
         if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
     }
@@ -1352,7 +1354,9 @@ fn builtin_w(inout g: WGen, e: H) {
         }
         return wg_fail(inout g, x, "`str` of values of type `" + show(g.ck, x.t) + "`")
     }
-    if b == "len" and is_list(args[0].kids[0].t) {
+    if b == "keys" or b == "values" or b == "items" { return map_list(inout g, e, b) }
+    if b == "get" { return get_w(inout g, e) }
+    if b == "len" and (is_list(args[0].kids[0].t) or is_map(args[0].kids[0].t)) {
         let tl = gen_borrow(inout g, args[0].kids[0], true)
         load_at(inout g, wt_i32(), 4)
         op(inout g, 173)
@@ -1375,7 +1379,21 @@ fn builtin_w(inout g: WGen, e: H) {
             drop_tmp(inout g, t0, a0.t)
             return drop_tmp(inout g, t1, a1.t)
         }
-        return wg_fail(inout g, e, "maps")
+        // a key of a map
+        let a1 = args[1].kids[0]
+        let kt = map_kv(g, a0.t).0
+        let t0 = gen_borrow(inout g, a0, not changes(a1))
+        let o = new_local(inout g, wt_i32())
+        lset(inout g, o)
+        let t1 = gen_borrow(inout g, a1, true)
+        let k = new_local(inout g, vt(kt))
+        lset(inout g, k)
+        let i = map_find(inout g, o, k, kt)
+        lget(inout g, i)
+        i64c(inout g, 0)
+        op(inout g, 89)
+        drop_tmp(inout g, t0, a0.t)
+        return drop_tmp(inout g, t1, a1.t)
     }
     if b == "split" {
         let a0 = args[0].kids[0]
@@ -1750,7 +1768,7 @@ fn push_w(inout g: WGen, e: H) {
     gen(inout g, v)
     let tv = new_local(inout g, if w > 0 { w } else { wt_i32() })
     if w > 0 { lset(inout g, tv) }
-    let c = place_cell(inout g, e.kids[0].kids[0])
+    let c = place_cell(inout g, e.kids[0].kids[0], false)
     if g.failed { return }
     cell_load(inout g, c)
     call_f(inout g, glue_fn(inout g, "unique", c.ty))
@@ -1779,7 +1797,7 @@ fn push_w(inout g: WGen, e: H) {
 
 // `xs.pop()`: the last element (it moves out of the list); R0004 on an empty list
 fn pop_w(inout g: WGen, e: H) {
-    let c = place_cell(inout g, e.kids[0].kids[0])
+    let c = place_cell(inout g, e.kids[0].kids[0], false)
     if g.failed { return }
     cell_load(inout g, c)
     call_f(inout g, glue_fn(inout g, "unique", c.ty))
@@ -2045,7 +2063,7 @@ fn call_inout(inout g: WGen, e: H) {
     for i in 0..len(e.kids) {
         let a = e.kids[i]
         if a.kind == "inout" {
-            let c = place_cell(inout g, a.kids[0])
+            let c = place_cell(inout g, a.kids[0], false)
             if g.failed { return }
             cells.push(c)
             let w = vt(c.ty)
@@ -2083,6 +2101,477 @@ fn exit_values(inout g: WGen) {
     }
 }
 
+// ------------------------------------------------------------------ maps
+//
+// The runtime keeps the entries and their table (rt.krs); the back end moves the keys and values
+// in and out, with their references.
+
+fn is_map(t: Ty) -> bool {
+    match t {
+        TMap(_, _) => true,
+        _ => false,
+    }
+}
+
+fn map_kv(g: WGen, t: Ty) -> (Ty, Ty) {
+    match t {
+        TMap(k, v) => (fin_ty(g.ck, k), fin_ty(g.ck, v)),
+        _ => (Ty.TUnit, Ty.TUnit),
+    }
+}
+
+// The arguments the runtime takes for a key: the map (local o), the key (local k) as 64 bits, and
+// whether keys are texts.
+fn map_args(inout g: WGen, o: i64, k: i64, kt: Ty) {
+    lget(inout g, o)
+    op(inout g, 173)
+    lget(inout g, k)
+    if kt == Ty.TStr { op(inout g, 173) }
+    i32c(inout g, if kt == Ty.TStr { 1 } else { 0 })
+}
+
+// The address of entry i (an i64 in local `i`) of the map in local `o`, minus 16 (the key is at
+// offset 16 from it, the value at 24).
+fn entry_addr(inout g: WGen, o: i64, i: i64) {
+    lget(inout g, o)
+    lget(inout g, i)
+    op(inout g, 167)
+    i32c(inout g, 4)
+    op(inout g, 116)
+    op(inout g, 106)
+}
+
+// The index of key k (local) in the map o (local), in a new local (-1: not there).
+fn map_find(inout g: WGen, o: i64, k: i64, kt: Ty) -> i64 {
+    map_args(inout g, o, k, kt)
+    call_f(inout g, rt_fn(inout g, "rt_map_find"))
+    let i = new_local(inout g, wt_i64())
+    lset(inout g, i)
+    i
+}
+
+// R0012 unless the index in local i was found.
+fn check_key(inout g: WGen, e: H, i: i64, k: i64, kt: Ty) {
+    lget(inout g, i)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    open(inout g, 4, 0)
+    fail_dyn2(inout g, e, "R0012", ["no key ", " in the map"], [(k, if kt == Ty.TStr { "rt_str_debug" } else { "rt_str_i64" })])
+    close(inout g)
+}
+
+// `[k: v, ...]`: a later value of the same key replaces the earlier one, at its place
+fn map_lit(inout g: WGen, e: H) {
+    let kv = map_kv(g, e.t)
+    let kw = vt(kv.0)
+    let w = vt(kv.1)
+    let n = len(e.kids) / 2
+    i64c(inout g, n)
+    call_f(inout g, rt_fn(inout g, "rt_map_new"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    for j in 0..n {
+        gen(inout g, e.kids[2 * j])
+        let k = new_local(inout g, kw)
+        lset(inout g, k)
+        gen(inout g, e.kids[2 * j + 1])
+        let v = new_local(inout g, if w > 0 { w } else { wt_i32() })
+        if w > 0 { lset(inout g, v) }
+        let i = map_find(inout g, o, k, kv.0)
+        lget(inout g, i)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        // a new key: it moves into the map
+        map_args(inout g, o, k, kv.0)
+        call_f(inout g, rt_fn(inout g, "rt_map_add"))
+        lset(inout g, i)
+        else_(inout g)
+        // the same key again: the map keeps its own; the old value goes
+        lget(inout g, k)
+        drop_v(inout g, kv.0)
+        if heap(kv.1) {
+            entry_addr(inout g, o, i)
+            load_at(inout g, wt_i32(), 24)
+            drop_v(inout g, kv.1)
+        }
+        close(inout g)
+        if w > 0 {
+            entry_addr(inout g, o, i)
+            lget(inout g, v)
+            store_at(inout g, w, 24)
+        }
+    }
+    lget(inout g, o)
+}
+
+// `m[k]` (R0012 when the key is not there)
+fn index_map(inout g: WGen, e: H) {
+    let m = e.kids[0]
+    let kx = e.kids[1]
+    let kv = map_kv(g, m.t)
+    let w = vt(kv.1)
+    let tm = gen_borrow(inout g, m, not changes(kx))
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    let tk = gen_borrow(inout g, kx, true)
+    let k = new_local(inout g, vt(kv.0))
+    lset(inout g, k)
+    let i = map_find(inout g, o, k, kv.0)
+    check_key(inout g, e, i, k, kv.0)
+    if w > 0 {
+        entry_addr(inout g, o, i)
+        load_at(inout g, w, 24)
+        incref(inout g, kv.1)
+    }
+    drop_tmp(inout g, tm, m.t)
+    drop_tmp(inout g, tk, kx.t)
+}
+
+// The cell of `m[k]` (the map in cell b, made unique): with `insert`, a new key is added (with
+// room made for it), otherwise R0012.
+fn map_cell(inout g: WGen, p: H, b: Cell, insert: bool) -> Cell {
+    let kv = map_kv(g, b.ty)
+    let o = new_local(inout g, wt_i32())
+    cell_load(inout g, b)
+    lset(inout g, o)
+    gen(inout g, p.kids[1])
+    let k = new_local(inout g, vt(kv.0))
+    lset(inout g, k)
+    let i = map_find(inout g, o, k, kv.0)
+    if insert {
+        lget(inout g, i)
+        i64c(inout g, 0)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        lget(inout g, o)
+        op(inout g, 173)
+        i32c(inout g, if kv.0 == Ty.TStr { 1 } else { 0 })
+        call_f(inout g, rt_fn(inout g, "rt_map_room"))
+        op(inout g, 167)
+        op_u(inout g, 34, o)
+        cell_store(inout g, b)
+        map_args(inout g, o, k, kv.0)
+        call_f(inout g, rt_fn(inout g, "rt_map_add"))
+        lset(inout g, i)
+        else_(inout g)
+        lget(inout g, k)
+        drop_v(inout g, kv.0)
+        close(inout g)
+    } else {
+        check_key(inout g, p, i, k, kv.0)
+        lget(inout g, k)
+        drop_v(inout g, kv.0)
+    }
+    entry_addr(inout g, o, i)
+    let a = new_local(inout g, wt_i32())
+    lset(inout g, a)
+    Cell { local: false, at: a, off: 24, ty: kv.1 }
+}
+
+// `remove(inout m, k)`: the key first, then the map
+fn remove_w(inout g: WGen, e: H) {
+    let kx = e.kids[1].kids[0]
+    gen(inout g, kx)
+    let k = new_local(inout g, vt_of(inout g, kx))
+    lset(inout g, k)
+    let c = place_cell(inout g, e.kids[0].kids[0], false)
+    if g.failed { return }
+    let kv = map_kv(g, c.ty)
+    cell_load(inout g, c)
+    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    cell_store(inout g, c)
+    let i = map_find(inout g, o, k, kv.0)
+    lget(inout g, i)
+    i64c(inout g, 0)
+    op(inout g, 89)
+    open(inout g, 4, 0)
+    if heap(kv.0) {
+        entry_addr(inout g, o, i)
+        load_at(inout g, wt_i32(), 16)
+        drop_v(inout g, kv.0)
+    }
+    if heap(kv.1) {
+        entry_addr(inout g, o, i)
+        load_at(inout g, wt_i32(), 24)
+        drop_v(inout g, kv.1)
+    }
+    lget(inout g, o)
+    op(inout g, 173)
+    lget(inout g, i)
+    i32c(inout g, if kv.0 == Ty.TStr { 1 } else { 0 })
+    call_f(inout g, rt_fn(inout g, "rt_map_remove"))
+    close(inout g)
+    lget(inout g, k)
+    drop_v(inout g, kx.t)
+}
+
+// keys(m), values(m), items(m): a new list
+fn map_list(inout g: WGen, e: H, what: str) {
+    let m = e.kids[0].kids[0]
+    let kv = map_kv(g, m.t)
+    let tm = gen_borrow(inout g, m, true)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    list_len(inout g, o)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let q = new_local(inout g, wt_i32())
+    lset(inout g, q)
+    let lp = loop_begin(inout g, o)
+    let et = elem_ty(g, e.t)
+    let w = vt(et)
+    if w > 0 { elem_addr(inout g, q, lp.0) }
+    if what == "keys" or what == "values" {
+        let t = if what == "keys" { kv.0 } else { kv.1 }
+        if w > 0 {
+            entry_addr(inout g, o, lp.0)
+            load_at(inout g, w, if what == "keys" { 16 } else { 24 })
+            incref(inout g, t)
+        }
+    } else {
+        // a tuple (key, value) for each entry
+        i64c(inout g, 24)
+        call_f(inout g, rt_fn(inout g, "rt_alloc"))
+        op(inout g, 167)
+        let tu = new_local(inout g, wt_i32())
+        lset(inout g, tu)
+        lget(inout g, tu)
+        i32c(inout g, 1)
+        store_at(inout g, wt_i32(), 0)
+        let kw = vt(kv.0)
+        lget(inout g, tu)
+        entry_addr(inout g, o, lp.0)
+        load_at(inout g, kw, 16)
+        incref(inout g, kv.0)
+        store_at(inout g, kw, 8)
+        let vw = vt(kv.1)
+        if vw > 0 {
+            lget(inout g, tu)
+            entry_addr(inout g, o, lp.0)
+            load_at(inout g, vw, 24)
+            incref(inout g, kv.1)
+            store_at(inout g, vw, 16)
+        }
+        lget(inout g, tu)
+    }
+    if w > 0 { store_at(inout g, w, 16) }
+    loop_end(inout g, lp)
+    lget(inout g, q)
+    drop_tmp(inout g, tm, m.t)
+}
+
+// get(m, k, default): the value of k, or the default
+fn get_w(inout g: WGen, e: H) {
+    let m = e.kids[0].kids[0]
+    let kx = e.kids[1].kids[0]
+    let dx = e.kids[2].kids[0]
+    let kv = map_kv(g, m.t)
+    let w = vt(kv.1)
+    let tm = gen_borrow(inout g, m, not changes(kx) and not changes(dx))
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    let tk = gen_borrow(inout g, kx, not changes(dx))
+    let k = new_local(inout g, vt(kv.0))
+    lset(inout g, k)
+    gen(inout g, dx)
+    let d = new_local(inout g, if w > 0 { w } else { wt_i32() })
+    if w > 0 { lset(inout g, d) }
+    let i = map_find(inout g, o, k, kv.0)
+    lget(inout g, i)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    open(inout g, 4, w)
+    if w > 0 { lget(inout g, d) }
+    else_(inout g)
+    if heap(kv.1) {
+        lget(inout g, d)
+        drop_v(inout g, kv.1)
+    }
+    if w > 0 {
+        entry_addr(inout g, o, i)
+        load_at(inout g, w, 24)
+        incref(inout g, kv.1)
+    }
+    close(inout g)
+    drop_tmp(inout g, tm, m.t)
+    drop_tmp(inout g, tk, kx.t)
+}
+
+fn glue_drop_map(inout g: WGen, t: Ty) {
+    let kv = map_kv(g, t)
+    if heap(kv.0) or heap(kv.1) {
+        let lp = loop_begin(inout g, 0)
+        if heap(kv.0) {
+            entry_addr(inout g, 0, lp.0)
+            load_at(inout g, wt_i32(), 16)
+            drop_v(inout g, kv.0)
+        }
+        if heap(kv.1) {
+            entry_addr(inout g, 0, lp.0)
+            load_at(inout g, wt_i32(), 24)
+            drop_v(inout g, kv.1)
+        }
+        loop_end(inout g, lp)
+    }
+    lget(inout g, 0)
+    op(inout g, 173)
+    map_size(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_free"))
+}
+
+// The bytes of the map in local o, as an i64: 16 + 16 cap + 4 tsize.
+fn map_size(inout g: WGen, o: i64) {
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 8)
+    i32c(inout g, 4)
+    op(inout g, 116)
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 12)
+    i32c(inout g, 2)
+    op(inout g, 116)
+    op(inout g, 106)
+    i32c(inout g, 16)
+    op(inout g, 106)
+    op(inout g, 173)
+}
+
+fn glue_unique_map(inout g: WGen, t: Ty) {
+    let kv = map_kv(g, t)
+    let q = new_local(inout g, wt_i32())
+    let n = new_local(inout g, wt_i64())
+    map_size(inout g, 0)
+    lset(inout g, n)
+    lget(inout g, n)
+    call_f(inout g, rt_fn(inout g, "rt_alloc"))
+    op(inout g, 167)
+    lset(inout g, q)
+    // the same bytes (entries and table), then a count of 1 and a reference more for each child
+    let i = new_local(inout g, wt_i64())
+    open(inout g, 2, 0)
+    let exit = g.depth
+    open(inout g, 3, 0)
+    let top = g.depth
+    lget(inout g, i)
+    lget(inout g, n)
+    op(inout g, 89)
+    br_to(inout g, exit, true)
+    lget(inout g, q)
+    lget(inout g, i)
+    op(inout g, 167)
+    op(inout g, 106)
+    lget(inout g, 0)
+    lget(inout g, i)
+    op(inout g, 167)
+    op(inout g, 106)
+    load_at(inout g, wt_i64(), 0)
+    store_at(inout g, wt_i64(), 0)
+    lget(inout g, i)
+    i64c(inout g, 8)
+    op(inout g, 124)
+    lset(inout g, i)
+    br_to(inout g, top, false)
+    close(inout g)
+    close(inout g)
+    lget(inout g, q)
+    i32c(inout g, 1)
+    store_at(inout g, wt_i32(), 0)
+    if heap(kv.0) or heap(kv.1) {
+        let lp = loop_begin(inout g, q)
+        if heap(kv.0) {
+            entry_addr(inout g, q, lp.0)
+            load_at(inout g, wt_i32(), 16)
+            incref(inout g, kv.0)
+            op(inout g, 26)
+        }
+        if heap(kv.1) {
+            entry_addr(inout g, q, lp.0)
+            load_at(inout g, wt_i32(), 24)
+            incref(inout g, kv.1)
+            op(inout g, 26)
+        }
+        loop_end(inout g, lp)
+    }
+    lget(inout g, 0)
+    drop_v(inout g, t)
+    lget(inout g, q)
+}
+
+fn glue_show_map(inout g: WGen, t: Ty) {
+    let kv = map_kv(g, t)
+    let acc = new_local(inout g, wt_i32())
+    let a = new_local(inout g, wt_i32())
+    // [:] when empty
+    list_len(inout g, 0)
+    op(inout g, 80)
+    open(inout g, 4, 0)
+    i32c(inout g, intern_obj(inout g, "[:]"))
+    op(inout g, 15)
+    close(inout g)
+    i32c(inout g, intern_obj(inout g, "["))
+    lset(inout g, acc)
+    let lp = loop_begin(inout g, 0)
+    lget(inout g, lp.0)
+    op(inout g, 80)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    acc_text(inout g, acc, ", ")
+    close(inout g)
+    entry_addr(inout g, 0, lp.0)
+    lset(inout g, a)
+    show_inner(inout g, a, 16, kv.0)
+    acc_owned(inout g, acc)
+    acc_text(inout g, acc, ": ")
+    show_inner(inout g, a, 24, kv.1)
+    acc_owned(inout g, acc)
+    loop_end(inout g, lp)
+    acc_text(inout g, acc, "]")
+    lget(inout g, acc)
+}
+
+// Maps are equal with the same keys, each with equal values, in any order.
+fn glue_eq_map(inout g: WGen, t: Ty) {
+    let kv = map_kv(g, t)
+    list_len(inout g, 0)
+    list_len(inout g, 1)
+    op(inout g, 82)
+    open(inout g, 4, 0)
+    i32c(inout g, 0)
+    op(inout g, 15)
+    close(inout g)
+    let k = new_local(inout g, vt(kv.0))
+    let lp = loop_begin(inout g, 0)
+    entry_addr(inout g, 0, lp.0)
+    load_at(inout g, vt(kv.0), 16)
+    lset(inout g, k)
+    let j = map_find(inout g, 1, k, kv.0)
+    lget(inout g, j)
+    i64c(inout g, 0)
+    op(inout g, 83)
+    open(inout g, 4, 0)
+    i32c(inout g, 0)
+    op(inout g, 15)
+    close(inout g)
+    let w = vt(kv.1)
+    if w > 0 {
+        entry_addr(inout g, 0, lp.0)
+        load_at(inout g, w, 24)
+        entry_addr(inout g, 1, j)
+        load_at(inout g, w, 24)
+        eq_values(inout g, kv.1)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        i32c(inout g, 0)
+        op(inout g, 15)
+        close(inout g)
+    }
+    loop_end(inout g, lp)
+    i32c(inout g, 1)
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -2112,6 +2601,8 @@ fn gen_glue(inout g: WGen, j: i64) {
     } else if what == "show" {
         if is_list(t) {
             glue_show_list(inout g, t)
+        } else if is_map(t) {
+            glue_show_map(inout g, t)
         } else if is_enum(t) {
             glue_show_enum(inout g, t)
         } else {
@@ -2128,6 +2619,8 @@ fn gen_glue(inout g: WGen, j: i64) {
         let q = new_local(inout g, i32t)
         if is_list(t) {
             glue_eq_list(inout g, t)
+        } else if is_map(t) {
+            glue_eq_map(inout g, t)
         } else if is_enum(t) {
             glue_eq_enum(inout g, t)
         } else {
@@ -2326,6 +2819,7 @@ fn glue_drop(inout g: WGen, t: Ty) {
     close(inout g)
     // the last reference: the children, then the block
     if is_list(t) { return glue_drop_list(inout g, t) }
+    if is_map(t) { return glue_drop_map(inout g, t) }
     if is_enum(t) {
         glue_drop_enum(inout g, t)
         return op(inout g, 0)
@@ -2363,6 +2857,7 @@ fn glue_unique(inout g: WGen, t: Ty) {
     op(inout g, 15)
     close(inout g)
     if is_list(t) { return glue_unique_list(inout g, t) }
+    if is_map(t) { return glue_unique_map(inout g, t) }
     // a copy: the same fields, each child with one more reference
     let fts = field_tys(g, t)
     let q = new_local(inout g, wt_i32())

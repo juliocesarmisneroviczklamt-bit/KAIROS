@@ -434,6 +434,121 @@ fn rt_from_codes(xs: List[i64]) -> str {
     wasm_str_at(q)
 }
 
+// ------------------------------------------------------------------ maps
+//
+// A map keeps its keys in the order they came (as the interpreter's): the count, the number of
+// entries, their capacity, the size of its table (a power of 2), then the entries from offset 16
+// (16 bytes each: the key, an i64 or the 32 bits of a text's address, then the value), then the
+// table (32 bits each: 1 + the index of an entry, or 0). `skey` says the keys are texts.
+
+fn rt_map_tsize(cap: i64) -> i64 {
+    var t = 8
+    while t < 2 * cap { t = 2 * t }
+    t
+}
+
+fn rt_map_bytes(cap: i64, tsize: i64) -> i64 {
+    16 + 16 * cap + 4 * tsize
+}
+
+fn rt_map_new(cap: i64) -> i64 {
+    let ts = rt_map_tsize(cap)
+    let m = rt_alloc(rt_map_bytes(cap, ts))
+    wasm_store32(m, 1)
+    wasm_store32(m + 4, 0)
+    wasm_store32(m + 8, cap)
+    wasm_store32(m + 12, ts)
+    let t = m + 16 + 16 * cap
+    for i in 0..ts { wasm_store32(t + 4 * i, 0) }
+    m
+}
+
+fn rt_map_key(m: i64, i: i64, skey: bool) -> i64 {
+    if skey { wasm_load32(m + 16 + 16 * i) } else { wasm_load64(m + 16 + 16 * i) }
+}
+
+// FNV-1a over a text's bytes; a multiplicative mix for an integer
+fn rt_map_hash(k: i64, skey: bool) -> i64 {
+    if not skey { return shr(wrapping_mul(k, -7046029254386353131), 20) }
+    var h = -3750763034362895579
+    let n = wasm_load32(k + 4)
+    for i in 0..n { h = wrapping_mul(bit_xor(h, wasm_load8(k + 8 + i)), 1099511628211) }
+    shr(h, 20)
+}
+
+fn rt_map_keq(a: i64, b: i64, skey: bool) -> bool {
+    if not skey or a == b { return a == b }
+    let n = wasm_load32(a + 4)
+    if wasm_load32(b + 4) != n { return false }
+    for i in 0..n {
+        if wasm_load8(a + 8 + i) != wasm_load8(b + 8 + i) { return false }
+    }
+    true
+}
+
+// The index of the entry with key k, or -1.
+fn rt_map_find(m: i64, k: i64, skey: bool) -> i64 {
+    let ts = wasm_load32(m + 12)
+    let t = m + 16 + 16 * wasm_load32(m + 8)
+    var h = bit_and(rt_map_hash(k, skey), ts - 1)
+    while true {
+        let e = wasm_load32(t + 4 * h)
+        if e == 0 { return -1 }
+        if rt_map_keq(rt_map_key(m, e - 1, skey), k, skey) { return e - 1 }
+        h = bit_and(h + 1, ts - 1)
+    }
+    -1
+}
+
+// Entry i in the table (its key is not there yet).
+fn rt_map_place(m: i64, i: i64, skey: bool) {
+    let ts = wasm_load32(m + 12)
+    let t = m + 16 + 16 * wasm_load32(m + 8)
+    var h = bit_and(rt_map_hash(rt_map_key(m, i, skey), skey), ts - 1)
+    while wasm_load32(t + 4 * h) != 0 { h = bit_and(h + 1, ts - 1) }
+    wasm_store32(t + 4 * h, i + 1)
+}
+
+fn rt_map_rebuild(m: i64, skey: bool) {
+    let ts = wasm_load32(m + 12)
+    let t = m + 16 + 16 * wasm_load32(m + 8)
+    for i in 0..ts { wasm_store32(t + 4 * i, 0) }
+    for i in 0..wasm_load32(m + 4) { rt_map_place(m, i, skey) }
+}
+
+// The map at m (no one else has it) with room for one more entry: m itself, or a bigger block
+// with the same entries (they move; the old block is freed).
+fn rt_map_room(m: i64, skey: bool) -> i64 {
+    let n = wasm_load32(m + 4)
+    let cap = wasm_load32(m + 8)
+    if n < cap { return m }
+    let c = if cap < 4 { 4 } else { 2 * cap }
+    let q = rt_map_new(c)
+    for i in 0..16 * n { wasm_store8(q + 16 + i, wasm_load8(m + 16 + i)) }
+    wasm_store32(q + 4, n)
+    rt_map_rebuild(q, skey)
+    rt_free(m, rt_map_bytes(cap, wasm_load32(m + 12)))
+    q
+}
+
+// A new entry with key k at the end (the map has room); its value is 0 until it is set.
+fn rt_map_add(m: i64, k: i64, skey: bool) -> i64 {
+    let n = wasm_load32(m + 4)
+    if skey { wasm_store32(m + 16 + 16 * n, k) } else { wasm_store64(m + 16 + 16 * n, k) }
+    wasm_store64(m + 24 + 16 * n, 0)
+    wasm_store32(m + 4, n + 1)
+    rt_map_place(m, n, skey)
+    n
+}
+
+// Entry i leaves the map (its key and value were dropped); the others keep their order.
+fn rt_map_remove(m: i64, i: i64, skey: bool) {
+    let n = wasm_load32(m + 4)
+    for j in 16 * i..16 * (n - 1) { wasm_store8(m + 16 + j, wasm_load8(m + 32 + j)) }
+    wasm_store32(m + 4, n - 1)
+    rt_map_rebuild(m, skey)
+}
+
 // ------------------------------------------------------------------ floats as text
 //
 // `str(x)` and `print(x)` of a float, as Rust's `{:?}`: the shortest digits that read back as
