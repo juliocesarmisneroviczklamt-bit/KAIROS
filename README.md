@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.5.0 (M5)
+## Estado: v0.6.0 (M6)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -30,8 +30,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M3 | tipos temporais: usar dado do futuro numa decisão não compila | ✅ |
 | M4 | `grad` nativo + motor de IA escrito em Kairós (MLP, Adam genérico) | ✅ |
 | M5 | holdout de uso único + protocolos + registro de testes e DSR automáticos | ✅ |
-| M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR) | próximo |
-| M7 | back-end nativo (Cranelift) | planejado |
+| M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR), pré-registrado | ✅ rejeitado pela própria regra ([relatório](kairos/research/m6-report.md)); holdout reservado até 2028-11 |
+| M7 | back-end nativo (Cranelift) | próximo |
 
 ## Exemplo: momentum na B3
 
@@ -91,10 +91,30 @@ runtime error[R0503]: the holdout of protocol "momentum-demo" starts in 2026-11,
    = hint: nothing was opened or recorded: run again when the data has more months
 ```
 
-- **O momentum é só mais uma tentativa:** com as 14 do registro do laboratório, a chance de o Sharpe dele ser real (DSR) é de 9%.
+- **O momentum é só mais uma tentativa:** com as 14 tentativas que o registro do laboratório tinha na v0.5.0, a chance de o Sharpe dele ser real (DSR) é de 9%.
 - **O holdout reservado** fica escondido de todos os programas até haver 12 meses de dados novos. Aí ele abre, uma vez, e o resultado fica no livro-razão (`kairos ledger`).
 - **Abrir de novo** é erro na compilação (E0501) e entre execuções (R0502).
 - **Um holdout no passado** é recusado (R0502): aqueles meses já foram vistos pela busca do laboratório.
+
+## Primeiro modelo: carteira treinada no patrimônio depois de IR (M6)
+
+[`kairos/research/tax_portfolio.krs`](kairos/research/tax_portfolio.krs), pré-registrado em [`m6-protocol.md`](kairos/research/m6-protocol.md) antes de tocar nos dados reais:
+
+- **O que o modelo é:** uma carteira long-only cujos parâmetros são treinados por `grad` no patrimônio **depois de custos e do IR de pessoa física**. A isenção de R$ 20 mil de vendas por mês entra como degrau suave.
+- **Treino:** walk-forward, refeito todo janeiro. A análise temporal prova na compilação que nenhuma decisão usa dados do próprio mês.
+- **Avaliação:** pelo simulador realista, contra o equal-weight e o momentum, de 2006 a 2026, com R$ 100 mil.
+
+| carteira | CAGR depois de custos e IR | giro por ano | DSR (16 tentativas) |
+|---|---|---|---|
+| modelo | 7,50% | 0,58 | 0,8% |
+| equal-weight | 5,52% | 1,28 | 0,5% |
+| momentum | 9,74% | 5,04 | 3,5% |
+| CDI (bruto) | 10,36% | | |
+
+**O que o resultado mostra:**
+- **Comportamento aprendido:** o modelo passou a negociar devagar, com 9 vezes menos giro que o momentum, e assim bateu o equal-weight.
+- **Sem alpha:** pela regra registrada antes, ele é **rejeitado** (DSR de 0,8%), e nenhuma carteira de ações bateu o CDI depois de impostos.
+- **Holdout:** o futuro, a partir de 2026-11, fica reservado e abre uma vez com 24 meses de dados.
 
 ## Como usar
 

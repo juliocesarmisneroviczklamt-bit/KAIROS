@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.5.0**, com o M1 (núcleo), o M2 (tensores + dados da B3), o M3 (tipos temporais), o M4 (diferenciação nativa + motor de IA em Kairós) e o M5 (holdout de uso único + registro de tentativas) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.6.0**, com o M1 (núcleo), o M2 (tensores + dados da B3), o M3 (tipos temporais), o M4 (diferenciação nativa + motor de IA em Kairós), o M5 (holdout de uso único + registro de tentativas) e o M6 (primeiro modelo, pré-registrado e avaliado) prontos. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
 ```text
 cargo build --release -p kairos              # gera target/release/kairos (kairos.exe no Windows)
@@ -80,11 +80,21 @@ cargo test -p kairos                         # testes dourados + teste de aceita
 - **Registro de tentativas:** toda `b3.evaluate` entra em `results/registro_testes.csv`, e `Evaluation` traz `trials` e `dsr` (Deflated Sharpe Ratio). Comandos `kairos ledger` e `kairos ledger withdraw <nome>`.
 - **Testes:** 5 de integração num mercado sintético ([`tests/holdout.rs`](tests/holdout.rs)) e 7 dourados.
 
+**M6 (primeiro modelo: carteira treinada no patrimônio depois de IR)**
+- [`research/tax_portfolio.krs`](research/tax_portfolio.krs), pré-registrado em [`research/m6-protocol.md`](research/m6-protocol.md) antes de rodar nos dados reais.
+- **Treino:**
+  - por `grad`, num simulador suave com custos e IR de pessoa física (isenção de R$ 20 mil, compensação de prejuízo, custo médio);
+  - walk-forward a cada janeiro.
+- **Análise temporal mais precisa:** funções têm um horizonte de dados. Por isso treinar em `x[month: a ..= m - 1]` é provado causal, e `grad(f)(x)` é analisado como `f(x)`.
+- **Resultado** ([`research/m6-report.md`](research/m6-report.md)):
+  - o modelo aprendeu a negociar devagar (giro de 0,58 por ano) e bateu o equal-weight;
+  - DSR de 0,8% com 16 tentativas: **rejeitado** pela regra registrada;
+  - o holdout de 2026-11 em diante abre uma vez, com 24 meses.
+
 A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs), com `variance`, `std_dev`, `compound`, `wealth`, `max_drawdown`, `sharpe`, a struct `Evaluation` e o motor de IA.
 
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M6 | primeiro modelo inédito |
 | M7 | back-end nativo (Cranelift); candidato: pesos ternários `t3` |

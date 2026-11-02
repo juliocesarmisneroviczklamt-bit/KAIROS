@@ -2,6 +2,35 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.6.0 — M6: o primeiro modelo, pré-registrado e avaliado sem autoengano
+
+**Uma carteira treinada por `grad` no patrimônio depois de IR, julgada pelas regras que ela mesma registrou antes.** O resultado é honesto: ela aprendeu a negociar devagar e bateu o equal-weight, mas não há evidência de alpha, então foi rejeitada.
+
+- **Pré-registro:** [`kairos/research/m6-protocol.md`](kairos/research/m6-protocol.md) (SHA-256 `d44da677…`) e o programa [`kairos/research/tax_portfolio.krs`](kairos/research/tax_portfolio.krs) foram publicados (commit `52a186d`) antes de qualquer execução nos dados reais.
+- **O modelo:**
+  - softmax de sinais clássicos (momentum 12-2, reversão, volatilidade) sobre os ativos vivos do NEFIN;
+  - fração investida guiada pela tendência do mercado;
+  - velocidade de negociação aprendida.
+- **O treino:**
+  - log-crescimento do patrimônio depois de custo e IR de pessoa física, com isenção de R$ 20 mil como degrau suave, 15% sobre o ganho, prejuízo compensado e custo médio;
+  - walk-forward a cada janeiro, de 2006 em diante.
+- **O resultado** (2006–2026, custos reais, IR, R$ 100 mil, [relatório](kairos/research/m6-report.md)):
+
+  | carteira | CAGR depois de custos e IR | giro por ano | DSR |
+  |---|---|---|---|
+  | modelo | 7,50% | 0,58 | 0,8% |
+  | equal-weight | 5,52% | 1,28 | 0,5% |
+  | momentum | 9,74% | 5,04 | 3,5% |
+
+  O CDI rendeu 10,36% ao ano. A regra exigia DSR ≥ 90%: **rejeitado**. O holdout (2026-11 em diante, ≥ 24 meses) fica reservado no livro-razão.
+- **Análise temporal mais precisa:**
+  - cada função tem um horizonte de dados, trocado em cada chamada pelo que foi passado: treinar em `x[month: a ..= m - 1]` é provado causal, e treinar até `m` (direto ou dentro de `grad`) é E0301;
+  - `grad(f)(x)` é analisado como `f(x)`;
+  - laços `for` sobre o tamanho de um parâmetro temporal são acompanhados.
+- **Testes:**
+  - `tests/m6.rs` roda o programa registrado num mercado sintético com efeito momentum, e o modelo o encontra;
+  - 2 testes temporais novos.
+
 ## 0.5.0 — M5: holdout de uso único, protocolos e registro de tentativas
 
 **O holdout abre uma vez, e cada avaliação conta.** É a garantia nº 2 da linguagem: olhar a validação de novo e testar até dar certo deixam rastro, ou não compilam.
