@@ -11,7 +11,7 @@
 // tests/rt/diff.krs checks them against the interpreter's `grad`; the program's tape is kept by
 // the back end.
 
-struct DNode {
+struct RtDNode {
     val: RtT,
     op: i64,                            // 0 leaf, 1 constant, 2 binary, 3 map, 4 reduction,
                                         // 5 selection, 6 assignment, 7 where, 8 contraction,
@@ -26,113 +26,114 @@ struct DNode {
     parts: List[i64],                   // a stack's parts
 }
 
-struct DTape {
-    nodes: List[DNode],
+struct RtDTape {
+    nodes: List[RtDNode],
+    gs: RtDGrads,           // the gradients, once the tape was walked backwards
 }
 
-fn d_new() -> DTape {
-    DTape { nodes: [] }
+fn rt_d_new() -> RtDTape {
+    RtDTape { nodes: [], gs: RtDGrads { has: [], g: [] } }
 }
 
-fn d_none() -> RtT {
+fn rt_d_none() -> RtT {
     RtT { axes: [], shape: [], data: [], boolean: false }
 }
 
-fn d_node(val: RtT, op: i64, k: i64, a: i64, b: i64) -> DNode {
-    DNode { val: val, op: op, k: k, a: a, b: b, ax: -1, sels: [], cond: d_none(), parts: [] }
+fn rt_d_node(val: RtT, op: i64, k: i64, a: i64, b: i64) -> RtDNode {
+    RtDNode { val: val, op: op, k: k, a: a, b: b, ax: -1, sels: [], cond: rt_d_none(), parts: [] }
 }
 
-fn d_push(inout tp: DTape, n: DNode) -> i64 {
+fn rt_d_push(inout tp: RtDTape, n: RtDNode) -> i64 {
     tp.nodes.push(n)
     len(tp.nodes) - 1
 }
 
 // does node i depend on the values differentiated?
-fn d_tracked(tp: DTape, i: i64) -> bool {
+fn rt_d_tracked(tp: RtDTape, i: i64) -> bool {
     tp.nodes[i].op != 1
 }
 
-fn d_val(tp: DTape, i: i64) -> RtT {
+fn rt_d_val(tp: RtDTape, i: i64) -> RtT {
     tp.nodes[i].val
 }
 
-fn d_leaf(inout tp: DTape, v: RtT) -> i64 {
-    d_push(inout tp, d_node(v, 0, 0, -1, -1))
+fn rt_d_leaf(inout tp: RtDTape, v: RtT) -> i64 {
+    rt_d_push(inout tp, rt_d_node(v, 0, 0, -1, -1))
 }
 
-fn d_const(inout tp: DTape, v: RtT) -> i64 {
-    d_push(inout tp, d_node(v, 1, 0, -1, -1))
+fn rt_d_const(inout tp: RtDTape, v: RtT) -> i64 {
+    rt_d_push(inout tp, rt_d_node(v, 1, 0, -1, -1))
 }
 
 // a op b (+ - * / % ^), its value computed already
-fn d_bin(inout tp: DTape, op: i64, a: i64, b: i64, v: RtT) -> i64 {
-    if not d_tracked(tp, a) and not d_tracked(tp, b) { return d_const(inout tp, v) }
-    d_push(inout tp, d_node(v, 2, op, a, b))
+fn rt_d_bin(inout tp: RtDTape, op: i64, a: i64, b: i64, v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) and not rt_d_tracked(tp, b) { return rt_d_const(inout tp, v) }
+    rt_d_push(inout tp, rt_d_node(v, 2, op, a, b))
 }
 
 // f(a): rt_t_fn's code, or 100 for fill_nan
-fn d_map(inout tp: DTape, f: i64, a: i64, v: RtT) -> i64 {
-    if not d_tracked(tp, a) { return d_const(inout tp, v) }
-    d_push(inout tp, d_node(v, 3, f, a, -1))
+fn rt_d_map(inout tp: RtDTape, f: i64, a: i64, v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) { return rt_d_const(inout tp, v) }
+    rt_d_push(inout tp, rt_d_node(v, 3, f, a, -1))
 }
 
-fn d_reduce(inout tp: DTape, kind: i64, a: i64, ax: i64, v: RtT) -> i64 {
+fn rt_d_reduce(inout tp: RtDTape, kind: i64, a: i64, ax: i64, v: RtT) -> i64 {
     // counts and the products that skip NaN have no gradient: plain values (as the interpreter)
-    if not d_tracked(tp, a) or kind == 7 or kind == 8 or kind == 9 { return d_const(inout tp, v) }
-    var n = d_node(v, 4, kind, a, -1)
+    if not rt_d_tracked(tp, a) or kind == 7 or kind == 8 or kind == 9 { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 4, kind, a, -1)
     n.ax = ax
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_select(inout tp: DTape, a: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
-    if not d_tracked(tp, a) { return d_const(inout tp, v) }
-    var n = d_node(v, 5, 0, a, -1)
+fn rt_d_select(inout tp: RtDTape, a: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 5, 0, a, -1)
     n.sels = sels
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_assign(inout tp: DTape, old: i64, x: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
-    if not d_tracked(tp, old) and not d_tracked(tp, x) { return d_const(inout tp, v) }
-    var n = d_node(v, 6, 0, old, x)
+fn rt_d_assign(inout tp: RtDTape, old: i64, x: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
+    if not rt_d_tracked(tp, old) and not rt_d_tracked(tp, x) { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 6, 0, old, x)
     n.sels = sels
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_where(inout tp: DTape, cond: RtT, a: i64, b: i64, v: RtT) -> i64 {
-    if not d_tracked(tp, a) and not d_tracked(tp, b) { return d_const(inout tp, v) }
-    var n = d_node(v, 7, 0, a, b)
+fn rt_d_where(inout tp: RtDTape, cond: RtT, a: i64, b: i64, v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) and not rt_d_tracked(tp, b) { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 7, 0, a, b)
     n.cond = cond
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_contract(inout tp: DTape, a: i64, b: i64, ax: i64, v: RtT) -> i64 {
-    if not d_tracked(tp, a) and not d_tracked(tp, b) { return d_const(inout tp, v) }
-    var n = d_node(v, 8, 0, a, b)
+fn rt_d_contract(inout tp: RtDTape, a: i64, b: i64, ax: i64, v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) and not rt_d_tracked(tp, b) { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 8, 0, a, b)
     n.ax = ax
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_stack(inout tp: DTape, parts: List[i64], v: RtT) -> i64 {
+fn rt_d_stack(inout tp: RtDTape, parts: List[i64], v: RtT) -> i64 {
     var any = false
     for p in parts {
-        if d_tracked(tp, p) { any = true }
+        if rt_d_tracked(tp, p) { any = true }
     }
-    if not any { return d_const(inout tp, v) }
-    var n = d_node(v, 9, 0, -1, -1)
+    if not any { return rt_d_const(inout tp, v) }
+    var n = rt_d_node(v, 9, 0, -1, -1)
     n.parts = parts
-    d_push(inout tp, n)
+    rt_d_push(inout tp, n)
 }
 
-fn d_elem(inout tp: DTape, a: i64, k: i64, v: RtT) -> i64 {
-    if not d_tracked(tp, a) { return d_const(inout tp, v) }
-    d_push(inout tp, d_node(v, 10, k, a, -1))
+fn rt_d_elem(inout tp: RtDTape, a: i64, k: i64, v: RtT) -> i64 {
+    if not rt_d_tracked(tp, a) { return rt_d_const(inout tp, v) }
+    rt_d_push(inout tp, rt_d_node(v, 10, k, a, -1))
 }
 
 // ------------------------------------------------------------------ element by element
 
 // The frame of an element-wise operation: the first operand with the most axes (src/tensor.rs
 // frame).
-fn d_frame(ts: List[RtT]) -> RtT {
+fn rt_d_frame(ts: List[RtT]) -> RtT {
     var best = 0
     for i in 1..len(ts) {
         if len(ts[i].axes) > len(ts[best].axes) { best = i }
@@ -144,7 +145,7 @@ fn d_frame(ts: List[RtT]) -> RtT {
 // 1 the gradient of abs, 2 of relu, 3 of fill_nan and nan_sum (0 where y is NaN), 4 x * y,
 // 5 x / y, 6 -x, 7 x + y, 8 y, 9 0.5 * x / y (sqrt), 10 x * (1 - y * y) (tanh),
 // 11 x * y * (1 - y) (sigmoid), 12 x * sigmoid(y) (softplus), 13 x == y (1 or 0)
-fn d_f2(code: i64, x: f64, y: f64) -> f64 {
+fn rt_d_f2(code: i64, x: f64, y: f64) -> f64 {
     if code == 1 { return if y > 0.0 { x } else if y < 0.0 { -x } else { 0.0 } }
     if code == 2 { return if y > 0.0 { x } else { 0.0 } }
     if code == 3 { return if is_nan(y) { 0.0 } else { x } }
@@ -160,19 +161,19 @@ fn d_f2(code: i64, x: f64, y: f64) -> f64 {
     if x == y { 1.0 } else { 0.0 }
 }
 
-fn d_ew(code: i64, a: RtT, b: RtT) -> RtT {
-    let f = d_frame([a, b])
+fn rt_d_ew(code: i64, a: RtT, b: RtT) -> RtT {
+    let f = rt_d_frame([a, b])
     let oa = rt_t_offsets(a, f.axes, f.shape)
     let ob = rt_t_offsets(b, f.axes, f.shape)
     var d: List[f64] = []
-    for i in 0..len(oa) { d.push(d_f2(code, a.data[oa[i]], b.data[ob[i]])) }
+    for i in 0..len(oa) { d.push(rt_d_f2(code, a.data[oa[i]], b.data[ob[i]])) }
     RtT { axes: f.axes, shape: f.shape, data: d, boolean: false }
 }
 
 // f(x, p, q), by code: 1 -x * p / (q * q) (division), 2 x * q * p^(q - 1) (power, the base),
 // 3 x * p * ln(q) (power, the exponent: p the result, q the base), 4 -x * trunc(p / q) (%),
 // 5 0 where p is NaN, else x / q (nan_mean), 6 x * p / q (max and min)
-fn d_f3(code: i64, x: f64, p: f64, q: f64) -> f64 {
+fn rt_d_f3(code: i64, x: f64, p: f64, q: f64) -> f64 {
     if code == 1 { return -x * p / (q * q) }
     if code == 2 { return x * q * rt_pow(p, q - 1.0) }
     if code == 3 { return x * p * rt_log(q) }
@@ -184,25 +185,25 @@ fn d_f3(code: i64, x: f64, p: f64, q: f64) -> f64 {
     x * p / q
 }
 
-fn d_ew3(code: i64, a: RtT, b: RtT, c: RtT) -> RtT {
-    let f = d_frame([a, b, c])
+fn rt_d_ew3(code: i64, a: RtT, b: RtT, c: RtT) -> RtT {
+    let f = rt_d_frame([a, b, c])
     let oa = rt_t_offsets(a, f.axes, f.shape)
     let ob = rt_t_offsets(b, f.axes, f.shape)
     let oc = rt_t_offsets(c, f.axes, f.shape)
     var d: List[f64] = []
-    for i in 0..len(oa) { d.push(d_f3(code, a.data[oa[i]], b.data[ob[i]], c.data[oc[i]])) }
+    for i in 0..len(oa) { d.push(rt_d_f3(code, a.data[oa[i]], b.data[ob[i]], c.data[oc[i]])) }
     RtT { axes: f.axes, shape: f.shape, data: d, boolean: false }
 }
 
-fn d_zero_like(v: RtT) -> RtT {
+fn rt_d_zero_like(v: RtT) -> RtT {
     rt_t_full(v.axes, v.shape, 0.0, false)
 }
 
 // The gradient g of a broadcast result, summed back to the shape of `target` (autodiff.rs
 // unbroadcast).
-fn d_unbroadcast(g: RtT, target: RtT) -> RtT {
+fn rt_d_unbroadcast(g: RtT, target: RtT) -> RtT {
     if len(g.axes) == 0 {
-        if len(target.axes) > 0 { return d_ew(8, d_zero_like(target), g) }
+        if len(target.axes) > 0 { return rt_d_ew(8, rt_d_zero_like(target), g) }
         return g
     }
     if len(target.axes) == 0 {
@@ -219,31 +220,31 @@ fn d_unbroadcast(g: RtT, target: RtT) -> RtT {
 }
 
 // The gradient of a reduction: g (the result's shape) spread back over the reduced axis.
-fn d_reduce_grad(a: RtT, out: RtT, g: RtT, ax: i64, kind: i64) -> RtT {
-    let zero = d_zero_like(a)
-    let gb = d_ew(8, zero, g)
-    let ob = d_ew(8, zero, out)
+fn rt_d_reduce_grad(a: RtT, out: RtT, g: RtT, ax: i64, kind: i64) -> RtT {
+    let zero = rt_d_zero_like(a)
+    let gb = rt_d_ew(8, zero, g)
+    let ob = rt_d_ew(8, zero, out)
     let n = if ax >= 0 { rt_t_size(a, ax) } else { len(a.data) }
     if kind == 0 { return gb }
     if kind == 1 { return rt_t_map2(3, gb, rt_t_scalar(float(n), false)) }
-    if kind == 5 { return d_ew(3, gb, a) }
+    if kind == 5 { return rt_d_ew(3, gb, a) }
     if kind == 6 {
-        let cb = d_ew(8, zero, rt_t_reduce(a, ax, 8))
-        return d_ew3(5, gb, a, cb)
+        let cb = rt_d_ew(8, zero, rt_t_reduce(a, ax, 8))
+        return rt_d_ew3(5, gb, a, cb)
     }
     if kind == 3 or kind == 4 {
         // the gradient goes to the extreme elements, shared equally
-        let hits = d_ew(13, a, ob)
-        let cb = d_ew(8, zero, rt_t_reduce(hits, ax, 0))
-        return d_ew3(6, gb, hits, cb)
+        let hits = rt_d_ew(13, a, ob)
+        let cb = rt_d_ew(8, zero, rt_t_reduce(hits, ax, 0))
+        return rt_d_ew3(6, gb, hits, cb)
     }
-    if kind == 2 { return d_prod_grad(a, ax, gb) }
+    if kind == 2 { return rt_d_prod_grad(a, ax, gb) }
     zero
 }
 
 // The gradient of a product: each element gets the product of the others times g (prefix and
 // suffix products, so zeros are exact) (tensor.rs prod_grad).
-fn d_prod_grad(a: RtT, ax: i64, g: RtT) -> RtT {
+fn rt_d_prod_grad(a: RtT, ax: i64, g: RtT) -> RtT {
     var out: List[f64] = []
     for x in a.data { out.push(0.0) }
     var fs: List[List[i64]] = []
@@ -271,7 +272,7 @@ fn d_prod_grad(a: RtT, ax: i64, g: RtT) -> RtT {
 
 // The sum over the axes `over` of x * y (tensor.rs contract_over): the other axes x and y share
 // are batch axes, the rest an outer product.
-fn d_contract_over(x: RtT, y: RtT, over: List[i64]) -> RtT {
+fn rt_d_contract_over(x: RtT, y: RtT, over: List[i64]) -> RtT {
     var axes: List[i64] = []
     var shape: List[i64] = []
     for k in 0..len(x.axes) {
@@ -317,8 +318,8 @@ fn d_contract_over(x: RtT, y: RtT, over: List[i64]) -> RtT {
 }
 
 // where's gradient for one side: g where the condition is `first`, 0 elsewhere
-fn d_pick(cond: RtT, g: RtT, first: bool) -> RtT {
-    let f = d_frame([cond, g])
+fn rt_d_pick(cond: RtT, g: RtT, first: bool) -> RtT {
+    let f = rt_d_frame([cond, g])
     let oc = rt_t_offsets(cond, f.axes, f.shape)
     let og = rt_t_offsets(g, f.axes, f.shape)
     var d: List[f64] = []
@@ -328,14 +329,14 @@ fn d_pick(cond: RtT, g: RtT, first: bool) -> RtT {
 
 // ------------------------------------------------------------------ backwards
 
-struct DGrads {
+struct RtDGrads {
     has: List[bool],
     g: List[RtT],
 }
 
-fn d_add(inout gs: DGrads, j: i64, c: RtT) {
+fn rt_d_add(inout gs: RtDGrads, j: i64, c: RtT) {
     if gs.has[j] {
-        gs.g[j] = d_ew(7, gs.g[j], c)
+        gs.g[j] = rt_d_ew(7, gs.g[j], c)
     } else {
         gs.g[j] = c
         gs.has[j] = true
@@ -343,11 +344,11 @@ fn d_add(inout gs: DGrads, j: i64, c: RtT) {
 }
 
 // The gradients of node `out` (a float) with respect to every node before it.
-fn d_backward(tp: DTape, out: i64) -> DGrads {
-    var gs = DGrads { has: [], g: [] }
+fn rt_d_backward(tp: RtDTape, out: i64) -> RtDGrads {
+    var gs = RtDGrads { has: [], g: [] }
     for i in 0..out + 1 {
         gs.has.push(false)
-        gs.g.push(d_none())
+        gs.g.push(rt_d_none())
     }
     gs.g[out] = rt_t_scalar(1.0, false)
     gs.has[out] = true
@@ -364,64 +365,64 @@ fn d_backward(tp: DTape, out: i64) -> DGrads {
                 var ga = g
                 var gb = g
                 if node.k == 1 {
-                    gb = d_ew(6, g, g)
+                    gb = rt_d_ew(6, g, g)
                 } else if node.k == 2 {
-                    ga = d_ew(4, g, bv)
-                    gb = d_ew(4, g, av)
+                    ga = rt_d_ew(4, g, bv)
+                    gb = rt_d_ew(4, g, av)
                 } else if node.k == 3 {
-                    ga = d_ew(5, g, bv)
-                    gb = d_ew3(1, g, av, bv)
+                    ga = rt_d_ew(5, g, bv)
+                    gb = rt_d_ew3(1, g, av, bv)
                 } else if node.k == 5 {
-                    ga = d_ew3(2, g, av, bv)
-                    gb = if b_const { d_zero_like(g) } else { d_ew3(3, g, node.val, av) }
+                    ga = rt_d_ew3(2, g, av, bv)
+                    gb = if b_const { rt_d_zero_like(g) } else { rt_d_ew3(3, g, node.val, av) }
                 } else if node.k == 4 {
-                    gb = d_ew3(4, g, av, bv)
+                    gb = rt_d_ew3(4, g, av, bv)
                 }
-                if not a_const { d_add(inout gs, node.a, d_unbroadcast(ga, av)) }
-                if not b_const { d_add(inout gs, node.b, d_unbroadcast(gb, bv)) }
+                if not a_const { rt_d_add(inout gs, node.a, rt_d_unbroadcast(ga, av)) }
+                if not b_const { rt_d_add(inout gs, node.b, rt_d_unbroadcast(gb, bv)) }
             } else if node.op == 3 {
                 let av = tp.nodes[node.a].val
                 let o = node.val
                 let f = node.k
                 var c = g
                 if f == 0 {
-                    c = d_ew(6, g, g)
+                    c = rt_d_ew(6, g, g)
                 } else if f == 4 {
-                    c = d_ew(4, g, o)
+                    c = rt_d_ew(4, g, o)
                 } else if f == 5 {
-                    c = d_ew(5, g, av)
+                    c = rt_d_ew(5, g, av)
                 } else if f == 3 {
-                    c = d_ew(9, g, o)
+                    c = rt_d_ew(9, g, o)
                 } else if f == 2 {
-                    c = d_ew(1, g, av)
+                    c = rt_d_ew(1, g, av)
                 } else if f == 9 {
-                    c = d_ew(10, g, o)
+                    c = rt_d_ew(10, g, o)
                 } else if f == 10 {
-                    c = d_ew(11, g, o)
+                    c = rt_d_ew(11, g, o)
                 } else if f == 11 {
-                    c = d_ew(2, g, av)
+                    c = rt_d_ew(2, g, av)
                 } else if f == 12 {
-                    c = d_ew(12, g, av)
+                    c = rt_d_ew(12, g, av)
                 } else {
-                    c = d_ew(3, g, av)
+                    c = rt_d_ew(3, g, av)
                 }
-                d_add(inout gs, node.a, c)
+                rt_d_add(inout gs, node.a, c)
             } else if node.op == 4 {
-                d_add(inout gs, node.a, d_reduce_grad(tp.nodes[node.a].val, node.val, g, node.ax, node.k))
+                rt_d_add(inout gs, node.a, rt_d_reduce_grad(tp.nodes[node.a].val, node.val, g, node.ax, node.k))
             } else if node.op == 5 {
-                var z = d_zero_like(tp.nodes[node.a].val)
+                var z = rt_d_zero_like(tp.nodes[node.a].val)
                 rt_t_assign(inout z, node.sels, g)
-                d_add(inout gs, node.a, z)
+                rt_d_add(inout gs, node.a, z)
             } else if node.op == 6 {
                 // the old tensor keeps the gradient outside the region; the value gets the region
                 var gt = g
                 let region = rt_t_select(gt, node.sels)
-                rt_t_assign(inout gt, node.sels, d_zero_like(region))
-                if tp.nodes[node.a].op != 1 { d_add(inout gs, node.a, gt) }
-                if tp.nodes[node.b].op != 1 { d_add(inout gs, node.b, d_unbroadcast(region, tp.nodes[node.b].val)) }
+                rt_t_assign(inout gt, node.sels, rt_d_zero_like(region))
+                if tp.nodes[node.a].op != 1 { rt_d_add(inout gs, node.a, gt) }
+                if tp.nodes[node.b].op != 1 { rt_d_add(inout gs, node.b, rt_d_unbroadcast(region, tp.nodes[node.b].val)) }
             } else if node.op == 7 {
-                d_add(inout gs, node.a, d_unbroadcast(d_pick(node.cond, g, true), tp.nodes[node.a].val))
-                d_add(inout gs, node.b, d_unbroadcast(d_pick(node.cond, g, false), tp.nodes[node.b].val))
+                rt_d_add(inout gs, node.a, rt_d_unbroadcast(rt_d_pick(node.cond, g, true), tp.nodes[node.a].val))
+                rt_d_add(inout gs, node.b, rt_d_unbroadcast(rt_d_pick(node.cond, g, false), tp.nodes[node.b].val))
             } else if node.op == 8 {
                 let at = tp.nodes[node.a].val
                 let bt = tp.nodes[node.b].val
@@ -433,17 +434,17 @@ fn d_backward(tp: DTape, out: i64) -> DGrads {
                 for x in at.axes {
                     if rt_t_pos(bt, x) < 0 { only_a.push(x) }
                 }
-                d_add(inout gs, node.a, d_contract_over(g, bt, only_b))
-                d_add(inout gs, node.b, d_contract_over(g, at, only_a))
+                rt_d_add(inout gs, node.a, rt_d_contract_over(g, bt, only_b))
+                rt_d_add(inout gs, node.b, rt_d_contract_over(g, at, only_a))
             } else if node.op == 9 {
                 for k in 0..len(node.parts) {
                     let p = node.parts[k]
-                    if tp.nodes[p].op != 1 { d_add(inout gs, p, rt_t_scalar(g.data[k], false)) }
+                    if tp.nodes[p].op != 1 { rt_d_add(inout gs, p, rt_t_scalar(g.data[k], false)) }
                 }
             } else if node.op == 10 {
-                var z = d_zero_like(tp.nodes[node.a].val)
+                var z = rt_d_zero_like(tp.nodes[node.a].val)
                 z.data[node.k] = g.data[0]
-                d_add(inout gs, node.a, z)
+                rt_d_add(inout gs, node.a, z)
             }
         }
         i -= 1
@@ -452,7 +453,292 @@ fn d_backward(tp: DTape, out: i64) -> DGrads {
 }
 
 // The gradient of leaf i (zero when the result does not reach it).
-fn d_grad(tp: DTape, gs: DGrads, i: i64) -> RtT {
+fn rt_d_grad(tp: RtDTape, gs: RtDGrads, i: i64) -> RtT {
     if i < len(gs.has) and gs.has[i] { return gs.g[i] }
-    d_zero_like(tp.nodes[i].val)
+    rt_d_zero_like(tp.nodes[i].val)
+}
+
+// ------------------------------------------------------------------ the program's tape
+//
+// The back end keeps the tape of the `grad` running at a fixed place of the module's memory:
+// each function below takes it out (so it is not shared and changes in place), records, and puts
+// it back. The code the back end makes for a function under `grad` calls them: a float or a
+// float tensor is there the id of its node.
+
+fn wasm_d_take() -> RtDTape {
+    rt_d_new()
+}
+
+fn wasm_d_put(tp: RtDTape) {
+}
+
+fn wasm_d_active() -> bool {
+    false
+}
+
+// a new tape: false when one is running already (`grad` inside `grad`)
+fn rt_d_begin() -> bool {
+    if wasm_d_active() { return false }
+    wasm_d_put(rt_d_new())
+    true
+}
+
+fn rt_d_end() {
+    let _ = wasm_d_take()
+}
+
+fn rt_d_cf(x: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_const(inout tp, rt_t_scalar(x, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_ct(t: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_const(inout tp, t)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_leaf_f(x: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_leaf(inout tp, rt_t_scalar(x, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_leaf_t(t: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_leaf(inout tp, t)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_vf(i: i64) -> f64 {
+    let tp = wasm_d_take()
+    let x = tp.nodes[i].val.data[0]
+    wasm_d_put(tp)
+    x
+}
+
+fn rt_d_vt(i: i64) -> RtT {
+    let tp = wasm_d_take()
+    let t = tp.nodes[i].val
+    wasm_d_put(tp)
+    t
+}
+
+fn rt_d_bin_f(op: i64, a: i64, b: i64, v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_bin(inout tp, op, a, b, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_bin_t(op: i64, a: i64, b: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_bin(inout tp, op, a, b, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_map_f(f: i64, a: i64, v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_map(inout tp, f, a, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_map_t(f: i64, a: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_map(inout tp, f, a, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_reduce_f(kind: i64, a: i64, ax: i64, v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_reduce(inout tp, kind, a, ax, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_reduce_t(kind: i64, a: i64, ax: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_reduce(inout tp, kind, a, ax, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_select_f(a: i64, sels: List[(i64, i64, i64, i64)], v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_select(inout tp, a, sels, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_select_t(a: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_select(inout tp, a, sels, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_assign_t(old: i64, x: i64, sels: List[(i64, i64, i64, i64)], v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_assign(inout tp, old, x, sels, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_where_f(cond: bool, a: i64, b: i64, v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_where(inout tp, rt_t_scalar(if cond { 1.0 } else { 0.0 }, true), a, b, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_where_t(cond: RtT, a: i64, b: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_where(inout tp, cond, a, b, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_contract_f(a: i64, b: i64, ax: i64, v: f64) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_contract(inout tp, a, b, ax, rt_t_scalar(v, false))
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_contract_t(a: i64, b: i64, ax: i64, v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_contract(inout tp, a, b, ax, v)
+    wasm_d_put(tp)
+    i
+}
+
+fn rt_d_stack_t(parts: List[i64], v: RtT) -> i64 {
+    var tp = wasm_d_take()
+    let i = rt_d_stack(inout tp, parts, v)
+    wasm_d_put(tp)
+    i
+}
+
+// to_list of a tensor on the tape: a node for each element
+fn rt_d_elems(a: i64) -> List[i64] {
+    var tp = wasm_d_take()
+    let t = tp.nodes[a].val
+    var out: List[i64] = []
+    for k in 0..len(t.data) { out.push(rt_d_elem(inout tp, a, k, rt_t_scalar(t.data[k], false))) }
+    wasm_d_put(tp)
+    out
+}
+
+// the values of floats on the tape
+fn rt_d_vals(ids: List[i64]) -> List[f64] {
+    let tp = wasm_d_take()
+    var out: List[f64] = []
+    for i in ids { out.push(tp.nodes[i].val.data[0]) }
+    wasm_d_put(tp)
+    out
+}
+
+// sum, mean (kind 0, 1) or prod (2) of a list of floats on the tape, as the interpreter folds a list
+// that has tracked elements: from 0.0 (1.0), plain while the elements are, then on the tape; a
+// list with none is folded plain from `start` (sum) as the plain builtin does
+fn rt_d_list_red(kind: i64, ids: List[i64], start: f64) -> i64 {
+    var tp = wasm_d_take()
+    var any = false
+    for i in ids {
+        if rt_d_tracked(tp, i) { any = true }
+    }
+    let op = if kind == 2 { 2 } else { 0 }
+    var acc = if kind == 2 { 1.0 } else if any { 0.0 } else { start }
+    var node = -1
+    for i in ids {
+        let x = tp.nodes[i].val.data[0]
+        let v = if kind == 2 { acc * x } else { acc + x }
+        if node < 0 and not rt_d_tracked(tp, i) {
+            acc = v
+        } else {
+            if node < 0 { node = rt_d_const(inout tp, rt_t_scalar(acc, false)) }
+            node = rt_d_bin(inout tp, op, node, i, rt_t_scalar(v, false))
+            acc = v
+        }
+    }
+    if kind == 1 {
+        let n = float(len(ids))
+        let v = acc / n
+        if node >= 0 {
+            let c = rt_d_const(inout tp, rt_t_scalar(n, false))
+            node = rt_d_bin(inout tp, 3, node, c, rt_t_scalar(v, false))
+        }
+        acc = v
+    }
+    if node < 0 { node = rt_d_const(inout tp, rt_t_scalar(acc, false)) }
+    wasm_d_put(tp)
+    node
+}
+
+// minimum (maximum) of a list of floats on the tape (not empty): the first of the smallest
+// (largest) by value, the element itself
+fn rt_d_list_extreme(ids: List[i64], most: bool) -> i64 {
+    let tp = wasm_d_take()
+    var best = ids[0]
+    for k in 1..len(ids) {
+        let x = tp.nodes[ids[k]].val.data[0]
+        let b = tp.nodes[best].val.data[0]
+        if (most and b < x) or (not most and x < b) { best = ids[k] }
+    }
+    wasm_d_put(tp)
+    best
+}
+
+// walks the tape back from `out`, keeping the gradients
+fn rt_d_back(out: i64) {
+    var tp = wasm_d_take()
+    tp.gs = rt_d_backward(tp, out)
+    wasm_d_put(tp)
+}
+
+fn rt_d_grad_f(i: i64) -> f64 {
+    let tp = wasm_d_take()
+    let x = rt_d_grad(tp, tp.gs, i).data[0]
+    wasm_d_put(tp)
+    x
+}
+
+fn rt_d_grad_t(i: i64) -> RtT {
+    let tp = wasm_d_take()
+    let t = rt_d_grad(tp, tp.gs, i)
+    wasm_d_put(tp)
+    t
+}
+
+// a list of floats (of float tensors) as leaves or constants of the tape, and their gradients
+fn rt_d_in_lf(xs: List[f64], leaf: bool) -> List[i64] {
+    var out: List[i64] = []
+    for x in xs { out.push(if leaf { rt_d_leaf_f(x) } else { rt_d_cf(x) }) }
+    out
+}
+
+fn rt_d_in_lt(xs: List[RtT], leaf: bool) -> List[i64] {
+    var out: List[i64] = []
+    for x in xs { out.push(if leaf { rt_d_leaf_t(x) } else { rt_d_ct(x) }) }
+    out
+}
+
+fn rt_d_out_lf(ids: List[i64]) -> List[f64] {
+    var out: List[f64] = []
+    for i in ids { out.push(rt_d_grad_f(i)) }
+    out
+}
+
+fn rt_d_out_lt(ids: List[i64]) -> List[RtT] {
+    var out: List[RtT] = []
+    for i in ids { out.push(rt_d_grad_t(i)) }
+    out
 }

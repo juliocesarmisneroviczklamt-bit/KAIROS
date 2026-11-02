@@ -1,0 +1,11 @@
+// A runtime error inside a function under `grad`: the traced copy stops where the interpreter
+// does, with the same message and place
+axis cell
+
+fn pick(t: Tensor[cell; f64], i: i64) -> f64 {
+    t[cell: i] * t[cell: 0]
+}
+
+let t = tensor([1.0, 2.0, 3.0], cell)
+print(grad(pick)(t, 2))         // out: Tensor[cell: 3; f64] [3.0, 0.0, 1.0]
+print(grad(pick)(t, 5 - 2))     // error: R0001

@@ -1,0 +1,145 @@
+// grad compiled: the traced copies of the functions record the tape of rt_diff.krs, so the
+// gradients are the interpreter's bits. Floats, tensors, structs, tuples and lists of them; wrt and
+// value_and_grad; reductions, selections, slice assignments, where, contract, to_list and
+// tensor([...]), max/min of two values, fill_nan; calls, ifs and loops; x op= v on floats, tensors
+// and slices, fields and elements changed; and the smooth rules, relaxed inside grad and exact
+// outside
+struct Lin {
+    w: Tensor[feature; f64],
+    b: f64,
+}
+
+struct Net {
+    lin: Lin,
+    scale: (f64, f64),
+}
+
+fn poly(x: f64, y: f64) -> f64 {
+    var acc = 0.0
+    for k in 1..4 {
+        acc = acc + float(k) * x ^ float(k) - y / float(k)
+    }
+    if acc > 0.0 { acc * y } else { exp(y) - acc }
+}
+
+fn helper(a: f64) -> f64 {
+    sqrt(a * a + 1.0) + tanh(a) + sigmoid(a) + softplus(-a) + relu(a - 0.25) + abs(a - 3.0) + ln(a + 4.0)
+}
+
+fn uses_helper(a: f64) -> f64 {
+    helper(a) * helper(2.0 * a) - a % 0.75
+}
+
+fn unused(x: f64, y: f64) -> f64 {
+    y * 2.0
+}
+
+fn mixed(n: i64, x: f64) -> f64 {
+    var s = x
+    var i = 0
+    while i < n {
+        s = s * x + float(i)
+        i += 1
+    }
+    s
+}
+
+fn tl(t: Tensor[asset; f64]) -> f64 {
+    var u = t * 2.0 - 1.0
+    u[asset: 0] = t[asset: 1] * t[asset: 2]
+    let w = where(u > 0.5, u, -t)
+    let parts = to_list(w)
+    let back = tensor([parts[2], parts[0] * parts[1], max(parts[1], 0.1), min(parts[0], parts[2])], asset)
+    sum(back * back) + mean(exp(-t)) + prod(t) + max(t) - min(w) + nan_sum(t) + nan_mean(u)
+}
+
+fn lin_loss(p: Lin, x: Tensor[sample, feature; f64], y: Tensor[sample; f64]) -> f64 {
+    let pred = contract(x, p.w, over: feature) + p.b
+    mean((pred - y) ^ 2.0)
+}
+
+fn net_loss(n: Net, x: Tensor[sample, feature; f64], y: Tensor[sample; f64]) -> f64 {
+    lin_loss(n.lin, x, y) * n.scale.0 + n.scale.1 ^ 2.0
+}
+
+fn pairs(p: (f64, Tensor[asset; f64]), ws: List[f64]) -> f64 {
+    var s = p.0 * sum(p.1)
+    for i in 0..len(ws) {
+        s = s + ws[i] * float(i + 1) * p.0
+    }
+    s
+}
+
+fn op_assign(x: f64) -> f64 {
+    var s = x
+    s += x * x
+    s *= 2.0
+    s -= 1.0 / x
+    s /= 3.0
+    s
+}
+
+fn changed(q: Lin) -> f64 {
+    var r = q
+    r.b = r.b * 3.0
+    var k = 3
+    k += 1
+    var ws = [r.b, 1.0]
+    ws[1] = r.b * r.b
+    var u = r.w
+    u += r.w * r.b
+    u[feature: 0] *= r.b
+    sum(u) * ws[1] + float(k)
+}
+
+fn tax(sales: f64, result: f64) -> f64 {
+    let due = smooth_step(sales - 20000.0, scale: 2000.0)
+    due * 0.15 * smooth_max(result, 0.0, scale: 100.0) + smooth_min(result, 50.0, scale: 10.0)
+}
+
+fn fill(t: Tensor[asset; f64]) -> f64 {
+    sum(fill_nan((t - 1.0) / (t - 1.0), 2.0) * t)
+}
+
+for x in [0.3, -1.2, 2.5] {
+    print(grad(poly)(x, 0.7), grad(poly, wrt: 2)(x, 0.7), value_and_grad(poly)(x, 0.7))
+    print(grad(uses_helper)(x), grad(unused)(x, x), grad(mixed, wrt: 2)(3, x))
+}
+
+let t = tensor([0.9, -0.4, 1.7], asset)
+print(grad(tl)(t), value_and_grad(tl)(t * 0.5))
+print(grad(fill)(tensor([1.0, 3.0, -2.0], asset)))
+
+let x = randn(seed: 11, sample: 6, feature: 3)
+let y = contract(x, tensor([1.0, 2.0, -1.0], feature), over: feature) + 0.5
+var p = Lin { w: tensor([0.1, -0.2, 0.3], feature), b: 0.0 }
+print(grad(lin_loss)(p, x, y))
+for i in 0..50 {
+    p = p - 0.1 * grad(lin_loss)(p, x, y)
+}
+print(lin_loss(p, x, y), p)
+let n = Net { lin: p, scale: (2.0, -0.5) }
+print(grad(net_loss)(n, x, y))
+print(grad(pairs)((1.5, t), [0.5, -1.0, 2.0]), grad(pairs, wrt: 2)((1.5, t), [0.5, -1.0, 2.0]))
+
+print(tax(25000.0, 300.0), tax(15000.0, -40.0))
+print(grad(tax)(25000.0, 300.0), grad(tax, wrt: 2)(25000.0, 300.0), value_and_grad(tax, wrt: 2)(15000.0, -40.0))
+print(grad(op_assign)(1.5), value_and_grad(op_assign)(-0.5))
+print(grad(changed)(Lin { w: tensor([1.0, 2.0, -0.5], feature), b: 0.5 }))
+
+// out: -3.01 3.84708604080381 (2.73608604080381, -3.01)
+// out: 25.444025636748453 0.0 1.1079999999999997
+// out: -9.16 3.84708604080381 (6.80108604080381, -9.16)
+// out: -50.3000154759145 0.0 -5.912
+// out: 47.074999999999996 59.30833333333333 (42.41416666666667, 47.074999999999996)
+// out: 74.23444336729646 0.0 63.5
+// out: Tensor[asset: 3; f64] [3.272476780086467, 1.8180584341195765, 11.712438825315754] (3.536248613910223, Tensor[asset: 3; f64] [2.553457282792742, 1.4443657472799436, 5.16752835601709])
+// out: Tensor[asset: 3; f64] [NaN, 1.0, 1.0]
+// out: Lin { w: Tensor[feature: 3; f64] [-0.5606596787353575, -6.280549496008447, 6.58552635829043], b: -0.9782488197955799 }
+// out: 0.00022828361082073614 Lin { w: Tensor[feature: 3; f64] [0.6650211202803877, 1.7719806366041233, -1.1865728036465693], b: 0.8994415912960164 }
+// out: Net { lin: Lin { w: Tensor[feature: 3; f64] [-0.0008546253467340724, -0.0005820440115174592, -0.000474272306419052], b: 0.0010155411755263062 }, scale: (0.00022828361082073614, -1.0) }
+// out: (6.7, Tensor[asset: 3; f64] [1.5, 1.5, 1.5]) [1.5, 3.0, 4.5]
+// out: 95.0 -40.0
+// out: 0.0016028797766829547 0.1320470380978417 (-39.417487971344244, 1.0044430289826043)
+// out: 2.814814814814815 (0.5, 1.3333333333333335)
+// out: Lin { w: Tensor[feature: 3; f64] [8.4375, 5.625, 5.625], b: 104.625 }

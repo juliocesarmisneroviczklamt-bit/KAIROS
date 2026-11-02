@@ -823,7 +823,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 `cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere o ponto fixo no wasmi.
 
-### 15.1 M14 (em andamento): closures, tensores, a ponte `b3` e os holdouts
+### 15.1 M14 (em andamento): closures, tensores, a ponte `b3`, os holdouts e o `grad`
 
 - **Closures** (lambdas com capturas, funções como valores) e **tensores com eixos nomeados** compilam. O runtime dos tensores é escrito em Kairós ([`rt_tensor.krs`](../compiler/rt_tensor.krs)), operação por operação como o `src/tensor.rs` do interpretador, e dá os mesmos bits.
 - **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](../compiler/rt_b3.krs), sobre [`kairos/lab`](../lab)) faz o que a ponte em Rust faz:
@@ -859,8 +859,34 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 - **A memória cresce um oitavo por vez**, não uma página por vez: o `momentum` compilado roda em 1,4 s no node, contra 40 s antes.
 - No Windows, o node 22 pode cair (segfault) com alguns desses módulos. Eles rodam quando as funções do WASI são chamadas através de JavaScript, e também no wasmi. O WASI do node no Windows também não lê pastas (`fd_readdir`), então `list_dir` só funciona nos outros runtimes.
 
+- **O espaço tangente e as funções genéricas.**
+  - `+ − × ÷` funcionam em structs e tuplas de floats e de tensores, campo a campo como no interpretador. Valem entre dois valores do mesmo tipo, ou entre um deles e um `f64`.
+  - Também valem o menos unário, as funções matemáticas e `zeros_like`.
+  - Uma função genérica (`fn f[P]`) vira uma instância para cada lista de tipos com que é chamada.
+  - O MLP do prelúdio, `mse`, `sgd_step` e `adam_step` dão os números do interpretador.
+- **`grad`, `value_and_grad` e as regras suaves.**
+  - **A fita é escrita em Kairós** ([`rt_diff.krs`](../compiler/rt_diff.krs)). Os nós e o percurso de trás para frente são os do `src/autodiff.rs`, com os mesmos bits; `tests/rt/diff.krs` monta fitas à mão e confere.
+  - **Cópias rastreadas.** O back end faz uma cópia de cada função que o `grad` alcança, e nela:
+    - os floats e os tensores de floats viram nós da fita;
+    - as structs e tuplas que os contêm viram tuplas de nós;
+    - cada operação calcula o valor comum com o código de sempre (os mesmos erros, os mesmos bits) e grava um nó.
+  - **A mesma fita.** Um valor que não depende do que se deriva é constante, como os valores comuns do interpretador, então a fita gravada é a do interpretador.
+  - **O que compila:**
+    - `grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)` de funções com nome;
+    - o controle de fluxo, as chamadas e as atribuições, inclusive `x op= v` e as atribuições em fatias;
+    - as regras suaves, relaxadas dentro do `grad` e exatas fora.
+  - **Conferido:**
+    - `examples/mlp.krs` treina 1500 passos de Adam com as mesmas perdas, bit a bit;
+    - `tests/wasm/grad.krs` cobre floats, tensores, structs, tuplas e listas;
+    - o modelo do M6 (`research/tax_portfolio.krs`) também compila.
+
 **Ainda não compila:**
-- `grad`, `value_and_grad` e as regras suaves (`smooth_max`, `smooth_min`, `smooth_step`);
-- a internet (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
+- **No `grad`:**
+  - `grad` de uma lambda;
+  - a aritmética do espaço tangente dentro da função derivada;
+  - enums com floats;
+  - `x op= v` numa parte de um valor;
+  - a atribuição a uma fatia de um tensor que está dentro de um valor;
+- **a internet** (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
 
 Um programa que os usa é recusado com W0001, no ponto exato.

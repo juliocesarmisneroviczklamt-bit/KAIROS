@@ -18,6 +18,7 @@ import "rt_unicode.krs"
 import "rt_decimal.krs"
 import "rt_tensor.krs"
 import "rt_case.krs"
+import "rt_diff.krs"
 
 fn wasm_load8(addr: i64) -> i64 {
     addr * 0
