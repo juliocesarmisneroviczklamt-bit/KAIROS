@@ -302,16 +302,25 @@ fn write_obj(inout g: WGen, fd: i64, p: i64) {
 // A runtime error whose message shows a value: `before`, the value in local `v` as the runtime
 // function `fmt` writes it (`rt_str_i64`, `rt_fmt_f64`), then `after`.
 fn fail_dyn(inout g: WGen, e: H, code: str, before: str, after: str, v: i64, fmt: str) {
+    fail_dyn2(inout g, e, code, [before, after], [(v, fmt)])
+}
+
+// The same with several values: pieces[0], the first value, pieces[1], the second...
+fn fail_dyn2(inout g: WGen, e: H, code: str, pieces: List[str], vals: List[(i64, str)]) {
     let f = if e.f >= 0 and e.f < len(g.srcs) { e.f } else { 0 }
     let mark = from_codes([1])
-    let parts = split(render_diag(code, before + mark + after, "", g.srcs[f], g.ck.files[f], e.lo, e.hi), mark)
-    emit_text(inout g, 2, parts[0])
-    lget(inout g, v)
-    call_f(inout g, rt_fn(inout g, fmt))
-    let p = new_local(inout g, wt_i32())
-    lset(inout g, p)
-    write_obj(inout g, 2, p)
-    let t = intern(inout g, parts[1])
+    var msg = pieces[0]
+    for k in 0..len(vals) { msg = msg + mark + pieces[k + 1] }
+    let parts = split(render_diag(code, msg, "", g.srcs[f], g.ck.files[f], e.lo, e.hi), mark)
+    for k in 0..len(vals) {
+        emit_text(inout g, 2, parts[k])
+        lget(inout g, vals[k].0)
+        call_f(inout g, rt_fn(inout g, vals[k].1))
+        let p = new_local(inout g, wt_i32())
+        lset(inout g, p)
+        write_obj(inout g, 2, p)
+    }
+    let t = intern(inout g, parts[len(vals)])
     i32c(inout g, t.0)
     i32c(inout g, t.1)
     call_f(inout g, f_fail())
@@ -329,6 +338,7 @@ fn vt(t: Ty) -> i64 {
         TStr => wt_i32(),
         TTuple(_) => wt_i32(),
         TStruct(_) => wt_i32(),
+        TList(_) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -341,6 +351,7 @@ fn heap(t: Ty) -> bool {
         TStr => true,
         TTuple(_) => true,
         TStruct(_) => true,
+        TList(_) => true,
         _ => false,
     }
 }
@@ -508,6 +519,27 @@ fn place_cell(inout g: WGen, p: H) -> Cell {
         lset(inout g, a)
         return Cell { local: false, at: a, off: 8 + 8 * p.n, ty: field_tys(g, b.ty)[p.n] }
     }
+    if p.kind == "pindex" {
+        let b = place_cell(inout g, p.kids[0])
+        if not is_list(b.ty) {
+            wg_fail(inout g, p, "changing a value in a map")
+            return b
+        }
+        cell_load(inout g, b)
+        call_f(inout g, glue_fn(inout g, "unique", b.ty))
+        cell_store(inout g, b)
+        let o = new_local(inout g, wt_i32())
+        cell_load(inout g, b)
+        lset(inout g, o)
+        gen(inout g, p.kids[1])
+        let i = new_local(inout g, wt_i64())
+        lset(inout g, i)
+        check_index(inout g, p, o, i)
+        elem_addr(inout g, o, i)
+        let a = new_local(inout g, wt_i32())
+        lset(inout g, a)
+        return Cell { local: false, at: a, off: 16, ty: elem_ty(g, b.ty) }
+    }
     wg_fail(inout g, p, "changing this part of a value")
     Cell { local: true, at: 0, off: 0, ty: Ty.TUnit }
 }
@@ -644,6 +676,12 @@ fn gen(inout g: WGen, e: H) {
         drop_tmp(inout g, tb, b.t)
         return
     }
+    if k == "list" { return list_lit(inout g, e) }
+    if k == "index" {
+        if is_list(e.kids[0].t) { return index_list(inout g, e) }
+        return wg_fail(inout g, e, "maps")
+    }
+    if k == "forlist" { return for_list(inout g, e) }
     if k == "struct" or k == "tuple" {
         let fts = field_tys(g, e.t)
         let n = len(e.kids)
@@ -1139,6 +1177,8 @@ fn match_w(inout g: WGen, e: H) {
 fn builtin_w(inout g: WGen, e: H) {
     let b = e.text
     let args = e.kids
+    if b == "push" { return push_w(inout g, e) }
+    if b == "pop" { return pop_w(inout g, e) }
     for a in args {
         if a.kind != "val" { return wg_fail(inout g, a, "`inout` arguments") }
     }
@@ -1301,6 +1341,71 @@ fn builtin_w(inout g: WGen, e: H) {
         }
         return wg_fail(inout g, x, "`str` of values of type `" + show(g.ck, x.t) + "`")
     }
+    if b == "len" and is_list(args[0].kids[0].t) {
+        let tl = gen_borrow(inout g, args[0].kids[0], true)
+        load_at(inout g, wt_i32(), 4)
+        op(inout g, 173)
+        return drop_tmp(inout g, tl, args[0].kids[0].t)
+    }
+    // functions of the runtime on texts and lists, which borrow their arguments
+    let on_rt = [("join", "rt_join"), ("codes", "rt_codes"), ("starts_with", "rt_starts_with"), ("ends_with", "rt_ends_with"),
+        ("find", "rt_find")]
+    for r in on_rt {
+        if b == r.0 { return call_rt_borrowing(inout g, r.1, args) }
+    }
+    if b == "contains" {
+        let a0 = args[0].kids[0]
+        if a0.t == Ty.TStr { return call_rt_borrowing(inout g, "rt_str_contains", args) }
+        if is_list(a0.t) {
+            let a1 = args[1].kids[0]
+            let t0 = gen_borrow(inout g, a0, not changes(a1))
+            let t1 = gen_borrow(inout g, a1, true)
+            call_f(inout g, glue_fn(inout g, "has", a0.t))
+            drop_tmp(inout g, t0, a0.t)
+            return drop_tmp(inout g, t1, a1.t)
+        }
+        return wg_fail(inout g, e, "maps")
+    }
+    if b == "split" {
+        let a0 = args[0].kids[0]
+        let a1 = args[1].kids[0]
+        let t0 = gen_borrow(inout g, a0, not changes(a1))
+        let t1 = gen_borrow(inout g, a1, true)
+        let sp = new_local(inout g, wt_i32())
+        op_u(inout g, 34, sp)
+        lget(inout g, sp)
+        load_at(inout g, wt_i32(), 4)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        fail_at_rt(inout g, e, "R0010", "`split` needs a separator that is not empty", "")
+        close(inout g)
+        call_f(inout g, rt_fn(inout g, "rt_split"))
+        drop_tmp(inout g, t0, a0.t)
+        return drop_tmp(inout g, t1, a1.t)
+    }
+    if b == "from_codes" {
+        // R0010 for a code that is not a Unicode code point
+        let a0 = args[0].kids[0]
+        let t0 = gen_borrow(inout g, a0, true)
+        let o = new_local(inout g, wt_i32())
+        lset(inout g, o)
+        lget(inout g, o)
+        call_f(inout g, rt_fn(inout g, "rt_bad_code"))
+        let k = new_local(inout g, wt_i64())
+        op_u(inout g, 34, k)
+        list_len(inout g, o)
+        op(inout g, 83)
+        open(inout g, 4, 0)
+        let c = new_local(inout g, wt_i64())
+        elem_addr(inout g, o, k)
+        load_at(inout g, wt_i64(), 16)
+        lset(inout g, c)
+        fail_dyn(inout g, e, "R0010", "", " is not a Unicode code point", c, "rt_str_i64")
+        close(inout g)
+        lget(inout g, o)
+        call_f(inout g, rt_fn(inout g, "rt_from_codes"))
+        return drop_tmp(inout g, t0, a0.t)
+    }
     if b == "len" and args[0].kids[0].t == Ty.TStr {
         let ts = gen_borrow(inout g, args[0].kids[0], true)
         call_f(inout g, rt_fn(inout g, "rt_str_len"))
@@ -1438,8 +1543,34 @@ fn float_builtin(inout g: WGen, b: str, args: List[H], e: H) {
     wg_fail(inout g, e, "`" + b + "` on floats")
 }
 
+// A function of the runtime called with the builtin's arguments, borrowed (dropped after the call
+// when they were made for it).
+fn call_rt_borrowing(inout g: WGen, name: str, args: List[H]) {
+    var tmps: List[(i64, Ty)] = []
+    for i in 0..len(args) {
+        var safe = true
+        for j in i + 1..len(args) {
+            if changes(args[j]) { safe = false }
+        }
+        tmps.push((gen_borrow(inout g, args[i].kids[0], safe), args[i].kids[0].t))
+    }
+    call_f(inout g, rt_fn(inout g, name))
+    for x in tmps { drop_tmp(inout g, x.0, x.1) }
+}
+
 // The instructions behind the runtime's `wasm_*` functions (their arguments are on the stack).
 fn intrinsic(inout g: WGen, name: str, e: H) {
+    if name == "wasm_load64" {
+        op(inout g, 167)
+        return load_at(inout g, wt_i64(), 0)
+    }
+    if name == "wasm_store64" {
+        let v = new_local(inout g, wt_i64())
+        lset(inout g, v)
+        op(inout g, 167)
+        lget(inout g, v)
+        return store_at(inout g, wt_i64(), 0)
+    }
     // the address (an i64 under the value) becomes an i32 for the memory instruction
     if name == "wasm_store8" or name == "wasm_store32" {
         let v = new_local(inout g, wt_i64())
@@ -1474,6 +1605,199 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
     wg_fail(inout g, e, "the instruction `" + name + "`")
 }
 
+// ------------------------------------------------------------------ lists
+
+// The type of a list's elements.
+fn elem_ty(g: WGen, t: Ty) -> Ty {
+    match t {
+        TList(x) => fin_ty(g.ck, x),
+        _ => Ty.TUnit,
+    }
+}
+
+// The address of element i (an i64 in local `i`) of the list in local `o`, on the stack.
+fn elem_addr(inout g: WGen, o: i64, i: i64) {
+    lget(inout g, o)
+    lget(inout g, i)
+    op(inout g, 167)
+    i32c(inout g, 3)
+    op(inout g, 116)
+    op(inout g, 106)
+}
+
+// The length of the list in local `o`, as an i64, on the stack.
+fn list_len(inout g: WGen, o: i64) {
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 4)
+    op(inout g, 173)
+}
+
+// Stops the program (R0001) unless 0 <= i < the length of the list in local `o`.
+fn check_index(inout g: WGen, e: H, o: i64, i: i64) {
+    lget(inout g, i)
+    list_len(inout g, o)
+    op(inout g, 84)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    let n = new_local(inout g, wt_i64())
+    list_len(inout g, o)
+    lset(inout g, n)
+    fail_dyn2(inout g, e, "R0001", ["index ", " out of bounds for a list of length ", ""], [(i, "rt_str_i64"), (n, "rt_str_i64")])
+    close(inout g)
+}
+
+// A new list of `n` elements (its count 1, its length and capacity n) in a new local.
+fn new_list(inout g: WGen, n: i64) -> i64 {
+    i64c(inout g, n)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    o
+}
+
+// `[a, b, ...]`
+fn list_lit(inout g: WGen, e: H) {
+    let et = elem_ty(g, e.t)
+    let w = vt(et)
+    let o = new_list(inout g, len(e.kids))
+    for i in 0..len(e.kids) {
+        if w > 0 { lget(inout g, o) }
+        gen(inout g, e.kids[i])
+        if w > 0 { store_at(inout g, w, 16 + 8 * i) }
+    }
+    lget(inout g, o)
+}
+
+// `xs[i]` on a list
+fn index_list(inout g: WGen, e: H) {
+    let xs = e.kids[0]
+    let ix = e.kids[1]
+    let et = e.t
+    let w = vt(et)
+    let tb = gen_borrow(inout g, xs, not changes(ix))
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    gen(inout g, ix)
+    let i = new_local(inout g, wt_i64())
+    lset(inout g, i)
+    check_index(inout g, e, o, i)
+    if w > 0 {
+        elem_addr(inout g, o, i)
+        load_at(inout g, w, 16)
+        incref(inout g, et)
+    }
+    drop_tmp(inout g, tb, xs.t)
+}
+
+// `for x in xs`: the list as it is when the loop starts (the loop keeps a reference to it)
+fn for_list(inout g: WGen, e: H) {
+    let p = e.kids[0]
+    let xs = e.kids[1]
+    let et = elem_ty(g, xs.t)
+    let w = vt(et)
+    gen(inout g, xs)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    let i = new_local(inout g, wt_i64())
+    let x = new_local(inout g, if w > 0 { w } else { wt_i32() })
+    open(inout g, 2, 0)
+    let exit = g.depth
+    open(inout g, 3, 0)
+    let top = g.depth
+    lget(inout g, i)
+    list_len(inout g, o)
+    op(inout g, 89)
+    br_to(inout g, exit, true)
+    if w > 0 {
+        elem_addr(inout g, o, i)
+        load_at(inout g, w, 16)
+        lset(inout g, x)
+    }
+    bind_from(inout g, p, x, et)
+    open(inout g, 2, 0)
+    let cont = g.depth
+    g.loops.push((exit, cont))
+    gen_stmt(inout g, e.kids[2])
+    let _ = g.loops.pop()
+    close(inout g)
+    lget(inout g, i)
+    i64c(inout g, 1)
+    op(inout g, 124)
+    lset(inout g, i)
+    br_to(inout g, top, false)
+    close(inout g)
+    close(inout g)
+    lget(inout g, o)
+    drop_v(inout g, xs.t)
+}
+
+// `xs.push(v)`: the value first, then the list (made unique, with room for one more)
+fn push_w(inout g: WGen, e: H) {
+    let v = e.kids[1].kids[0]
+    let w = vt_of(inout g, v)
+    gen(inout g, v)
+    let tv = new_local(inout g, if w > 0 { w } else { wt_i32() })
+    if w > 0 { lset(inout g, tv) }
+    let c = place_cell(inout g, e.kids[0].kids[0])
+    if g.failed { return }
+    cell_load(inout g, c)
+    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    op(inout g, 173)
+    call_f(inout g, rt_fn(inout g, "rt_list_room"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    cell_store(inout g, c)
+    // the element goes at the end, and the length grows
+    let n = new_local(inout g, wt_i64())
+    list_len(inout g, o)
+    lset(inout g, n)
+    if w > 0 {
+        elem_addr(inout g, o, n)
+        lget(inout g, tv)
+        store_at(inout g, w, 16)
+    }
+    lget(inout g, o)
+    lget(inout g, n)
+    op(inout g, 167)
+    i32c(inout g, 1)
+    op(inout g, 106)
+    store_at(inout g, wt_i32(), 4)
+}
+
+// `xs.pop()`: the last element (it moves out of the list); R0004 on an empty list
+fn pop_w(inout g: WGen, e: H) {
+    let c = place_cell(inout g, e.kids[0].kids[0])
+    if g.failed { return }
+    cell_load(inout g, c)
+    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    cell_store(inout g, c)
+    let n = new_local(inout g, wt_i64())
+    list_len(inout g, o)
+    lset(inout g, n)
+    lget(inout g, n)
+    op(inout g, 80)
+    open(inout g, 4, 0)
+    fail_at_rt(inout g, e, "R0004", "`pop` from an empty list", "")
+    close(inout g)
+    lget(inout g, n)
+    i64c(inout g, 1)
+    op(inout g, 125)
+    lset(inout g, n)
+    lget(inout g, o)
+    lget(inout g, n)
+    op(inout g, 167)
+    store_at(inout g, wt_i32(), 4)
+    let w = vt(e.t)
+    if w > 0 {
+        elem_addr(inout g, o, n)
+        load_at(inout g, w, 16)
+    }
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -1500,13 +1824,178 @@ fn gen_glue(inout g: WGen, j: i64) {
         glue_unique(inout g, t)
         g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
     } else if what == "show" {
-        glue_show(inout g, t)
+        if is_list(t) { glue_show_list(inout g, t) } else { glue_show(inout g, t) }
         g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
+    } else if what == "has" {
+        // the element compared, of its own type
+        let w = vt(elem_ty(g, t))
+        let q = new_local(inout g, if w > 0 { w } else { i32t })
+        glue_has(inout g, t)
+        g.m.funcs.push(finish(inout g, 2, wtype(inout g.m, [i32t, if w > 0 { w } else { i32t }], [i32t])))
     } else {
         let q = new_local(inout g, i32t)
-        glue_eq(inout g, t)
+        if is_list(t) { glue_eq_list(inout g, t) } else { glue_eq(inout g, t) }
         g.m.funcs.push(finish(inout g, 2, wtype(inout g.m, [i32t, i32t], [i32t])))
     }
+}
+
+fn is_list(t: Ty) -> bool {
+    match t {
+        TList(_) => true,
+        _ => false,
+    }
+}
+
+// Opens a loop over the elements of the list in local `o`: the index (an i64) in the result;
+// the body follows, then `loop_end`.
+fn loop_begin(inout g: WGen, o: i64) -> (i64, i64, i64) {
+    let i = new_local(inout g, wt_i64())
+    i64c(inout g, 0)
+    lset(inout g, i)
+    open(inout g, 2, 0)
+    let exit = g.depth
+    open(inout g, 3, 0)
+    let top = g.depth
+    lget(inout g, i)
+    list_len(inout g, o)
+    op(inout g, 89)
+    br_to(inout g, exit, true)
+    (i, exit, top)
+}
+
+fn loop_end(inout g: WGen, lp: (i64, i64, i64)) {
+    lget(inout g, lp.0)
+    i64c(inout g, 1)
+    op(inout g, 124)
+    lset(inout g, lp.0)
+    br_to(inout g, lp.2, false)
+    close(inout g)
+    close(inout g)
+}
+
+// The two values of type t on the stack: are they equal? (an i32)
+fn eq_values(inout g: WGen, t: Ty) {
+    if t == Ty.TInt { return op(inout g, 81) }
+    if t == Ty.TFloat { return op(inout g, 97) }
+    if t == Ty.TBool { return op(inout g, 70) }
+    if t == Ty.TStr { return call_f(inout g, rt_fn(inout g, "rt_str_eq")) }
+    if heap(t) { return call_f(inout g, glue_fn(inout g, "eq", t)) }
+    if vt(t) == 0 { return i32c(inout g, 1) }
+    wg_fail(inout g, h_none(), "comparing values of type `" + show(g.ck, t) + "`")
+}
+
+fn glue_drop_list(inout g: WGen, t: Ty) {
+    let et = elem_ty(g, t)
+    if heap(et) {
+        let lp = loop_begin(inout g, 0)
+        elem_addr(inout g, 0, lp.0)
+        load_at(inout g, wt_i32(), 16)
+        drop_v(inout g, et)
+        loop_end(inout g, lp)
+    }
+    lget(inout g, 0)
+    op(inout g, 173)
+    lget(inout g, 0)
+    load_at(inout g, wt_i32(), 8)
+    i32c(inout g, 3)
+    op(inout g, 116)
+    i32c(inout g, 16)
+    op(inout g, 106)
+    op(inout g, 173)
+    call_f(inout g, rt_fn(inout g, "rt_free"))
+}
+
+fn glue_unique_list(inout g: WGen, t: Ty) {
+    let et = elem_ty(g, t)
+    let w = vt(et)
+    list_len(inout g, 0)
+    call_f(inout g, rt_fn(inout g, "rt_list_new"))
+    op(inout g, 167)
+    let q = new_local(inout g, wt_i32())
+    lset(inout g, q)
+    if w > 0 {
+        let lp = loop_begin(inout g, 0)
+        elem_addr(inout g, q, lp.0)
+        elem_addr(inout g, 0, lp.0)
+        load_at(inout g, w, 16)
+        incref(inout g, et)
+        store_at(inout g, w, 16)
+        loop_end(inout g, lp)
+    }
+    lget(inout g, 0)
+    drop_v(inout g, t)
+    lget(inout g, q)
+}
+
+fn glue_show_list(inout g: WGen, t: Ty) {
+    let et = elem_ty(g, t)
+    let acc = new_local(inout g, wt_i32())
+    let a = new_local(inout g, wt_i32())
+    i32c(inout g, intern_obj(inout g, "["))
+    lset(inout g, acc)
+    let lp = loop_begin(inout g, 0)
+    lget(inout g, lp.0)
+    op(inout g, 80)
+    op(inout g, 69)
+    open(inout g, 4, 0)
+    acc_text(inout g, acc, ", ")
+    close(inout g)
+    elem_addr(inout g, 0, lp.0)
+    lset(inout g, a)
+    show_inner(inout g, a, 16, et)
+    acc_owned(inout g, acc)
+    loop_end(inout g, lp)
+    acc_text(inout g, acc, "]")
+    lget(inout g, acc)
+}
+
+fn glue_eq_list(inout g: WGen, t: Ty) {
+    let et = elem_ty(g, t)
+    let w = vt(et)
+    // the same length, then the same elements
+    list_len(inout g, 0)
+    list_len(inout g, 1)
+    op(inout g, 82)
+    open(inout g, 4, 0)
+    i32c(inout g, 0)
+    op(inout g, 15)
+    close(inout g)
+    if w > 0 {
+        let lp = loop_begin(inout g, 0)
+        elem_addr(inout g, 0, lp.0)
+        load_at(inout g, w, 16)
+        elem_addr(inout g, 1, lp.0)
+        load_at(inout g, w, 16)
+        eq_values(inout g, et)
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        i32c(inout g, 0)
+        op(inout g, 15)
+        close(inout g)
+        loop_end(inout g, lp)
+    }
+    i32c(inout g, 1)
+}
+
+// contains(xs, x): is x one of the elements of xs?
+fn glue_has(inout g: WGen, t: Ty) {
+    let et = elem_ty(g, t)
+    let w = vt(et)
+    let lp = loop_begin(inout g, 0)
+    if w > 0 {
+        elem_addr(inout g, 0, lp.0)
+        load_at(inout g, w, 16)
+        lget(inout g, 1)
+        eq_values(inout g, et)
+    } else {
+        i32c(inout g, 1)
+    }
+    open(inout g, 4, 0)
+    i32c(inout g, 1)
+    op(inout g, 15)
+    close(inout g)
+    loop_end(inout g, lp)
+    i32c(inout g, 0)
 }
 
 fn glue_drop(inout g: WGen, t: Ty) {
@@ -1538,6 +2027,7 @@ fn glue_drop(inout g: WGen, t: Ty) {
     op(inout g, 15)
     close(inout g)
     // the last reference: the children, then the block
+    if is_list(t) { return glue_drop_list(inout g, t) }
     let fts = field_tys(g, t)
     for i in 0..len(fts) {
         if heap(fts[i]) {
@@ -1570,6 +2060,7 @@ fn glue_unique(inout g: WGen, t: Ty) {
     lget(inout g, 0)
     op(inout g, 15)
     close(inout g)
+    if is_list(t) { return glue_unique_list(inout g, t) }
     // a copy: the same fields, each child with one more reference
     let fts = field_tys(g, t)
     let q = new_local(inout g, wt_i32())

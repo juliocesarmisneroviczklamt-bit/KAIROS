@@ -1,0 +1,4 @@
+var xs = ["a", "b"]
+xs[1] = "B"
+print(xs)           // out: ["a", "B"]
+xs[2] = "c"         // error: R0001

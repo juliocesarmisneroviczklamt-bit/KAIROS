@@ -1,0 +1,2 @@
+print(from_codes([75, 105]))        // out: Ki
+print(from_codes([75, 55296]))      // error: R0010

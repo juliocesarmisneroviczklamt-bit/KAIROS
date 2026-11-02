@@ -1,0 +1,3 @@
+print(split("a-b", "-"))    // out: ["a", "b"]
+let sep = ""
+print(split("a-b", sep))    // error: R0010

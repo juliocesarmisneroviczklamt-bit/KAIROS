@@ -1,0 +1,6 @@
+fn at(xs: List[i64], i: i64) -> i64 {
+    xs[i]
+}
+let xs = [10, 20, 30]
+print(at(xs, 2))    // out: 30
+print(at(xs, -1))   // error: R0001

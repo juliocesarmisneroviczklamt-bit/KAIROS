@@ -1,0 +1,3 @@
+var xs = [1]
+print(xs.pop())     // out: 1
+print(xs.pop())     // error: R0004

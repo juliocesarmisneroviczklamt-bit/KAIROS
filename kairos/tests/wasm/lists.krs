@@ -1,0 +1,66 @@
+// Lists in WebAssembly: values, as everything else. push, pop and assignment change a copy when
+// the list is shared; a loop runs over the list as it was when the loop started.
+struct Bar {
+    day: i64,
+    close: f64,
+}
+
+fn average(xs: List[f64]) -> f64 {
+    var s = 0.0
+    for x in xs { s += x }
+    s / float(len(xs))
+}
+
+fn returns(bars: List[Bar]) -> List[f64] {
+    var out: List[f64] = []
+    for i in 1..len(bars) { out.push(bars[i].close / bars[i - 1].close - 1.0) }
+    out
+}
+
+fn squares(n: i64) -> List[i64] {
+    var xs: List[i64] = []
+    for i in 0..n { xs.push(i * i) }
+    xs
+}
+
+let xs = [3, 1, 4, 1, 5]
+var ys = xs
+ys.push(9)
+ys[0] = 30
+print(xs, ys, len(xs), len(ys), xs == [3, 1, 4, 1, 5], xs != ys)
+let last = ys.pop()
+print(last, ys, contains(ys, 4), contains(ys, 7))
+let bars = [Bar { day: 1, close: 10.0 }, Bar { day: 2, close: 11.0 }, Bar { day: 3, close: 9.9 }]
+print(returns(bars), average([1.0, 2.0, 4.0]))
+print(bars[1], [[1, 2], [], [3]], ["a", "b\tc"], [(1, "x")], [true, false])
+let words = split("PETR4,VALE3,,ITUB4", ",")
+print(words, len(words), join(words, " | "), join([], "-") == "")
+print(codes("aé€😀"), from_codes([72, 233, 8364, 128512]), from_codes(codes("ação")))
+print(starts_with("PETR4", "PE"), ends_with("PETR4", "R4"), contains("PETR4", "TR"), find("ação", "ão"), find("abc", "z"))
+var grid = [[0, 0], [0, 0]]
+let saved = grid
+grid[1][0] = 7
+print(grid, saved)
+var big = squares(5000)
+var total = 0
+for x in big { total += x % 7 }
+for i in 0..1000 { let _ = big.pop() }
+print(total, len(big), big[3999])
+var stack: List[str] = []
+for w in words {
+    if w != "" { stack.push(w + "!") }
+}
+for w in stack { stack.push(w) }
+print(stack)
+
+// the output, line by line:
+// out: [3, 1, 4, 1, 5] [30, 1, 4, 1, 5, 9] 5 6 true true
+// out: 9 [30, 1, 4, 1, 5] true false
+// out: [0.10000000000000009, -0.09999999999999998] 2.3333333333333335
+// out: Bar { day: 2, close: 11.0 } [[1, 2], [], [3]] ["a", "b\tc"] [(1, "x")] [true, false]
+// out: ["PETR4", "VALE3", "", "ITUB4"] 4 PETR4 | VALE3 |  | ITUB4 true
+// out: [97, 233, 8364, 128512] Hé€😀 ação
+// out: true true true 2 -1
+// out: [[0, 0], [7, 0]] [[0, 0], [0, 0]]
+// out: 9997 4000 15992001
+// out: ["PETR4!", "VALE3!", "ITUB4!", "PETR4!", "VALE3!", "ITUB4!"]
