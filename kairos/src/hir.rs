@@ -247,6 +247,8 @@ pub enum HPat {
 #[derive(Clone, Debug)]
 pub struct FnBody {
     pub n_slots: u32,
+    /// the type of every slot (parameters first), as far as the function determines it
+    pub slot_types: Vec<crate::types::Ty>,
     pub body: HExpr,
     /// `-> T @ end(e)`: the month index `e` (over the parameters) by which the result is known
     pub known_at: Option<(HExpr, Span)>,

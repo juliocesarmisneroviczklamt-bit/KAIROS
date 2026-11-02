@@ -2,6 +2,41 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.7.0 — M7: código nativo com Cranelift
+
+**Funções escalares puras viram código de máquina na primeira chamada, com os mesmos bits e os mesmos erros do interpretador.** Na média geométrica de seis programas numéricos, o resultado fica em 1,20× do Rust.
+
+- **JIT** ([`kairos/src/native.rs`](kairos/src/native.rs)):
+  - **o que compila:** funções com parâmetros, variáveis e resultado `i64`, `f64` ou `bool`; aritmética, comparações, `and`/`or`/`not`, `if`, `while`, `for`, `break`/`continue`/`return`, chamadas e recursão, e `sqrt`, `exp`, `ln`, `abs`, `floor`, `ceil`, `round`, `float`, `int`, `min` e `max`;
+  - **o resto** fica no interpretador, e as duas formas se chamam livremente.
+- **Mesma semântica:**
+  - estouro, divisão por zero, potência negativa e `int` fora do intervalo dão os mesmos erros, com a mesma mensagem e o mesmo trecho (R0006, R0002, R0007, R0009);
+  - a profundidade de chamadas tem o mesmo limite (R0005);
+  - `exp`, `ln`, `^` e `round` chamam as mesmas funções em Rust puro;
+  - [`kairos/tests/native.rs`](kairos/tests/native.rs) roda tudo com e sem JIT e exige igualdade.
+- **Otimizações:**
+  - escalares e o orçamento de chamadas aninhadas vão em registradores, e o erro volta como segundo resultado;
+  - condições com `and`/`or`/`not` viram desvios diretos;
+  - divisão e resto por constante dispensam as verificações que não podem falhar, e por potência de 2 viram deslocamentos;
+  - `x % 2^k == 0` vira um teste de bits.
+- **`kairos-bench`** (`cargo run --release -p kairos --bin kairos-bench`): seis programas em Kairós e em Rust, com a mesma semântica e resultados idênticos.
+
+| benchmark | o que mede | interpretador | nativo (JIT) | Rust | nativo ÷ Rust |
+|---|---|---|---|---|---|
+| `fib(30)` | chamadas recursivas | 315 ms | 3,8 ms | 3,1 ms | 1,25× |
+| `sum_sqrt` (20 mi) | laço de f64 com `sqrt` | 1,95 s | 24,2 ms | 24,1 ms | 1,00× |
+| `collatz` (100 mil) | inteiros verificados com desvios | 1,62 s | 21,5 ms | 14,4 ms | 1,50× |
+| `black_scholes` (300 mil) | finanças: `exp`, `ln`, `sqrt`, CDF normal | 647 ms | 11,0 ms | 9,1 ms | 1,20× |
+| `mandelbrot` (300×200) | laços aninhados de f64 com saída antecipada | 950 ms | 6,3 ms | 5,3 ms | 1,19× |
+| `monte_carlo` (2 mi) | gerador Park-Miller + f64 | 747 ms | 16,9 ms | 15,0 ms | 1,13× |
+| **média geométrica** | | | | | **1,20×** |
+
+- **Plataformas:**
+  - **com JIT:** x86_64 em Linux, macOS, Windows e FreeBSD, e ARM64 em Linux e macOS;
+  - **sem JIT:** nas demais tudo roda no interpretador, com os mesmos resultados;
+  - `KAIROS_JIT=0` desliga.
+- **Fica para depois:** o elemento ternário `t3`, tensores no código nativo e compilação antecipada (AOT).
+
 ## 0.6.0 — M6: o primeiro modelo, pré-registrado e avaliado sem autoengano
 
 **Uma carteira treinada por `grad` no patrimônio depois de IR, julgada pelas regras que ela mesma registrou antes.** O resultado é honesto: ela aprendeu a negociar devagar e bateu o equal-weight, mas não há evidência de alpha, então foi rejeitada.

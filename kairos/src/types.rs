@@ -119,11 +119,29 @@ struct Ctx {
     loops: u32,
     /// affine locals already used (slots)
     consumed: std::collections::HashSet<u32>,
+    /// the type of each slot
+    slot_tys: Vec<Ty>,
 }
 
 impl Ctx {
     fn new(kind: CtxKind, ret: Ty) -> Self {
-        Ctx { scopes: vec![HashMap::new()], n_slots: 0, ret, kind, captures: Vec::new(), loops: 0, consumed: Default::default() }
+        Ctx {
+            scopes: vec![HashMap::new()],
+            n_slots: 0,
+            ret,
+            kind,
+            captures: Vec::new(),
+            loops: 0,
+            consumed: Default::default(),
+            slot_tys: Vec::new(),
+        }
+    }
+
+    fn new_slot(&mut self, ty: &Ty) -> u32 {
+        let slot = self.n_slots;
+        self.n_slots += 1;
+        self.slot_tys.push(ty.clone());
+        slot
     }
 }
 
@@ -387,8 +405,7 @@ impl Checker {
         let sig = self.sigs[id as usize].clone();
         let mut ctx = Ctx::new(CtxKind::Fn, sig.ret.clone());
         for (name, ty, inout) in &sig.params {
-            let slot = ctx.n_slots;
-            ctx.n_slots += 1;
+            let slot = ctx.new_slot(ty);
             let affine = matches!(ty, Ty::Holdout);
             ctx.scopes[0].insert(name.clone(), Local { slot, ty: ty.clone(), mutable: *inout, affine, loop_depth: 0, captured: false });
         }
@@ -421,7 +438,8 @@ impl Checker {
             }
             return Err(d);
         }
-        self.bodies[id as usize] = Some(FnBody { n_slots: ctx.n_slots, body, known_at });
+        let slot_types = ctx.slot_tys.iter().map(|t| self.resolve(t)).collect();
+        self.bodies[id as usize] = Some(FnBody { n_slots: ctx.n_slots, slot_types, body, known_at });
         Ok(())
     }
 
@@ -683,8 +701,7 @@ impl Checker {
         let affine = matches!(self.resolve(&ty), Ty::Holdout);
         let c = self.ctx();
         let loop_depth = c.loops;
-        let slot = c.n_slots;
-        c.n_slots += 1;
+        let slot = c.new_slot(&ty);
         c.scopes.last_mut().expect("scope").insert(name.to_string(), Local { slot, ty, mutable, affine, loop_depth, captured: false });
         slot
     }
@@ -707,8 +724,7 @@ impl Checker {
         if self.ctxs[ci].kind == CtxKind::Lambda && ci > 0 {
             let outer = self.lookup_in(ci - 1, name)?;
             let c = &mut self.ctxs[ci];
-            let slot = c.n_slots;
-            c.n_slots += 1;
+            let slot = c.new_slot(&outer.ty);
             c.captures.push((outer.slot, slot));
             let l = Local { slot, ty: outer.ty, mutable: false, affine: outer.affine, loop_depth: 0, captured: true };
             c.scopes[0].insert(name.to_string(), l.clone());
@@ -1289,8 +1305,7 @@ impl Checker {
         };
         let mut ctx = Ctx::new(CtxKind::Lambda, ret.clone());
         for ((name, _, _), t) in params.iter().zip(ptys.iter()) {
-            let slot = ctx.n_slots;
-            ctx.n_slots += 1;
+            let slot = ctx.new_slot(t);
             ctx.scopes[0].insert(name.clone(), Local { slot, ty: t.clone(), mutable: false, affine: false, loop_depth: 0, captured: false });
         }
         self.ctxs.push(ctx);

@@ -15,6 +15,12 @@ pub mod diag;
 pub mod hir;
 pub mod interp;
 pub mod ledger;
+/// M7: native code for pure scalar functions (Cranelift), where the target supports it.
+#[cfg(kairos_jit)]
+pub mod native;
+#[cfg(not(kairos_jit))]
+#[path = "native_stub.rs"]
+pub mod native;
 pub mod lexer;
 pub mod parser;
 pub mod session;

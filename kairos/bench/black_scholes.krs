@@ -1,0 +1,22 @@
+// Finance: Black-Scholes call prices (exp, ln, sqrt and a normal CDF).
+fn ncdf(x: f64) -> f64 {
+    // Abramowitz & Stegun 26.2.17
+    let t = 1.0 / (1.0 + 0.2316419 * abs(x))
+    let poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+    let tail = exp(-0.5 * x * x) / sqrt(2.0 * 3.141592653589793) * poly
+    if x >= 0.0 { 1.0 - tail } else { tail }
+}
+fn call_price(s: f64, k: f64, r: f64, vol: f64, t: f64) -> f64 {
+    let d1 = (ln(s / k) + (r + 0.5 * vol * vol) * t) / (vol * sqrt(t))
+    let d2 = d1 - vol * sqrt(t)
+    s * ncdf(d1) - k * exp(-r * t) * ncdf(d2)
+}
+fn book(n: i64) -> f64 {
+    var total = 0.0
+    for i in 0..n {
+        let k = 50.0 + float(i % 100)
+        let t = 0.25 + float(i % 7) * 0.25
+        total += call_price(100.0, k, 0.1, 0.3, t)
+    }
+    total
+}

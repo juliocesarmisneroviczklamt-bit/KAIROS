@@ -506,6 +506,52 @@ A escala pode cair durante o treino (recozimento). O compilador avisa quando uma
 - backtest completo de momentum;
 - treino de MLP pequeno.
 
+### 9.1 O que o M7 implementa (v0.7.0)
+
+**Código nativo para funções escalares puras**, com Cranelift ([`src/native.rs`](../src/native.rs)).
+
+- **O que é compilado:** na primeira chamada, uma função cujos parâmetros, variáveis e resultado são `i64`, `f64` ou `bool` vira código de máquina. Isso vale para funções com:
+  - aritmética, comparações, `and`/`or`/`not`;
+  - `if`, `while`, `for`, `break`/`continue`/`return`;
+  - chamadas entre elas, inclusive recursivas;
+  - `sqrt`, `exp`, `ln`, `abs`, `floor`, `ceil`, `round`, `float`, `int`, `min` e `max`.
+- **O que fica no interpretador:** o resto (tensores, listas, structs, `inout`, `grad`, `print`). As duas formas se chamam livremente.
+- **Mesma semântica, mesmos bits:**
+  - a aritmética de `i64` é verificada, com os mesmos erros e mensagens: R0006, R0002, R0007 e R0009;
+  - `exp`, `ln`, `^` e `round` chamam as mesmas funções em Rust puro que o interpretador;
+  - NaN segue as mesmas regras;
+  - a profundidade de chamadas tem o mesmo limite (R0005);
+  - [`tests/native.rs`](../tests/native.rs) roda cada programa com e sem JIT e exige saída e erros idênticos.
+- **A convenção de chamada nativa:**
+  - os escalares e o orçamento de chamadas aninhadas vão em registradores;
+  - o retorno é (resultado, falhou?), e os detalhes do erro só são gravados no caminho de erro.
+- **Plataformas:**
+  - **com JIT:** x86_64 em Linux, macOS, Windows e FreeBSD, e ARM64 em Linux e macOS;
+  - **sem JIT:** nas demais (32 bits, RISC-V, PowerPC, s390x, BSDs, WebAssembly) tudo roda no interpretador, com os mesmos resultados;
+  - `KAIROS_JIT=0` desliga o JIT.
+
+**`kairos-bench`** ([`src/bin/kairos_bench.rs`](../src/bin/kairos_bench.rs), programas em [`bench/`](../bench/)): os mesmos seis programas em Kairós e em Rust `--release`, com a mesma semântica (`checked_*` e as mesmas `exp`/`ln`). Os resultados batem até o último bit. Tempos medidos num Intel Core i7-12700KF, melhor de 7 execuções:
+
+| benchmark | o que mede | interpretador | nativo (JIT) | Rust | nativo ÷ Rust |
+|---|---|---|---|---|---|
+| `fib(30)` | chamadas recursivas | 315 ms | 3,8 ms | 3,1 ms | 1,25× |
+| `sum_sqrt` (20 mi) | laço de f64 com `sqrt` | 1,95 s | 24,2 ms | 24,1 ms | 1,00× |
+| `collatz` (100 mil) | inteiros verificados com desvios | 1,62 s | 21,5 ms | 14,4 ms | 1,50× |
+| `black_scholes` (300 mil) | finanças: `exp`, `ln`, `sqrt`, CDF normal | 647 ms | 11,0 ms | 9,1 ms | 1,20× |
+| `mandelbrot` (300×200) | laços aninhados de f64 com saída antecipada | 950 ms | 6,3 ms | 5,3 ms | 1,19× |
+| `monte_carlo` (2 mi) | gerador Park-Miller + f64 | 747 ms | 16,9 ms | 15,0 ms | 1,13× |
+| **média geométrica** | | | | | **1,20×** |
+
+**A meta de ≤ 1,2× Rust foi atingida na média geométrica.** Por programa, vai de 1,00× a 1,50×:
+- **Onde o Cranelift perde para o LLVM:** a pior distância é nas contas inteiras verificadas, em que o Cranelift gera os testes de estouro menos enxutos.
+- **Recursão:** a distância vem da contagem de profundidade, que o interpretador também faz.
+
+**Ainda não:**
+- compilação antecipada (AOT);
+- tensores no código nativo (os kernels de tensor já são Rust);
+- o elemento ternário `t3`, que fica para depois;
+- comparação com C, Julia e NumPy.
+
 ## 10. Ponte com o laboratório `quant-b3` (M2+)
 
 **Implementado no M2.** Os dados são carregados na primeira chamada: de `KAIROS_DATA`, `./data`, `../data` ou da pasta `data` do checkout que contém o executável.
@@ -587,4 +633,4 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M4 | `grad` nativo + `smooth` + motor de IA em Kairós (MLP, MSE, SGD, Adam) | ✅ gradiente confere com diferença finita (até 10⁻¹⁰); o MLP escrito em Kairós aprende `y = x³ − x` (perda 0,566 → 0,00017), com os mesmos bits em todos os sistemas |
 | M5 | holdout de uso único + protocolo + registro e DSR automáticos | ✅ 2º acesso = erro (E0501 na compilação, R0502 entre execuções, pelo livro-razão); o protocolo cerca os dados de pesquisa e reserva o holdout para todos os programas; toda avaliação vira tentativa no `registro_testes.csv` com DSR; 7 testes dourados e 5 de integração num mercado sintético |
 | M6 | primeiro modelo inédito (carteira com IR suave) | ✅ protocolo publicado antes (commit `52a186d`, `research/m6-protocol.md`); walk-forward provado causal; simulador real com custos e IR; 3 tentativas no registro; DSR 0,8%: **rejeitado** pela própria regra ([relatório](../research/m6-report.md)); holdout (o futuro, ≥ 24 meses) reservado no livro-razão |
-| M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ≤ 1,2× Rust nos benchmarks numéricos |
+| M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ✅ JIT de funções escalares puras, com os mesmos bits e erros do interpretador; `kairos-bench`: 1,20× Rust na média geométrica de 6 programas (1,00× a 1,50×); `t3` fica para depois (§9.1) |

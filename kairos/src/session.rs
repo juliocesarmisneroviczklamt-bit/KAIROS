@@ -21,6 +21,8 @@ pub struct Session {
     sources: Vec<(String, String)>,
     /// the `b3` data module (data loads on first use)
     host: Host,
+    /// native code for pure scalar functions (M7)
+    jit: std::cell::RefCell<crate::native::Jit>,
 }
 
 impl Session {
@@ -29,7 +31,8 @@ impl Session {
     }
 
     pub fn with_host(out: Box<dyn Write>, host: Host) -> Self {
-        let mut s = Session { checker: Checker::new(), frame: Vec::new(), out, sources: Vec::new(), host };
+        let jit = std::cell::RefCell::new(crate::native::Jit::new());
+        let mut s = Session { checker: Checker::new(), frame: Vec::new(), out, sources: Vec::new(), host, jit };
         if let Err(d) = s.run("<prelude>", PRELUDE) {
             panic!("the Kairós prelude does not compile:\n{}", s.render(&d));
         }
@@ -65,7 +68,7 @@ impl Session {
         }
         let mut echo = None;
         {
-            let mut it = Interp::new(&self.checker, &mut *self.out, &self.host);
+            let mut it = Interp::new(&self.checker, &mut *self.out, &self.host, &self.jit);
             for s in &stmts {
                 match it.eval(&s.hir, &mut self.frame) {
                     Ok(v) => {
@@ -78,6 +81,16 @@ impl Session {
         }
         let _ = self.out.flush();
         Ok(echo)
+    }
+
+    /// Turns native code (M7) on or off for this session; `KAIROS_JIT=0` is the default switch.
+    pub fn set_jit(&mut self, on: bool) {
+        self.jit = std::cell::RefCell::new(crate::native::Jit::with(on));
+    }
+
+    /// How many functions of this session run as machine code.
+    pub fn native_functions(&self) -> usize {
+        self.jit.borrow().compiled()
     }
 
     /// The `b3` data module of this session.

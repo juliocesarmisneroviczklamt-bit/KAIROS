@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.6.0 (M6)
+## Estado: v0.7.0 (M7)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -31,7 +31,7 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M4 | `grad` nativo + motor de IA escrito em Kairós (MLP, Adam genérico) | ✅ |
 | M5 | holdout de uso único + protocolos + registro de testes e DSR automáticos | ✅ |
 | M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR), pré-registrado | ✅ rejeitado pela própria regra ([relatório](kairos/research/m6-report.md)); holdout reservado até 2028-11 |
-| M7 | back-end nativo (Cranelift) | próximo |
+| M7 | back-end nativo (Cranelift) + `kairos-bench` | ✅ 1,20× Rust na média geométrica, com os mesmos bits |
 
 ## Exemplo: momentum na B3
 
@@ -115,6 +115,26 @@ runtime error[R0503]: the holdout of protocol "momentum-demo" starts in 2026-11,
 - **Comportamento aprendido:** o modelo passou a negociar devagar, com 9 vezes menos giro que o momentum, e assim bateu o equal-weight.
 - **Sem alpha:** pela regra registrada antes, ele é **rejeitado** (DSR de 0,8%), e nenhuma carteira de ações bateu o CDI depois de impostos.
 - **Holdout:** o futuro, a partir de 2026-11, fica reservado e abre uma vez com 24 meses de dados.
+
+## Código nativo (M7)
+
+Funções escalares puras (`i64`, `f64`, `bool`, laços, `if`, recursão, `sqrt`/`exp`/`ln`…) viram código de máquina com o Cranelift na primeira chamada. Elas dão os mesmos bits e os mesmos erros do interpretador. Medido com o `kairos-bench`:
+
+| benchmark | o que mede | interpretador | nativo (JIT) | Rust | nativo ÷ Rust |
+|---|---|---|---|---|---|
+| `fib(30)` | chamadas recursivas | 315 ms | 3,8 ms | 3,1 ms | 1,25× |
+| `sum_sqrt` (20 mi) | laço de f64 com `sqrt` | 1,95 s | 24,2 ms | 24,1 ms | 1,00× |
+| `collatz` (100 mil) | inteiros verificados com desvios | 1,62 s | 21,5 ms | 14,4 ms | 1,50× |
+| `black_scholes` (300 mil) | finanças: `exp`, `ln`, `sqrt`, CDF normal | 647 ms | 11,0 ms | 9,1 ms | 1,20× |
+| `mandelbrot` (300×200) | laços aninhados de f64 com saída antecipada | 950 ms | 6,3 ms | 5,3 ms | 1,19× |
+| `monte_carlo` (2 mi) | gerador Park-Miller + f64 | 747 ms | 16,9 ms | 15,0 ms | 1,13× |
+| **média geométrica** | | | | | **1,20×** |
+
+```text
+cargo run --release -p kairos --bin kairos-bench
+```
+
+O JIT funciona em x86_64 (Linux, macOS, Windows, FreeBSD) e ARM64 (Linux, macOS). Nas outras plataformas tudo roda no interpretador, com os mesmos resultados.
 
 ## Como usar
 

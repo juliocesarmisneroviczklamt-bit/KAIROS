@@ -1,0 +1,19 @@
+// Integer arithmetic with branches (every operation checked for overflow).
+fn chain(n: i64) -> i64 {
+    var x = n
+    var steps = 1
+    while x != 1 {
+        if x % 2 == 0 { x = x / 2 } else { x = 3 * x + 1 }
+        steps += 1
+    }
+    steps
+}
+fn longest(limit: i64) -> i64 {
+    var best = 0
+    var arg = 0
+    for n in 1..limit {
+        let c = chain(n)
+        if c > best { best = c; arg = n }
+    }
+    arg * 1000 + best
+}

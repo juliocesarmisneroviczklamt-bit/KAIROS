@@ -1,0 +1,24 @@
+// Nested floating-point loops with an early exit.
+fn inside(cx: f64, cy: f64, max_iter: i64) -> bool {
+    var x = 0.0
+    var y = 0.0
+    var i = 0
+    while i < max_iter and x * x + y * y <= 4.0 {
+        let xt = x * x - y * y + cx
+        y = 2.0 * x * y + cy
+        x = xt
+        i += 1
+    }
+    i == max_iter
+}
+fn grid(w: i64, h: i64, max_iter: i64) -> i64 {
+    var n = 0
+    for py in 0..h {
+        for px in 0..w {
+            let cx = -2.0 + 3.0 * float(px) / float(w)
+            let cy = -1.2 + 2.4 * float(py) / float(h)
+            if inside(cx, cy, max_iter) { n += 1 }
+        }
+    }
+    n
+}

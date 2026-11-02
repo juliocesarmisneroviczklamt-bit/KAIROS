@@ -1,0 +1,8 @@
+// A floating-point loop: sqrt and int-to-float conversion.
+fn sum_sqrt(n: i64) -> f64 {
+    var s = 0.0
+    for i in 1..=n {
+        s += sqrt(float(i))
+    }
+    s
+}

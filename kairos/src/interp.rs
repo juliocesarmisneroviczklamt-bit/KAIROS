@@ -135,6 +135,8 @@ pub struct Interp<'a> {
     ck: &'a Checker,
     out: &'a mut dyn Write,
     host: &'a Host,
+    /// M7: native code for pure scalar functions
+    jit: &'a std::cell::RefCell<crate::native::Jit>,
     depth: u32,
     max_depth: u32,
     /// the tape of the `grad` being computed (M4)
@@ -142,8 +144,8 @@ pub struct Interp<'a> {
 }
 
 impl<'a> Interp<'a> {
-    pub fn new(ck: &'a Checker, out: &'a mut dyn Write, host: &'a Host) -> Self {
-        Interp { ck, out, host, depth: 0, max_depth: max_depth(), tape: std::cell::RefCell::new(None) }
+    pub fn new(ck: &'a Checker, out: &'a mut dyn Write, host: &'a Host, jit: &'a std::cell::RefCell<crate::native::Jit>) -> Self {
+        Interp { ck, out, host, jit, depth: 0, max_depth: max_depth(), tape: std::cell::RefCell::new(None) }
     }
 
     fn eval_all(&mut self, xs: &[HExpr], f: &mut Vec<Value>) -> R<Vec<Value>> {
@@ -368,6 +370,19 @@ impl<'a> Interp<'a> {
         for (i, a) in args.iter().enumerate() {
             if let HArg::Val(e) = a {
                 frame[i] = self.eval(e, f)?;
+            }
+        }
+        // M7: a pure scalar function runs as machine code, when it can be compiled
+        if args.iter().all(|a| matches!(a, HArg::Val(_))) {
+            if self.depth >= self.max_depth {
+                return err("R0005", sp, "stack overflow: too many nested calls");
+            }
+            let n = ck.sigs[id as usize].params.len();
+            let native = self.jit.borrow_mut().call(ck, id, &frame[..n], self.depth + 1, self.max_depth);
+            match native {
+                Some(Ok(v)) => return Ok(v),
+                Some(Err(d)) => return Err(Ctl::Err(d)),
+                None => {}
             }
         }
         // then move the `inout` places into the call (and back afterwards)
