@@ -1,7 +1,8 @@
-// What files declare, by the checker written in Kairós (as `kairos types file.krs` prints it).
+// What the front end written in Kairós makes of files: their declarations, the types of their
+// variables, their HIR and what the temporal analysis knows (as `kairos hir file.krs` prints it).
 //
 //   kairos run kairos/compiler/types.krs <std folder> file.krs [more.krs ...]
-import "body.krs"
+import "front.krs"
 
 let std_dir = args()[0]
 var base = new_checker(std_dir)
@@ -20,5 +21,6 @@ for k in 1..len(args()) {
     } else {
         for l in declarations_since(ck, m) { print(l) }
         for l in hir_since(ck, m) { print(l) }
+        for l in temporal_since(ck, m) { print(l) }
     }
 }

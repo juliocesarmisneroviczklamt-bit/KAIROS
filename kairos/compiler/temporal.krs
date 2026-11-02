@@ -1,0 +1,1498 @@
+// The temporal analysis of Kairós (M3), written in Kairós (M12). It is src/temporal.rs: every
+// value has a knowledge time, and a decision that uses information from its own future is a
+// compile error.
+//
+// It runs on the HIR the checker built, as an abstract interpretation:
+// - each value gets the moment it becomes known, `end(i)` for a month (or day) index `i` that the
+//   compiler tracks as a constant or as a symbol plus a constant (the loop variable `m`, an
+//   integer parameter), and the latest of its inputs when values are combined;
+// - data carries its own time: row `t` of `b3.monthly_returns()` is known at `end(t)`, row `t` of
+//   `b3.eligible()` at `end(t - 1)`, and `observed(x, lag: k)` declares it for any tensor;
+// - tensors over a temporal axis remember that row `t` is known at `end(t + lag)`; selecting rows
+//   turns that into a time, reducing over the axis uses the whole history;
+// - control flow counts: after `if x { continue }` everything depends on `x`;
+// - loops are analysed to a fixpoint: what one iteration leaves for the next is one month older.
+//
+// E0301: use of future information. E0302: it cannot be proven. E0303: a temporal tensor whose
+// rows are known later than an annotated function may assume.
+import "check.krs"
+
+fn imax() -> i64 {
+    9223372036854775807
+}
+
+fn imin() -> i64 {
+    -9223372036854775807 - 1
+}
+
+// a + b, unless it overflows
+fn add_ok(a: i64, b: i64) -> (bool, i64) {
+    if b > 0 and a > imax() - b { return (false, 0) }
+    if b < 0 and a < imin() - b { return (false, 0) }
+    (true, a + b)
+}
+
+fn sub_ok(a: i64, b: i64) -> (bool, i64) {
+    if b < 0 and a > imax() + b { return (false, 0) }
+    if b > 0 and a < imin() + b { return (false, 0) }
+    (true, a - b)
+}
+
+// ------------------------------------------------------------------ indices and times
+
+fn lin_addk(l: Lin, k: i64) -> Lin {
+    match l {
+        LConst(c) => {
+            let r = add_ok(c, k)
+            if r.0 { Lin.LConst(r.1) } else { Lin.LUnknown }
+        },
+        LSym(s, c) => {
+            let r = add_ok(c, k)
+            if r.0 { Lin.LSym(s, r.1) } else { Lin.LUnknown }
+        },
+        LUnknown => Lin.LUnknown,
+    }
+}
+
+fn lin_add(a: Lin, b: Lin) -> Lin {
+    match a {
+        LConst(x) => match b {
+            LConst(y) => lin_addk(a, y),
+            LSym(s, c) => lin_addk(b, x),
+            LUnknown => Lin.LUnknown,
+        },
+        LSym(s, c) => match b {
+            LConst(k) => lin_addk(a, k),
+            _ => Lin.LUnknown,
+        },
+        LUnknown => Lin.LUnknown,
+    }
+}
+
+fn lin_sub(a: Lin, b: Lin) -> Lin {
+    match a {
+        LConst(x) => match b {
+            LConst(y) => {
+                let r = sub_ok(x, y)
+                if r.0 { Lin.LConst(r.1) } else { Lin.LUnknown }
+            },
+            _ => Lin.LUnknown,
+        },
+        LSym(s, c) => match b {
+            LConst(k) => if k == imin() { Lin.LUnknown } else { lin_addk(a, -k) },
+            LSym(t, d) => {
+                if s != t { return Lin.LUnknown }
+                let r = sub_ok(c, d)
+                if r.0 { Lin.LConst(r.1) } else { Lin.LUnknown }
+            },
+            LUnknown => Lin.LUnknown,
+        },
+        LUnknown => Lin.LUnknown,
+    }
+}
+
+fn at_lin(a: At) -> Lin {
+    match a {
+        AEnd(l) => l,
+        _ => Lin.LUnknown,
+    }
+}
+
+// `end(s + x) ⊔ end(t + y)` when the loop symbol `s ≤ t + c`: `end(t + max(y, c + x))`.
+fn bounded(bounds: Map[i64, (i64, i64)], s: i64, x: i64, t: i64, y: i64) -> (bool, Lin) {
+    if not contains(bounds, s) { return (false, Lin.LUnknown) }
+    let b = bounds[s]
+    if b.0 != t { return (false, Lin.LUnknown) }
+    let cx = add_ok(b.1, x)
+    if not cx.0 { return (false, Lin.LUnknown) }
+    (true, Lin.LSym(t, max(y, cx.1)))
+}
+
+fn join_at(bounds: Map[i64, (i64, i64)], a: At, b: At) -> At {
+    match a {
+        AAlways => { return b },
+        _ => {},
+    }
+    match b {
+        AAlways => { return a },
+        _ => {},
+    }
+    if a == At.ALate or b == At.ALate { return At.ALate }
+    let lb = at_lin(b)
+    match at_lin(a) {
+        LConst(x) => match lb {
+            LConst(y) => At.AEnd(Lin.LConst(max(x, y))),
+            _ => At.AEnd(Lin.LUnknown),
+        },
+        LSym(s, x) => match lb {
+            LSym(t, y) => {
+                if s == t { return At.AEnd(Lin.LSym(s, max(x, y))) }
+                let r1 = bounded(bounds, s, x, t, y)
+                if r1.0 { return At.AEnd(r1.1) }
+                let r2 = bounded(bounds, t, y, s, x)
+                if r2.0 { return At.AEnd(r2.1) }
+                At.AEnd(Lin.LUnknown)
+            },
+            _ => At.AEnd(Lin.LUnknown),
+        },
+        LUnknown => At.AEnd(Lin.LUnknown),
+    }
+}
+
+// Is `a` known no later than `b`? 1 yes, 0 no, -1 it cannot be decided.
+fn known_by(a: At, b: At) -> i64 {
+    match a {
+        AAlways => { return 1 },
+        _ => {},
+    }
+    match b {
+        AAlways => { return 0 },
+        _ => {},
+    }
+    if a == At.ALate { return 0 }
+    if b == At.ALate { return 1 }
+    let lb = at_lin(b)
+    match at_lin(a) {
+        LConst(x) => match lb {
+            LConst(y) => if x <= y { 1 } else { 0 },
+            _ => -1,
+        },
+        LSym(s, x) => match lb {
+            LSym(t, y) => if s != t { -1 } else if x <= y { 1 } else { 0 },
+            _ => -1,
+        },
+        LUnknown => -1,
+    }
+}
+
+fn time_always() -> Time {
+    Time { at: At.AAlways, lo: -1, hi: -1 }
+}
+
+fn time_at(at: At, lo: i64, hi: i64) -> Time {
+    Time { at: at, lo: lo, hi: hi }
+}
+
+fn time_join(bounds: Map[i64, (i64, i64)], a: Time, b: Time) -> Time {
+    let at = join_at(bounds, a.at, b.at)
+    if at == a.at and a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi } }
+    if at == b.at and b.lo >= 0 { return Time { at: at, lo: b.lo, hi: b.hi } }
+    if a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi } }
+    Time { at: at, lo: b.lo, hi: b.hi }
+}
+
+// Rewrites the symbol `sym` in an index: mode 0 shifts it by `k`, 1 forgets it, 2 replaces it
+// by `last` (plus its constant).
+fn map_lin(l: Lin, mode: i64, sym: i64, k: i64, last: Lin) -> Lin {
+    match l {
+        LSym(s, c) => {
+            if s != sym { return l }
+            if mode == 0 { return lin_addk(l, k) }
+            if mode == 1 { return Lin.LUnknown }
+            lin_addk(last, c)
+        },
+        _ => l,
+    }
+}
+
+fn time_map(t: Time, mode: i64, sym: i64, k: i64, last: Lin) -> Time {
+    match t.at {
+        AEnd(l) => Time { at: At.AEnd(map_lin(l, mode, sym, k, last)), lo: t.lo, hi: t.hi },
+        _ => t,
+    }
+}
+
+// Replaces a function's data horizon `sym` by the time it stands for at a call.
+fn time_horizon(t: Time, sym: i64, to: At) -> Time {
+    match t.at {
+        AEnd(l) => match l {
+            LSym(s, c) => {
+                if s != sym { return t }
+                let at = match to {
+                    AEnd(m) => At.AEnd(lin_addk(m, c)),
+                    _ => to,
+                }
+                Time { at: at, lo: t.lo, hi: t.hi }
+            },
+            _ => t,
+        },
+        _ => t,
+    }
+}
+
+// ------------------------------------------------------------------ rows and values
+
+fn rows_none() -> Rows {
+    Rows { ax: -1, has_lag: false, lag: 0, has_end: false, end: Lin.LUnknown, lo: -1, hi: -1, has_store: false, store_row: Lin.LUnknown, store_at: At.AAlways }
+}
+
+fn rows_new(axn: i64, lag: i64, lo: i64, hi: i64) -> Rows {
+    var r = rows_none()
+    r.ax = axn
+    r.has_lag = true
+    r.lag = lag
+    r.lo = lo
+    r.hi = hi
+    r
+}
+
+fn same_end(x: Rows, y: Rows) -> bool {
+    x.has_end == y.has_end and (not x.has_end or x.end == y.end)
+}
+
+// (it has rows, the rows)
+fn rows_join(ha: bool, x: Rows, hb: bool, y: Rows) -> (bool, Rows) {
+    if not ha { return (hb, y) }
+    if not hb { return (true, x) }
+    let keep_end = same_end(x, y)
+    if x.ax != y.ax {
+        var r = x
+        r.has_lag = false
+        r.has_end = false
+        return (true, r)
+    }
+    var pick = x
+    if x.has_lag and y.has_lag {
+        if y.lag > x.lag { pick = y }
+    } else if x.has_lag {
+        pick = y
+    }
+    if keep_end {
+        pick.has_end = x.has_end
+        pick.end = x.end
+    } else {
+        pick.has_end = false
+    }
+    (true, pick)
+}
+
+fn rows_same(ha: bool, x: Rows, hb: bool, y: Rows) -> bool {
+    if ha != hb { return false }
+    if not ha { return true }
+    x.ax == y.ax and x.has_lag == y.has_lag and (not x.has_lag or x.lag == y.lag) and same_end(x, y)
+}
+
+fn tv_always() -> TV {
+    TV { time: time_always(), has_rows: false, rows: rows_none(), int: Lin.LUnknown }
+}
+
+fn tv_int(l: Lin) -> TV {
+    var v = tv_always()
+    v.int = l
+    v
+}
+
+fn tv_time(t: Time) -> TV {
+    var v = tv_always()
+    v.time = t
+    v
+}
+
+fn tv_join(bounds: Map[i64, (i64, i64)], a: TV, b: TV) -> TV {
+    let r = rows_join(a.has_rows, a.rows, b.has_rows, b.rows)
+    TV { time: time_join(bounds, a.time, b.time), has_rows: r.0, rows: r.1, int: if a.int == b.int { a.int } else { Lin.LUnknown } }
+}
+
+fn tv_with_time(bounds: Map[i64, (i64, i64)], v: TV, t: Time) -> TV {
+    var out = v
+    out.time = time_join(bounds, v.time, t)
+    out
+}
+
+fn tv_no_int(v: TV) -> TV {
+    var out = v
+    out.int = Lin.LUnknown
+    out
+}
+
+fn tv_same(a: TV, b: TV) -> bool {
+    a.time.at == b.time.at and a.int == b.int and rows_same(a.has_rows, a.rows, b.has_rows, b.rows)
+}
+
+// The value one iteration later, seen from the next value of loop symbol `sym`.
+fn tv_shift(v: TV, sym: i64, d: i64) -> TV {
+    var out = v
+    out.time = time_map(v.time, 0, sym, d, Lin.LUnknown)
+    out.int = map_lin(v.int, 0, sym, d, Lin.LUnknown)
+    out
+}
+
+// After the loop: symbol `sym` stands for an unknown month.
+fn tv_forget(v: TV, sym: i64) -> TV {
+    var out = v
+    out.time = time_map(v.time, 1, sym, 0, Lin.LUnknown)
+    out.int = map_lin(v.int, 1, sym, 0, Lin.LUnknown)
+    if v.has_rows and v.rows.has_end {
+        match v.rows.end {
+            LSym(s, c) => {
+                if s == sym { out.rows.has_end = false }
+            },
+            _ => {},
+        }
+    }
+    out
+}
+
+// After a `for` loop whose variable `sym` ends at `last`: what the iterations left is known by
+// the time of the last one.
+fn tv_bound(v: TV, sym: i64, last: Lin) -> TV {
+    var out = v
+    out.time = time_map(v.time, 2, sym, 0, last)
+    match v.int {
+        LSym(s, c) => {
+            if s == sym { out.int = Lin.LUnknown }
+        },
+        _ => {},
+    }
+    out
+}
+
+fn frames_join(bounds: Map[i64, (i64, i64)], a: List[TV], b: List[TV]) -> List[TV] {
+    var out: List[TV] = []
+    for i in 0..min(len(a), len(b)) { out.push(tv_join(bounds, a[i], b[i])) }
+    out
+}
+
+fn frames_same(a: List[TV], b: List[TV]) -> bool {
+    if len(a) != len(b) { return false }
+    for i in 0..len(a) {
+        if not tv_same(a[i], b[i]) { return false }
+    }
+    true
+}
+
+// ------------------------------------------------------------------ the analyser
+
+// What a function returns in terms of its parameters' symbols (-1: none).
+struct Summary {
+    result: TV,
+    param_syms: List[i64],
+    horizon: i64,
+}
+
+struct An {
+    // symbol names (loop variables, parameters), for messages
+    names: List[str],
+    done: Map[i64, Summary],
+    busy: Map[i64, bool],
+    // control dependence: when the decision to be here was made
+    pc: Time,
+    // values returned so far by the function being analysed
+    has_ret: bool,
+    ret: TV,
+    // functions being analysed in the context of a call
+    in_ctx: List[i64],
+    // loop symbols bounded by another: s -> (t, c) for s ≤ t + c
+    bounds: Map[i64, (i64, i64)],
+    failed: bool,
+    code: str,
+    elo: i64,
+    ehi: i64,
+    msg: str,
+    hint: str,
+}
+
+fn an_new() -> An {
+    An { names: [], done: [:], busy: [:], pc: time_always(), has_ret: false, ret: tv_always(), in_ctx: [], bounds: [:],
+         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "" }
+}
+
+fn an_fail(inout an: An, code: str, lo: i64, hi: i64, msg: str, hint: str) {
+    if an.failed { return }
+    an.failed = true
+    an.code = code
+    an.elo = lo
+    an.ehi = hi
+    an.msg = msg
+    an.hint = hint
+}
+
+fn new_sym(inout an: An, name: str) -> i64 {
+    an.names.push(name)
+    len(an.names) - 1
+}
+
+fn show_lin(an: An, l: Lin) -> str {
+    match l {
+        LConst(c) => str(c),
+        LSym(s, c) => {
+            let n = an.names[s]
+            if c == 0 { n } else if c > 0 { n + " + " + str(c) } else if c == imin() { n + " - 9223372036854775808" } else { n + " - " + str(-c) }
+        },
+        LUnknown => "?",
+    }
+}
+
+fn show_at(an: An, a: At) -> str {
+    match a {
+        AAlways => "known in advance",
+        AEnd(l) => if l == Lin.LUnknown { "at the end of a month the compiler cannot determine" } else { "at end(" + show_lin(an, l) + ")" },
+        ALate => "only at the end of the data (it uses the whole history, or a file)",
+    }
+}
+
+fn is_temporal(ck: Checker, axn: i64) -> bool {
+    axn >= 0 and axn < len(ck.axes) and ck.axes[axn].temporal != ""
+}
+
+// -2 an integer, -1 anything else, an axis: a tensor over that temporal axis
+fn param_kind(ck: Checker, t: Ty) -> i64 {
+    match t {
+        TInt => -2,
+        TTensor(axes, x) => {
+            for a in axes {
+                if is_temporal(ck, a) { return a }
+            }
+            -1
+        },
+        _ => -1,
+    }
+}
+
+// Stores happen under the current control dependence.
+fn under_pc(an: An, v: TV) -> TV {
+    tv_with_time(an.bounds, v, an.pc)
+}
+
+fn root(p: H) -> i64 {
+    if p.kind == "plocal" { return p.n }
+    root(p.kids[0])
+}
+
+// `Lit(Int(x))` as an argument
+fn axis_lit(a: H) -> (bool, i64) {
+    if a.kind == "val" and a.kids[0].kind == "lit" and starts_with(a.kids[0].text, "i64 ") {
+        return (true, parse_int(substr(a.kids[0].text, 4, len(a.kids[0].text))))
+    }
+    (false, 0)
+}
+
+fn arg_axis(args: List[H], k: i64) -> (bool, i64) {
+    if k < len(args) { axis_lit(args[k]) } else { (false, 0) }
+}
+
+// Can `e` leave the code that follows it (break/continue of the enclosing loop, or return)?
+// With `breaks_only`, `continue` does not count.
+fn jumps(e: H, depth: i64, breaks_only: bool) -> bool {
+    let k = e.kind
+    if k == "return" { return true }
+    if k == "break" { return depth == 0 }
+    if k == "continue" { return depth == 0 and not breaks_only }
+    if k == "lambda" { return false }
+    let d = if k == "while" or k == "forrange" or k == "forlist" { depth + 1 } else { depth }
+    for c in e.kids {
+        if jumps(c, d, breaks_only) { return true }
+    }
+    false
+}
+
+// The function a call goes to, when it is known: `f(...)` through a value, `grad(f)(...)`.
+fn static_fn(c: H) -> i64 {
+    if c.kind == "fnref" { return c.n }
+    if c.kind == "builtin" and (c.text == "grad" or c.text == "value_and_grad") and len(c.kids) > 0 {
+        let a = c.kids[0]
+        if a.kind == "val" and a.kids[0].kind == "fnref" { return a.kids[0].n }
+    }
+    -1
+}
+
+fn span_of(e: H) -> (bool, i64, i64) {
+    if e.kind == "tindex" or e.kind == "host" or e.kind == "call" or e.kind == "builtin" { return (true, e.lo, e.hi) }
+    (false, 0, 0)
+}
+
+fn any_span(args: List[H]) -> (i64, i64) {
+    for a in args {
+        if a.kind == "val" {
+            let s = span_of(a.kids[0])
+            if s.0 { return (s.1, s.2) }
+        }
+    }
+    (0, 0)
+}
+
+// ------------------------------------------------------------------ functions
+
+fn summary(inout an: An, ck: Checker, id: i64) -> Summary {
+    if contains(an.done, id) { return an.done[id] }
+    let none: List[i64] = []
+    if contains(an.busy, id) {
+        // recursion: assume the worst
+        return Summary { result: tv_time(time_at(At.ALate, -1, -1)), param_syms: none, horizon: -1 }
+    }
+    an.busy[id] = true
+    let sig = ck.sigs[id]
+    var frame: List[TV] = []
+    for i in 0..len(ck.bodies[id]) { frame.push(tv_always()) }
+    var param_syms: List[i64] = []
+    var temporal = false
+    for p in sig.params {
+        if param_kind(ck, p.1) >= 0 { temporal = true }
+    }
+    let horizon = if temporal { new_sym(inout an, "the last month given to `" + sig.name + "`") } else { -1 }
+    for i in 0..len(sig.params) {
+        let p = sig.params[i]
+        let pk = param_kind(ck, p.1)
+        if pk == -2 {
+            let s = new_sym(inout an, p.0)
+            frame[i] = tv_int(Lin.LSym(s, 0))
+            param_syms.push(s)
+        } else if pk >= 0 {
+            // data passed in: row t known at end(t)
+            var r = rows_new(pk, 0, -1, -1)
+            if horizon >= 0 {
+                r.has_end = true
+                r.end = Lin.LSym(horizon, 0)
+            }
+            var v = tv_always()
+            v.has_rows = true
+            v.rows = r
+            frame[i] = v
+            param_syms.push(-1)
+        } else {
+            param_syms.push(-1)
+        }
+    }
+    let saved_pc = an.pc
+    let saved_has_ret = an.has_ret
+    let saved_ret = an.ret
+    an.pc = time_always()
+    an.has_ret = false
+    let r = eval(inout an, ck, ck.fn_hir[id], inout frame)
+    let pc = an.pc
+    let has_ret = an.has_ret
+    let ret = an.ret
+    an.pc = saved_pc
+    an.has_ret = saved_has_ret
+    an.ret = saved_ret
+    if an.failed { return Summary { result: tv_always(), param_syms: none, horizon: -1 } }
+    var result = tv_with_time(an.bounds, r, pc)
+    if has_ret { result = tv_join(an.bounds, result, ret) }
+    let at = ck.fn_at[id]
+    if at.kind != "-" {
+        let bound = eval(inout an, ck, at.kids[0], inout frame).int
+        if an.failed { return Summary { result: tv_always(), param_syms: none, horizon: -1 } }
+        check_bound(inout an, result, bound, sig.name, at.lo, at.hi)
+    }
+    let s = Summary { result: result, param_syms: param_syms, horizon: horizon }
+    an.done[id] = s
+    s
+}
+
+// `-> T @ end(bound)`: the result must be known by the end of `bound`.
+fn check_bound(inout an: An, result: TV, bound: Lin, fname: str, lo: i64, hi: i64) {
+    if bound == Lin.LUnknown {
+        an_fail(inout an, "E0302", lo, hi, "cannot use this time in a temporal annotation", "write a parameter plus a constant, e.g. `@ end(m - 1)`")
+        return
+    }
+    let at = if result.has_rows { At.ALate } else { result.time.at }
+    let k = known_by(at, At.AEnd(bound))
+    if k == 1 { return }
+    if k == 0 {
+        var slo = lo
+        var shi = hi
+        if result.time.lo >= 0 {
+            slo = result.time.lo
+            shi = result.time.hi
+        } else if result.has_rows and result.rows.lo >= 0 {
+            slo = result.rows.lo
+            shi = result.rows.hi
+        }
+        an_fail(inout an, "E0301", slo, shi, "use of future information", "`" + fname + "` promises (`@ end(" + show_lin(an, bound) + ")`) to use only what is known by then")
+        return
+    }
+    let slo = if result.time.lo >= 0 { result.time.lo } else { lo }
+    let shi = if result.time.lo >= 0 { result.time.hi } else { hi }
+    an_fail(inout an, "E0302", slo, shi, "cannot prove that this is known in time", "index temporal axes with a parameter or the loop variable plus a constant, e.g. `r[month: m - 1]`")
+}
+
+fn call_fn(inout an: An, ck: Checker, id: i64, call_args: List[H], inout f: List[TV]) -> TV {
+    var vals: List[TV] = []
+    for a in call_args {
+        vals.push(val(inout an, ck, a, inout f))
+        if an.failed { return tv_always() }
+    }
+    let sig = ck.sigs[id]
+    let annotated = ck.fn_at[id].kind != "-"
+    // a temporal argument whose rows are known earlier (or later) than the summary assumes (row
+    // t at end(t)): analyse the body with what was passed, as if it were inlined
+    let in_progress = (contains(an.busy, id) and not contains(an.done, id)) or contains(an.in_ctx, id)
+    if not in_progress and len(an.in_ctx) < 6 {
+        var shifted = false
+        for i in 0..len(sig.params) {
+            if param_kind(ck, sig.params[i].1) >= 0 and vals[i].has_rows and not (vals[i].rows.has_lag and vals[i].rows.lag == 0) { shifted = true }
+        }
+        if shifted and not annotated { return in_context(inout an, ck, id, vals, call_args, inout f) }
+    }
+    let s = summary(inout an, ck, id)
+    if an.failed { return tv_always() }
+    // the body assumed row t of its temporal tensors known at end(t)
+    var shift = 0
+    var lost = false
+    for i in 0..len(sig.params) {
+        if param_kind(ck, sig.params[i].1) < 0 { continue }
+        if not vals[i].has_rows { continue }
+        let r = vals[i].rows
+        if r.has_lag { shift = max(shift, r.lag) } else { lost = true }
+        if annotated and (not r.has_lag or r.lag > 0) {
+            var lo = r.lo
+            var hi = r.hi
+            if call_args[i].kind == "val" {
+                let sp = span_of(call_args[i].kids[0])
+                if sp.0 {
+                    lo = sp.1
+                    hi = sp.2
+                }
+            }
+            if lo < 0 {
+                let a = any_span(call_args)
+                lo = a.0
+                hi = a.1
+            }
+            an_fail(inout an, "E0303", lo, hi, "this data is known later than the function assumes", "pass data whose row t is known at the end of t, or shift the decision time")
+            return tv_always()
+        }
+    }
+    // the result in terms of the arguments
+    var res = s.result
+    res.int = Lin.LUnknown
+    match res.time.at {
+        AEnd(l) => match l {
+            LSym(sym, c) => {
+                for i in 0..len(s.param_syms) {
+                    if s.param_syms[i] == sym {
+                        res.time = Time { at: At.AEnd(lin_addk(vals[i].int, c)), lo: res.time.lo, hi: res.time.hi }
+                        break
+                    }
+                }
+            },
+            _ => {},
+        },
+        _ => {},
+    }
+    if shift > 0 {
+        // (times relative to the horizon already count the arguments' lag)
+        match res.time.at {
+            AEnd(l) => {
+                var keep = false
+                match l {
+                    LSym(x, c) => {
+                        if x == s.horizon { keep = true }
+                    },
+                    _ => {},
+                }
+                if not keep { res.time = Time { at: At.AEnd(lin_addk(l, shift)), lo: res.time.lo, hi: res.time.hi } }
+            },
+            _ => {},
+        }
+        if res.has_rows and res.rows.has_lag { res.rows.lag = res.rows.lag + shift }
+    }
+    if s.horizon >= 0 {
+        // the latest temporal argument: when its last row is known
+        var to = At.AAlways
+        var end_set = false
+        var end_has = false
+        var end_lin = Lin.LUnknown
+        for i in 0..len(sig.params) {
+            if param_kind(ck, sig.params[i].1) < 0 { continue }
+            var at = vals[i].time.at
+            var e_has = false
+            var e_lin = Lin.LUnknown
+            if vals[i].has_rows {
+                let r = vals[i].rows
+                if r.has_end and r.has_lag {
+                    at = At.AEnd(lin_addk(r.end, r.lag))
+                    e_has = true
+                    e_lin = r.end
+                } else {
+                    at = At.ALate
+                }
+            }
+            to = join_at(an.bounds, to, at)
+            if not end_set {
+                end_set = true
+                end_has = e_has
+                end_lin = e_lin
+            } else if not (end_has == e_has and (not e_has or end_lin == e_lin)) {
+                end_has = false
+            }
+        }
+        res.time = time_horizon(res.time, s.horizon, to)
+        if res.has_rows and res.rows.has_end {
+            match res.rows.end {
+                LSym(x, c) => {
+                    if x == s.horizon {
+                        res.rows.has_end = end_set and end_has
+                        res.rows.end = end_lin
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    if lost { res.time = time_join(an.bounds, res.time, time_at(At.ALate, -1, -1)) }
+    for v in vals { res.time = time_join(an.bounds, res.time, v.time) }
+    // `inout` arguments may have been changed with anything the function saw
+    for a in call_args {
+        if a.kind == "inout" {
+            let r = root(a.kids[0])
+            f[r] = tv_no_int(tv_join(an.bounds, f[r], res))
+        }
+    }
+    res
+}
+
+// The result of a call, from the body analysed with the arguments' own knowledge times.
+fn in_context(inout an: An, ck: Checker, id: i64, vals: List[TV], call_args: List[H], inout f: List[TV]) -> TV {
+    var frame: List[TV] = []
+    for i in 0..len(ck.bodies[id]) { frame.push(if i < len(vals) { vals[i] } else { tv_always() }) }
+    an.in_ctx.push(id)
+    let saved_pc = an.pc
+    let saved_has_ret = an.has_ret
+    let saved_ret = an.ret
+    an.pc = time_always()
+    an.has_ret = false
+    let r = eval(inout an, ck, ck.fn_hir[id], inout frame)
+    let pc = an.pc
+    let has_ret = an.has_ret
+    let ret = an.ret
+    an.pc = saved_pc
+    an.has_ret = saved_has_ret
+    an.ret = saved_ret
+    let _ = an.in_ctx.pop()
+    if an.failed { return tv_always() }
+    var res = tv_with_time(an.bounds, r, pc)
+    if has_ret { res = tv_join(an.bounds, res, ret) }
+    for a in call_args {
+        if a.kind == "inout" {
+            let rt = root(a.kids[0])
+            f[rt] = tv_no_int(tv_join(an.bounds, f[rt], res))
+        }
+    }
+    tv_no_int(res)
+}
+
+// ------------------------------------------------------------------ places
+
+fn index_time(inout an: An, ck: Checker, p: H, inout f: List[TV]) -> Time {
+    if p.kind == "plocal" { return time_always() }
+    if p.kind == "pfield" { return index_time(inout an, ck, p.kids[0], inout f) }
+    let a = index_time(inout an, ck, p.kids[0], inout f)
+    let i = eval(inout an, ck, p.kids[1], inout f)
+    time_join(an.bounds, a, i.time)
+}
+
+fn load_place(inout an: An, ck: Checker, p: H, inout f: List[TV]) -> TV {
+    let t = index_time(inout an, ck, p, inout f)
+    let v = f[root(p)]
+    if p.kind == "plocal" { return v }
+    tv_no_int(tv_with_time(an.bounds, v, t))
+}
+
+fn store(inout an: An, ck: Checker, p: H, v: TV, inout f: List[TV]) {
+    let t = index_time(inout an, ck, p, inout f)
+    let w = tv_with_time(an.bounds, under_pc(an, v), t)
+    if p.kind == "plocal" {
+        f[p.n] = w
+        return
+    }
+    let r = root(p)
+    f[r] = tv_no_int(tv_join(an.bounds, f[r], w))
+}
+
+fn store_weak(inout an: An, ck: Checker, p: H, v: TV, inout f: List[TV]) {
+    let t = index_time(inout an, ck, p, inout f)
+    let w = tv_with_time(an.bounds, under_pc(an, v), t)
+    let r = root(p)
+    f[r] = tv_no_int(tv_join(an.bounds, f[r], w))
+}
+
+fn bind_pat(p: H, v: TV, inout f: List[TV]) {
+    if p.kind == "pbind" {
+        f[p.n] = v
+    } else if p.kind == "ptuple" or p.kind == "pvariant" {
+        for q in p.kids { bind_pat(q, tv_no_int(v), inout f) }
+    }
+}
+
+// ------------------------------------------------------------------ tensors
+
+// A selected index: (the time of the index value, the first and the last row as linear forms).
+fn sel(inout an: An, ck: Checker, s: H, inout f: List[TV]) -> (Time, Lin, Lin) {
+    if s.kind == "at" {
+        let v = eval(inout an, ck, s.kids[0], inout f)
+        return (v.time, v.int, v.int)
+    }
+    let a = eval(inout an, ck, s.kids[0], inout f)
+    let b = eval(inout an, ck, s.kids[1], inout f)
+    let last = if s.m == 1 { b.int } else { lin_addk(b.int, -1) }
+    (time_join(an.bounds, a.time, b.time), a.int, last)
+}
+
+fn tensor_index(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    let base = eval(inout an, ck, e.kids[0], inout f)
+    var out = tv_no_int(base)
+    for k in 1..len(e.kids) {
+        let s = e.kids[k]
+        let r = sel(inout an, ck, s, inout f)
+        if an.failed { return tv_always() }
+        out.time = time_join(an.bounds, out.time, r.0)
+        if base.has_rows and base.rows.ax == s.n {
+            let at = if base.rows.has_lag { At.AEnd(lin_addk(r.2, base.rows.lag)) } else { At.AEnd(Lin.LUnknown) }
+            out.time = time_join(an.bounds, out.time, time_at(at, e.lo, e.hi))
+            out.has_rows = false
+        }
+    }
+    out
+}
+
+fn tensor_assign(inout an: An, ck: Checker, e: H, inout f: List[TV]) {
+    let n = len(e.kids)
+    let p = e.kids[0]
+    let stored = eval(inout an, ck, e.kids[n - 1], inout f)
+    var v = under_pc(an, stored)
+    let r = root(p)
+    var target = f[r]
+    let idx_time = index_time(inout an, ck, p, inout f)
+    v = tv_with_time(an.bounds, v, idx_time)
+    var has_row = false
+    var row_axis = -1
+    var row = Lin.LUnknown
+    for k in 1..n - 1 {
+        let s = e.kids[k]
+        let sr = sel(inout an, ck, s, inout f)
+        if an.failed { return }
+        v = tv_with_time(an.bounds, v, sr.0)
+        if is_temporal(ck, s.n) {
+            // the latest row of a range written at once is its first one, relatively
+            has_row = true
+            row_axis = s.n
+            row = sr.1
+        }
+    }
+    if has_row {
+        // row `row` gets a value known at `v.time`: lag = time - row
+        var set = true
+        var lag_has = false
+        var lag = 0
+        match v.time.at {
+            AAlways => { set = false },
+            ALate => {
+                target.time = time_join(an.bounds, target.time, v.time)
+                set = false
+            },
+            AEnd(l) => match l {
+                LSym(s, d) => match row {
+                    LSym(t, c) => {
+                        if s == t {
+                            lag_has = true
+                            lag = d - c
+                        }
+                    },
+                    _ => {},
+                },
+                LConst(d) => match row {
+                    LConst(c) => {
+                        lag_has = true
+                        lag = d - c
+                    },
+                    _ => {},
+                },
+                LUnknown => {},
+            },
+        }
+        if set {
+            var rw = rows_none()
+            rw.ax = row_axis
+            rw.has_lag = lag_has
+            rw.lag = lag
+            if v.time.lo >= 0 {
+                rw.lo = v.time.lo
+                rw.hi = v.time.hi
+            } else {
+                rw.lo = e.lo
+                rw.hi = e.hi
+            }
+            rw.has_store = true
+            rw.store_row = row
+            rw.store_at = v.time.at
+            let j = rows_join(target.has_rows, target.rows, true, rw)
+            target.has_rows = j.0
+            target.rows = j.1
+        }
+        // a stored tensor that still has a temporal axis brings its rows along
+        let j2 = rows_join(target.has_rows, target.rows, v.has_rows, v.rows)
+        target.has_rows = j2.0
+        target.rows = j2.1
+    } else {
+        // no temporal row selected: the value reaches every row
+        target.time = time_join(an.bounds, target.time, v.time)
+        let j = rows_join(target.has_rows, target.rows, v.has_rows, v.rows)
+        target.has_rows = j.0
+        target.rows = j.1
+    }
+    f[r] = tv_no_int(target)
+}
+
+// Reducing (or ranking, or contracting) over the temporal axis uses the whole history.
+fn over_time(an: An, x: TV, has_axis: bool, axn: i64, lo: i64, hi: i64) -> TV {
+    if x.has_rows and (not has_axis or axn < 0 or axn == x.rows.ax) {
+        // known when its last row is: a function's data horizon, or the end of the data
+        let at = if x.rows.has_end and x.rows.has_lag { At.AEnd(lin_addk(x.rows.end, x.rows.lag)) } else { At.ALate }
+        return TV { time: time_join(an.bounds, x.time, time_at(at, lo, hi)), has_rows: false, rows: rows_none(), int: Lin.LUnknown }
+    }
+    tv_no_int(x)
+}
+
+fn val(inout an: An, ck: Checker, a: H, inout f: List[TV]) -> TV {
+    if a.kind == "inout" { return load_place(inout an, ck, a.kids[0], inout f) }
+    eval(inout an, ck, a.kids[0], inout f)
+}
+
+fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    let b = e.text
+    let args = e.kids
+    if b == "push" or b == "remove" or starts_with(b, "put_") {
+        // removing a key: which keys are left depends on it
+        let x = val(inout an, ck, args[1], inout f)
+        if an.failed { return tv_always() }
+        store_weak(inout an, ck, args[0].kids[0], x, inout f)
+        return tv_always()
+    }
+    if b == "pop" { return tv_no_int(load_place(inout an, ck, args[0].kids[0], inout f)) }
+    if b == "sort" or b == "reverse" { return tv_always() }
+    if b == "print" or b == "assert" or b == "zeros" or b == "ones" or b == "zeros_like" {
+        for a in args {
+            let _ = val(inout an, ck, a, inout f)
+            if an.failed { return tv_always() }
+        }
+        return tv_always()
+    }
+    if b == "int" { return val(inout an, ck, args[0], inout f) }
+    if b == "size" {
+        // the number of rows of a temporal parameter is its horizon + 1
+        let x = val(inout an, ck, args[0], inout f)
+        let ax = arg_axis(args, 1)
+        if x.has_rows and ax.0 and x.rows.ax == ax.1 and x.rows.has_end { return tv_int(lin_addk(x.rows.end, 1)) }
+        return tv_always()
+    }
+    if b == "full" or b == "full_like" or b == "tensor" {
+        let v = val(inout an, ck, args[if b == "full_like" { 1 } else { 0 }], inout f)
+        return tv_time(v.time)
+    }
+    if b == "to_list" {
+        let v = val(inout an, ck, args[0], inout f)
+        return over_time(an, v, false, 0, e.lo, e.hi)
+    }
+    if contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count"], b) {
+        let x = val(inout an, ck, args[0], inout f)
+        if an.failed { return tv_always() }
+        let ax = arg_axis(args, 1)
+        if ax.0 and len(args) == 2 { return over_time(an, x, true, ax.1, e.lo, e.hi) }
+        var t = tv_no_int(x)
+        for k in 1..len(args) {
+            let v = val(inout an, ck, args[k], inout f)
+            if an.failed { return tv_always() }
+            t = tv_no_int(tv_join(an.bounds, t, v))
+        }
+        return t
+    }
+    if b == "rank" {
+        let x = val(inout an, ck, args[0], inout f)
+        let ax = arg_axis(args, 1)
+        return over_time(an, x, ax.0, ax.1, e.lo, e.hi)
+    }
+    if b == "nan_quantile" or b == "top_k" or b == "bottom_k" {
+        let x = val(inout an, ck, args[0], inout f)
+        let q = val(inout an, ck, args[1], inout f)
+        let ax = arg_axis(args, 2)
+        return tv_with_time(an.bounds, over_time(an, x, ax.0, ax.1, e.lo, e.hi), q.time)
+    }
+    if b == "merge_days" {
+        // the days lose their months: reaching the result reaches every row
+        let x = val(inout an, ck, args[0], inout f)
+        return over_time(an, x, true, 0, e.lo, e.hi)
+    }
+    if b == "contract" {
+        let x = val(inout an, ck, args[0], inout f)
+        let y = val(inout an, ck, args[1], inout f)
+        let ax = arg_axis(args, 2)
+        return tv_no_int(tv_join(an.bounds, over_time(an, x, ax.0, ax.1, e.lo, e.hi), over_time(an, y, ax.0, ax.1, e.lo, e.hi)))
+    }
+    if contains(["read_text", "file_exists", "list_dir", "http_get", "download", "read_lines", "read_bytes", "file_size", "file_date", "http_get_all"], b) {
+        // what is in a file has no known time: it cannot reach a decision unless declared
+        for a in args {
+            let _ = val(inout an, ck, a, inout f)
+            if an.failed { return tv_always() }
+        }
+        return tv_time(time_at(At.ALate, e.lo, e.hi))
+    }
+    if b == "observed" {
+        let x = val(inout an, ck, args[0], inout f)
+        let ax = arg_axis(args, 1)
+        let lg = arg_axis(args, 2)
+        var v = tv_time(x.time)
+        v.has_rows = true
+        v.rows = rows_new(if ax.0 { ax.1 } else { 0 }, if lg.0 { lg.1 } else { 0 }, e.lo, e.hi)
+        return v
+    }
+    // element-wise and list functions: the latest of the inputs
+    var t = tv_always()
+    for a in args {
+        let v = val(inout an, ck, a, inout f)
+        if an.failed { return tv_always() }
+        t = tv_join(an.bounds, t, v)
+    }
+    tv_no_int(t)
+}
+
+// ------------------------------------------------------------------ the B3 module
+
+fn host_tv(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    var vals: List[TV] = []
+    for a in e.kids {
+        vals.push(eval(inout an, ck, a, inout f))
+        if an.failed { return tv_always() }
+    }
+    let words = split(e.text, " ")
+    let h = words[0]
+    if h == "monthly_returns" or h == "cdi" or h == "ipca" or h == "daily" or h == "nefin" or h == "nefin_daily" { return b3_data(0, e) }
+    // row t: the NEFIN universe of t's year, fixed with the previous year's liquidity
+    if h == "eligible" { return b3_data(-1, e) }
+    if h == "month_index" { return tv_time(vals[0].time) }
+    if h == "record_trial" or h == "deflate_trial" { return tv_time(time_at(At.ALate, e.lo, e.hi)) }
+    if h == "evaluate" or h == "simulate" or h == "open_once" {
+        // the holdout trades the same way: no look-ahead there either
+        check_weights(inout an, vals[if h == "open_once" { 1 } else { 0 }], e.lo, e.hi)
+        // the evaluation of a whole history is known at its end
+        return tv_time(time_at(At.ALate, e.lo, e.hi))
+    }
+    tv_always()
+}
+
+fn b3_data(lag: i64, e: H) -> TV {
+    var v = tv_always()
+    v.has_rows = true
+    v.rows = rows_new(0, lag, e.lo, e.hi)
+    v
+}
+
+// `b3.evaluate(w)`: the weights of month t are traded at the close of month t - 1.
+fn check_weights(inout an: An, w: TV, lo: i64, hi: i64) {
+    let hint = "`b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)"
+    let index_hint = "index months with the loop variable plus a constant: `ret[month: m - 1]`, `weights[month: m] = ...`"
+    let wlo = if w.time.lo >= 0 { w.time.lo } else { lo }
+    let whi = if w.time.lo >= 0 { w.time.hi } else { hi }
+    match w.time.at {
+        AAlways => {},
+        AEnd(l) => {
+            if l == Lin.LUnknown {
+                an_fail(inout an, "E0302", wlo, whi, "cannot prove that the weights use only past information", index_hint)
+            } else {
+                an_fail(inout an, "E0301", wlo, whi, "use of future information", hint)
+            }
+            return
+        },
+        ALate => {
+            an_fail(inout an, "E0301", wlo, whi, "use of future information", hint)
+            return
+        },
+    }
+    if not w.has_rows { return }
+    let r = w.rows
+    let slo = if r.lo >= 0 { r.lo } else { lo }
+    let shi = if r.lo >= 0 { r.hi } else { hi }
+    if r.ax != 0 {
+        an_fail(inout an, "E0302", slo, shi, "the weights are timed on another axis", "`b3.evaluate` trades month by month: index the weights by `month`")
+        return
+    }
+    if not r.has_lag {
+        an_fail(inout an, "E0302", slo, shi, "cannot prove that the weights use only past information", index_hint)
+        return
+    }
+    if r.lag > -1 { an_fail(inout an, "E0301", slo, shi, "use of future information", hint) }
+}
+
+// ------------------------------------------------------------------ loops
+
+// Runs `body` to a fixpoint. `sym` (-1: none): the loop variable of a range loop, whose next
+// value is one more (what an iteration leaves for the next is one month older).
+fn loop_fix(inout an: An, ck: Checker, inout f: List[TV], sym: i64, slot: i64, body: H, cond: H, last: Lin) {
+    let entry_pc = an.pc
+    var head = f
+    var head_pc = entry_pc
+    var last_frame = f
+    for rd in 0..12 {
+        var st = head
+        if sym >= 0 { st[slot] = tv_int(Lin.LSym(sym, 0)) }
+        an.pc = head_pc
+        if cond.kind != "-" {
+            // while: running the body depends on the condition
+            let cv = eval(inout an, ck, cond, inout st)
+            if an.failed { return }
+            an.pc = time_join(an.bounds, an.pc, cv.time)
+        }
+        let _ = eval(inout an, ck, body, inout st)
+        if an.failed { return }
+        let exit_pc = an.pc
+        var carried: List[TV] = []
+        var carried_pc = exit_pc
+        if sym >= 0 {
+            for v in st { carried.push(tv_shift(v, sym, -1)) }
+            carried_pc = tv_shift(tv_time(exit_pc), sym, -1).time
+        } else {
+            carried = st
+        }
+        let new_head = frames_join(an.bounds, head, carried)
+        let new_pc = time_join(an.bounds, head_pc, carried_pc)
+        last_frame = st
+        if frames_same(new_head, head) and new_pc.at == head_pc.at { break }
+        head = new_head
+        head_pc = new_pc
+        if rd + 2 == 12 and sym >= 0 {
+            // widen: whatever still moves cannot be pinned to a month
+            var widened: List[TV] = []
+            for v in head { widened.push(tv_forget(v, sym)) }
+            head = widened
+        }
+    }
+    var out = frames_join(an.bounds, head, last_frame)
+    if sym >= 0 {
+        var bounded_out: List[TV] = []
+        for v in out { bounded_out.push(tv_bound(v, sym, last)) }
+        out = bounded_out
+    }
+    f = out
+    // after the loop: a `break` (or `return`) decided by data makes what follows depend on it
+    if jumps(body, 0, true) {
+        var p = head_pc
+        if sym >= 0 { p = tv_forget(tv_time(p), sym).time }
+        an.pc = time_join(an.bounds, entry_pc, p)
+    } else {
+        an.pc = entry_pc
+    }
+    if cond.kind != "-" {
+        // when a `while` stops depends on its condition
+        var tmp = f
+        let cv = eval(inout an, ck, cond, inout tmp)
+        if an.failed { return }
+        let ct = if sym >= 0 { tv_forget(tv_time(cv.time), sym).time } else { cv.time }
+        an.pc = time_join(an.bounds, an.pc, ct)
+    }
+}
+
+fn loop_fix_list(inout an: An, ck: Checker, inout f: List[TV], pat: H, elem: TV, body: H) {
+    // the element changes every iteration: bind it at the head of each round
+    let entry_pc = an.pc
+    var head = f
+    var head_pc = entry_pc
+    var last = f
+    for rd in 0..12 {
+        var st = head
+        bind_pat(pat, elem, inout st)
+        an.pc = head_pc
+        let _ = eval(inout an, ck, body, inout st)
+        if an.failed { return }
+        let new_head = frames_join(an.bounds, head, st)
+        let new_pc = time_join(an.bounds, head_pc, an.pc)
+        last = st
+        if frames_same(new_head, head) and new_pc.at == head_pc.at { break }
+        head = new_head
+        head_pc = new_pc
+    }
+    f = frames_join(an.bounds, head, last)
+    an.pc = if jumps(body, 0, true) { time_join(an.bounds, entry_pc, head_pc) } else { entry_pc }
+}
+
+// ------------------------------------------------------------------ expressions
+
+fn eval(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    if an.failed { return tv_always() }
+    let k = e.kind
+    if k == "lit" {
+        if starts_with(e.text, "i64 ") { return tv_int(Lin.LConst(parse_int(substr(e.text, 4, len(e.text))))) }
+        return tv_always()
+    }
+    if k == "intlit" { return tv_int(Lin.LConst(parse_int(e.text))) }
+    if k == "local" { return f[e.n] }
+    if k == "fnref" {
+        let s = summary(inout an, ck, e.n)
+        if an.failed { return tv_always() }
+        var t = tv_no_int(s.result)
+        for p in s.param_syms {
+            if p >= 0 { t = tv_forget(t, p) }
+        }
+        if s.horizon >= 0 {
+            // called with who knows what: as late as the data
+            t.time = time_horizon(t.time, s.horizon, At.ALate)
+            t = tv_forget(t, s.horizon)
+        }
+        return t
+    }
+    if k == "list" or k == "map" or k == "tuple" or k == "struct" or k == "variant" {
+        var t = tv_always()
+        for x in e.kids {
+            let v = eval(inout an, ck, x, inout f)
+            if an.failed { return tv_always() }
+            t = tv_join(an.bounds, t, v)
+        }
+        return tv_no_int(t)
+    }
+    if k == "field" { return tv_no_int(eval(inout an, ck, e.kids[0], inout f)) }
+    if k == "index" {
+        let a = eval(inout an, ck, e.kids[0], inout f)
+        let b = eval(inout an, ck, e.kids[1], inout f)
+        return tv_no_int(tv_join(an.bounds, a, b))
+    }
+    if k == "tindex" { return tensor_index(inout an, ck, e, inout f) }
+    if k == "tassign" {
+        tensor_assign(inout an, ck, e, inout f)
+        return tv_always()
+    }
+    if k == "host" { return host_tv(inout an, ck, e, inout f) }
+    if k == "call" { return call_fn(inout an, ck, e.n, e.kids, inout f) }
+    if k == "callv" {
+        let sid = static_fn(e.kids[0])
+        if sid >= 0 {
+            // grad(f)(x...) depends on the data exactly as f(x...) does
+            var hargs: List[H] = []
+            for i in 1..len(e.kids) { hargs.push(hk("val", [e.kids[i]])) }
+            return call_fn(inout an, ck, sid, hargs, inout f)
+        }
+        var t = eval(inout an, ck, e.kids[0], inout f)
+        for i in 1..len(e.kids) {
+            var v = eval(inout an, ck, e.kids[i], inout f)
+            if an.failed { return tv_always() }
+            // an unknown function may read a temporal argument at any row
+            if v.has_rows { v = over_time(an, v, false, 0, e.lo, e.hi) }
+            t = tv_join(an.bounds, t, v)
+        }
+        return tv_no_int(t)
+    }
+    if k == "builtin" { return builtin(inout an, ck, e, inout f) }
+    if k == "unary" {
+        var v = eval(inout an, ck, e.kids[0], inout f)
+        var iv = Lin.LUnknown
+        if e.text == "-" {
+            match v.int {
+                LConst(c) => {
+                    if c != imin() { iv = Lin.LConst(-c) }
+                },
+                _ => {},
+            }
+        }
+        v.int = iv
+        return v
+    }
+    if k == "binary" {
+        let x = eval(inout an, ck, e.kids[0], inout f)
+        let y = eval(inout an, ck, e.kids[1], inout f)
+        var t = tv_join(an.bounds, x, y)
+        t.int = if e.text == "+" { lin_add(x.int, y.int) } else if e.text == "-" { lin_sub(x.int, y.int) } else { Lin.LUnknown }
+        return t
+    }
+    if k == "and" or k == "or" {
+        let x = eval(inout an, ck, e.kids[0], inout f)
+        let saved = an.pc
+        an.pc = time_join(an.bounds, an.pc, x.time)
+        let y = eval(inout an, ck, e.kids[1], inout f)
+        an.pc = saved
+        return tv_no_int(tv_join(an.bounds, x, y))
+    }
+    if k == "assign" {
+        let tv = eval(inout an, ck, e.kids[1], inout f)
+        if an.failed { return tv_always() }
+        store(inout an, ck, e.kids[0], tv, inout f)
+        return tv_always()
+    }
+    if k == "opassign" {
+        let rhs = eval(inout an, ck, e.kids[1], inout f)
+        if an.failed { return tv_always() }
+        let cur = load_place(inout an, ck, e.kids[0], inout f)
+        var t = tv_join(an.bounds, cur, rhs)
+        t.int = if e.text == "+" { lin_add(cur.int, rhs.int) } else if e.text == "-" { lin_sub(cur.int, rhs.int) } else { Lin.LUnknown }
+        store(inout an, ck, e.kids[0], t, inout f)
+        return tv_always()
+    }
+    if k == "if" { return if_tv(inout an, ck, e, inout f) }
+    if k == "while" {
+        loop_fix(inout an, ck, inout f, -1, -1, e.kids[1], e.kids[0], Lin.LUnknown)
+        return tv_always()
+    }
+    if k == "forrange" {
+        let a = eval(inout an, ck, e.kids[0], inout f)
+        let b = eval(inout an, ck, e.kids[1], inout f)
+        if an.failed { return tv_always() }
+        let sym = new_sym(inout an, e.text)
+        let last = if e.m == 1 { b.int } else { lin_addk(b.int, -1) }
+        // how many times the body runs depends on the bounds
+        let saved = an.pc
+        an.pc = time_join(an.bounds, time_join(an.bounds, saved, a.time), b.time)
+        match last {
+            LSym(t, c) => { an.bounds[sym] = (t, c) },
+            _ => {},
+        }
+        loop_fix(inout an, ck, inout f, sym, e.n, e.kids[2], h_none(), last)
+        if contains(an.bounds, sym) { an.bounds.remove(sym) }
+        if an.failed { return tv_always() }
+        if not jumps(e.kids[2], 0, true) { an.pc = saved }
+        return tv_always()
+    }
+    if k == "forlist" {
+        let l = eval(inout an, ck, e.kids[1], inout f)
+        if an.failed { return tv_always() }
+        let saved = an.pc
+        // how many times the body runs depends on the list
+        an.pc = time_join(an.bounds, saved, l.time)
+        // every element is as late as the list
+        loop_fix_list(inout an, ck, inout f, e.kids[0], tv_no_int(l), e.kids[2])
+        if an.failed { return tv_always() }
+        if not jumps(e.kids[2], 0, true) { an.pc = saved }
+        return tv_always()
+    }
+    if k == "match" { return match_tv(inout an, ck, e, inout f) }
+    if k == "block" {
+        let n = len(e.kids)
+        for i in 0..n - 1 {
+            let _ = eval(inout an, ck, e.kids[i], inout f)
+            if an.failed { return tv_always() }
+        }
+        let tail = e.kids[n - 1]
+        if tail.kind == "-" { return tv_always() }
+        return eval(inout an, ck, tail, inout f)
+    }
+    if k == "let" {
+        let v = eval(inout an, ck, e.kids[1], inout f)
+        if an.failed { return tv_always() }
+        bind_pat(e.kids[0], under_pc(an, v), inout f)
+        return tv_always()
+    }
+    if k == "lambda" { return lambda_tv(inout an, ck, e, inout f) }
+    if k == "return" {
+        var tv = tv_always()
+        if e.kids[0].kind != "-" {
+            tv = eval(inout an, ck, e.kids[0], inout f)
+            if an.failed { return tv_always() }
+        }
+        let v = under_pc(an, tv)
+        if an.has_ret { an.ret = tv_join(an.bounds, an.ret, v) } else { an.ret = v }
+        an.has_ret = true
+        return tv_always()
+    }
+    // `break`, `continue`
+    tv_always()
+}
+
+fn if_tv(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    let cv = eval(inout an, ck, e.kids[0], inout f)
+    if an.failed { return tv_always() }
+    let saved = an.pc
+    let inner = time_join(an.bounds, saved, cv.time)
+    an.pc = inner
+    var ft = f
+    let a = eval(inout an, ck, e.kids[1], inout ft)
+    if an.failed { return tv_always() }
+    let pc_a = an.pc
+    an.pc = inner
+    let els = e.kids[2]
+    var b = tv_always()
+    var pc_b = inner
+    if els.kind != "-" {
+        b = eval(inout an, ck, els, inout f)
+        if an.failed { return tv_always() }
+        pc_b = an.pc
+    }
+    f = frames_join(an.bounds, ft, f)
+    let jumped = jumps(e.kids[1], 0, false) or (els.kind != "-" and jumps(els, 0, false))
+    // a branch that leaves (continue/break/return) makes what follows depend on `c`
+    an.pc = if jumped { time_join(an.bounds, pc_a, pc_b) } else { saved }
+    tv_with_time(an.bounds, tv_join(an.bounds, a, b), cv.time)
+}
+
+fn match_tv(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    let sv = eval(inout an, ck, e.kids[0], inout f)
+    if an.failed { return tv_always() }
+    let saved = an.pc
+    let inner = time_join(an.bounds, saved, sv.time)
+    var out = tv_always()
+    var frames: List[List[TV]] = []
+    var pcs = inner
+    var jumped = false
+    for i in 1..len(e.kids) {
+        let arm = e.kids[i]
+        var st = f
+        an.pc = inner
+        bind_pat(arm.kids[0], tv_no_int(sv), inout st)
+        let v = eval(inout an, ck, arm.kids[1], inout st)
+        if an.failed { return tv_always() }
+        pcs = time_join(an.bounds, pcs, an.pc)
+        if jumps(arm.kids[1], 0, false) { jumped = true }
+        out = tv_join(an.bounds, out, v)
+        frames.push(st)
+    }
+    for st in frames { f = frames_join(an.bounds, f, st) }
+    an.pc = if jumped { pcs } else { saved }
+    tv_no_int(tv_with_time(an.bounds, out, sv.time))
+}
+
+fn lambda_tv(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
+    let lb = ck.lambdas[e.n]
+    var outer: List[i64] = []
+    for s in split(e.text, " ") {
+        if s != "" { outer.push(parse_int(s)) }
+    }
+    var frame: List[TV] = []
+    for i in 0..lb.n_slots { frame.push(tv_always()) }
+    var caps = tv_always()
+    for k in 0..len(lb.caps) {
+        let v = f[outer[k]]
+        frame[lb.caps[k]] = v
+        caps = tv_join(an.bounds, caps, v)
+    }
+    let saved_pc = an.pc
+    let saved_has_ret = an.has_ret
+    let saved_ret = an.ret
+    an.pc = time_always()
+    an.has_ret = false
+    let r = eval(inout an, ck, lb.body, inout frame)
+    let pc = an.pc
+    let has_ret = an.has_ret
+    let ret = an.ret
+    an.pc = saved_pc
+    an.has_ret = saved_has_ret
+    an.ret = saved_ret
+    if an.failed { return tv_always() }
+    var body = tv_with_time(an.bounds, r, pc)
+    if has_ret { body = tv_join(an.bounds, body, ret) }
+    tv_no_int(tv_join(an.bounds, caps, body))
+}
+
+// ------------------------------------------------------------------ the entry point
+
+fn sym_text(s: i64) -> str {
+    if s < 0 { "-" } else { "s" + str(s) }
+}
+
+// Checks one batch: its new functions (annotations, decisions inside them) and its top-level
+// statements, continuing from the state of the previous batches.
+fn temporal_check(inout ck: Checker, new_fns: List[i64], tops: List[H]) {
+    var an = an_new()
+    for id in new_fns {
+        let s = summary(inout an, ck, id)
+        if an.failed { break }
+        var syms = []
+        for p in s.param_syms { syms.push(sym_text(p)) }
+        ck.tlog.push("temporal fn " + ck.sigs[id].name + " [" + join(syms, " ") + "] " + sym_text(s.horizon) + ": " + tv_text(s.result))
+    }
+    if not an.failed {
+        var frame = ck.tmain
+        while len(frame) < len(ck.main.slot_tys) { frame.push(tv_always()) }
+        for e in tops {
+            an.pc = time_always()
+            let _ = eval(inout an, ck, e, inout frame)
+            if an.failed { break }
+        }
+        ck.tmain = frame
+    }
+    if an.failed { ck_fail(inout ck, an.code, an.elo, an.ehi, an.msg, an.hint) }
+}

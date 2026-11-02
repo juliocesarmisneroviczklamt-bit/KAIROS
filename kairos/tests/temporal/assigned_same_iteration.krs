@@ -1,0 +1,9 @@
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var weights = zeros_like(ret)
+var cur = zeros(asset: size(ret, asset))
+for m in 12..size(ret, month) {
+    cur = fill_nan(ret[month: m], 0.0) * 0.0
+    weights[month: m] = cur
+}
+let ev = b3.evaluate(weights, lag: 0)

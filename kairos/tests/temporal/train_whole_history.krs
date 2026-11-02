@@ -1,0 +1,22 @@
+fn fit(r: Tensor[month, asset; f64], v: f64) -> f64 {
+    var acc = v
+    for k in 0..size(r, month) {
+        acc = acc + 0.01 * mean(fill_nan(r[month: k], 0.0))
+    }
+    acc
+}
+fn loss(v: f64, r: Tensor[month, asset; f64]) -> f64 {
+    var acc = 0.0
+    for k in 0..size(r, month) {
+        acc = acc + (v - mean(fill_nan(r[month: k], 0.0))) ^ 2.0
+    }
+    acc
+}
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var weights = zeros_like(ret)
+for m in 12..size(ret, month) {
+    let v = fit(ret, 0.0)
+    weights[month: m] = where(elig[month: m], 0.001 * v, 0.0)
+}
+let ev = b3.evaluate(weights, lag: 0)

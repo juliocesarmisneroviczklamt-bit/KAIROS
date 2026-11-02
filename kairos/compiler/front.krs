@@ -1,0 +1,101 @@
+// The front end of Kairós, written in Kairós (M12): a file and its imports become the checked
+// HIR the interpreter runs. Each batch of items (a file without its imports) is checked by the
+// type checker (check.krs, body.krs), its integer literals take their final types, and the
+// temporal analysis (temporal.krs) proves that no decision uses information from its future.
+import "body.krs"
+import "temporal.krs"
+
+fn top_name(inout ck: Checker, p: Node) {
+    if p.kind == "pbind" {
+        ck.top_names[p.text] = true
+    } else if p.kind == "ptuple" {
+        for q in p.kids { top_name(inout ck, q) }
+    }
+}
+
+// An integer literal becomes `i64` or `f64` now that inference is done.
+fn fin_lit(ck: Checker, digits: str, tv: i64) -> str {
+    match resolve(ck, Ty.TVar(tv)) {
+        TFloat => "f64 " + str(float(parse_int(digits))),
+        _ => "i64 " + digits,
+    }
+}
+
+fn fin(ck: Checker, h: H) -> H {
+    if h.kind == "intlit" { return hlit(fin_lit(ck, h.text, h.n)) }
+    if h.kind == "pintlit" { return hn("plit", fin_lit(ck, h.text, h.n), -1, -1, [], -1, -1) }
+    if len(h.kids) == 0 { return h }
+    var kids: List[H] = []
+    for k in h.kids { kids.push(fin(ck, k)) }
+    var out = h
+    out.kids = kids
+    out
+}
+
+// Checks a batch of items: the declarations, every function's body, then the top-level
+// statements; the integer literals take their final types; then the temporal analysis.
+fn check_items(inout ck: Checker, items: List[Node]) {
+    let first_fn = len(ck.sigs)
+    let first_lambda = len(ck.lambdas)
+    declare_items(inout ck, items)
+    if ck.failed { return }
+    for it in items {
+        if it.kind == "let" or it.kind == "var" { top_name(inout ck, it.kids[0]) }
+    }
+    for it in items {
+        if it.kind == "fn" {
+            check_fn(inout ck, ck.fn_ids[it.text], it)
+            if ck.failed { return }
+        }
+    }
+    ck.ctxs.push(ck.main)
+    ck.main = ctx_new(0, Ty.TUnit)
+    var tops: List[H] = []
+    for it in items {
+        if not contains(["fn", "struct", "enum", "axis", "protocol"], it.kind) {
+            let r = ck_stmt(inout ck, it)
+            if ck.failed { break }
+            tops.push(r.h)
+        }
+    }
+    ck.main = ck.ctxs.pop()
+    if ck.failed { return }
+    var new_fns: List[i64] = []
+    for i in first_fn..len(ck.sigs) {
+        ck.fn_hir[i] = fin(ck, ck.fn_hir[i])
+        ck.fn_at[i] = fin(ck, ck.fn_at[i])
+        new_fns.push(i)
+    }
+    for i in first_lambda..len(ck.lambdas) {
+        let b = fin(ck, ck.lambdas[i].body)
+        ck.lambdas[i].body = b
+    }
+    var done: List[H] = []
+    for t in tops { done.push(fin(ck, t)) }
+    ck.tops = done
+    // temporal types (M3): no decision may use information from its future
+    temporal_check(inout ck, new_fns, done)
+}
+
+// Checks a file: its imports first (each file once), then its own items.
+fn check_file(inout ck: Checker, name: str, src: str) {
+    let r = parse_program(src)
+    if not r.0 {
+        ck_fail(inout ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
+        return
+    }
+    var items: List[Node] = []
+    for it in r.1 {
+        if it.kind == "import" {
+            let rp = resolve_import(inout ck, name, unhex(it.text), it.lo, it.hi)
+            if ck.failed { return }
+            if contains(ck.imported, rp.1) { continue }
+            ck.imported[rp.1] = true
+            check_file(inout ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, read_text(rp.0))
+            if ck.failed { return }
+        } else {
+            items.push(it)
+        }
+    }
+    check_items(inout ck, items)
+}

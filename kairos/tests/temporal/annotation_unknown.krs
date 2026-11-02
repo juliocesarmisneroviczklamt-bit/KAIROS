@@ -1,0 +1,3 @@
+fn f(r: Tensor[month, asset; f64], m: i64) -> f64 @ end(m * 2) {
+    r[month: 0, asset: 0]
+}

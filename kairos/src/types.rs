@@ -267,11 +267,11 @@ impl Checker {
     /// variables) counts: the declarations `since` a previous mark, as text (`kairos types`; M12
     /// compares the checker written in Kairós with this), then the type of every variable of
     /// each new function (its parameters first) and of the new top-level variables.
-    pub fn mark(&self) -> [usize; 7] {
-        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len(), self.main.slot_tys.len(), self.lambdas.len()]
+    pub fn mark(&self) -> [usize; 8] {
+        [self.structs.len(), self.enums.len(), self.axes.len(), self.protocols.len(), self.sigs.len(), self.main.slot_tys.len(), self.lambdas.len(), self.temporal.log.len()]
     }
 
-    pub fn declarations_since(&self, m: [usize; 7]) -> String {
+    pub fn declarations_since(&self, m: [usize; 8]) -> String {
         let mut out = String::new();
         for s in &self.structs[m[0]..] {
             let fs: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect();
@@ -331,7 +331,7 @@ impl Checker {
     /// The HIR of each function and lambda checked `since` a mark, and of the top-level
     /// statements given, as canonical text (`kairos hir`; M12 compares the HIR the checker
     /// written in Kairós builds with this).
-    pub fn hir_since(&self, m: [usize; 7], tops: &[TopStmt]) -> String {
+    pub fn hir_since(&self, m: [usize; 8], tops: &[TopStmt]) -> String {
         use crate::hir::render;
         let mut out = String::new();
         for (f, b) in self.sigs[m[4]..].iter().zip(&self.bodies[m[4]..]) {
@@ -348,6 +348,16 @@ impl Checker {
         }
         for t in tops {
             out.push_str(&format!("hir top: {}\n", render(&t.hir)));
+        }
+        // the temporal analysis: what it found about each function, and the knowledge time of
+        // every new top-level variable
+        for l in &self.temporal.log[m[7]..] {
+            out.push_str(l);
+            out.push('\n');
+        }
+        if self.temporal.main.len() > m[5] {
+            let tvs: Vec<String> = self.temporal.main[m[5]..].iter().map(crate::temporal::tv_text).collect();
+            out.push_str(&format!("temporal main({})\n", tvs.join("; ")));
         }
         out
     }

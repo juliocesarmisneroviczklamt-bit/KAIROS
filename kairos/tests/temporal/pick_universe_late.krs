@@ -1,0 +1,10 @@
+fn pick(univ: Tensor[month, asset; bool], ret: Tensor[month, asset; f64]) -> Tensor[month, asset; f64] {
+    var w = zeros_like(ret)
+    for m in 1..size(ret, month) {
+        w[month: m] = where(univ[month: m] and not is_nan(ret[month: m - 1]), 0.01, 0.0)
+    }
+    w
+}
+let late = b3.monthly_returns() > 0.0
+let w = pick(late, b3.monthly_returns())
+let ev = b3.evaluate(w, lag: 0)

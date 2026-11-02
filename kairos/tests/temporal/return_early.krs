@@ -1,0 +1,6 @@
+fn f(r: Tensor[month, asset; f64], m: i64) -> f64 @ end(m - 1) {
+    if is_nan(r[month: m - 1, asset: 0]) { return 0.0 }
+    r[month: m - 2, asset: 0]
+}
+let r = observed(zeros(month: 24, asset: 3))
+print(f(r, 20))

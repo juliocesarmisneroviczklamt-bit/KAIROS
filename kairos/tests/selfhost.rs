@@ -138,15 +138,15 @@ fn the_parser_in_kairos_is_the_rust_one() {
     })
 }
 
-/// The checker written in Kairós (kairos/compiler/check.krs and body.krs) registers what each
-/// file declares (structs, enums, axes, protocols, the functions' signatures, through its
-/// imports), gives every variable of every function and of the top level the type the Rust
-/// checker gives it (tensors, `grad`, holdouts and the `b3` bridge included), builds the same HIR
-/// (every function, lambda and top-level statement, node for node), and fails with the
-/// same first error. Only a file that just the Rust checker rejects is left out: the temporal
-/// analysis is not ported yet.
+/// The front end written in Kairós (kairos/compiler: check.krs, body.krs, temporal.krs,
+/// front.krs) registers what each file declares (structs, enums, axes, protocols, the functions'
+/// signatures, through its imports), gives every variable of every function and of the top level
+/// the type the Rust checker gives it (tensors, `grad`, holdouts and the `b3` bridge included),
+/// builds the same HIR (every function, lambda and top-level statement, node for node), finds
+/// the same knowledge times in the temporal analysis (each function's summary, each top-level
+/// variable), and fails with the same first error: on every .krs file of the repository.
 #[test]
-fn the_checker_in_kairos_is_the_rust_one() {
+fn the_front_end_in_kairos_is_the_rust_one() {
     // the checker reads the prelude first (hundreds of lines): too deep for the parser
     // interpreted unoptimized on WebAssembly's 4 MiB stack; the other targets run it
     if cfg!(target_family = "wasm") {
@@ -171,7 +171,7 @@ fn the_checker_in_kairos_is_the_rust_one() {
             }
         }
         assert_eq!(sections.len(), files.len());
-        let (mut compared, mut bodies, mut errors, mut temporal) = (0, 0, 0, 0);
+        let (mut compared, mut bodies, mut errors) = (0, 0, 0);
         for (path, krs) in &sections {
             // K0000: something the Rust checker knows and the one in Kairós does not (yet)
             assert!(!krs.starts_with("error K0000"), "the checker written in Kairós does not check {path}: {krs}");
@@ -179,18 +179,15 @@ fn the_checker_in_kairos_is_the_rust_one() {
             let mut s = Session::new(Box::new(std::io::sink()));
             s.mark_imported(path);
             let rust = s.hir_dump(path, &src);
+            assert_eq!(krs, &rust, "the front ends differ on {path}");
             if krs.starts_with("error") {
                 errors += 1;
-                assert_eq!(krs, &rust, "the checkers differ on {path}");
-            } else if rust.starts_with("error E03") {
-                temporal += 1;
             } else {
                 compared += 1;
                 bodies += krs.lines().filter(|l| l.starts_with("body ")).count();
-                assert_eq!(krs, &rust, "the checkers differ in {path}");
             }
         }
         assert!(compared > 100 && bodies > 1500, "the repository's programs ({compared} files, {bodies} functions)");
-        println!("{compared} files with the same types ({bodies} functions), {errors} with the same errors, {temporal} rejected by the temporal analysis");
+        println!("{compared} files with the same types, HIR and knowledge times ({bodies} functions), {errors} with the same first error");
     })
 }

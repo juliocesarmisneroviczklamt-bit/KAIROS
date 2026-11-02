@@ -1,0 +1,11 @@
+fn bump(inout acc: Tensor[asset; f64], r: Tensor[month, asset; f64], m: i64) {
+    acc = acc + fill_nan(r[month: m - 1], 0.0)
+}
+let ret = b3.monthly_returns()
+var weights = zeros_like(ret)
+var acc = zeros(asset: size(ret, asset))
+for m in 12..size(ret, month) {
+    bump(inout acc, ret, m)
+    weights[month: m] = acc * 0.0
+}
+let ev = b3.evaluate(weights, lag: 0)

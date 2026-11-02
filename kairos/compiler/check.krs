@@ -147,6 +147,87 @@ struct LambdaH {
     body: H,
 }
 
+// ------------------------------------------------------------------ what the temporal analysis knows
+//
+// (src/temporal.rs; the analysis itself is in temporal.krs)
+
+// A month (or day) index as the compiler sees it: a constant, a symbol (a loop variable or an
+// integer parameter) plus a constant, or unknown.
+enum Lin {
+    LConst(i64),
+    LSym(i64, i64),
+    LUnknown,
+}
+
+// The moment a value becomes known: in advance, at the end of a month, or only at the end of
+// the data.
+enum At {
+    AAlways,
+    AEnd(Lin),
+    ALate,
+}
+
+// A time and the code that made it that late (lo -1: none).
+struct Time {
+    at: At,
+    lo: i64,
+    hi: i64,
+}
+
+// Rows of a tensor over a temporal axis: row `t` is known at `end(t + lag)`; `end` is the index
+// of the last row when it is a function's data horizon; `store` the store that set the lag.
+struct Rows {
+    ax: i64,
+    has_lag: bool,
+    lag: i64,
+    has_end: bool,
+    end: Lin,
+    lo: i64,
+    hi: i64,
+    has_store: bool,
+    store_row: Lin,
+    store_at: At,
+}
+
+// What the analysis knows about a value: its time, the rows of a temporal tensor, an integer's
+// linear form.
+struct TV {
+    time: Time,
+    has_rows: bool,
+    rows: Rows,
+    int: Lin,
+}
+
+fn lin_text(l: Lin) -> str {
+    match l {
+        LConst(c) => str(c),
+        LSym(s, c) => "s" + str(s) + (if c >= 0 { "+" } else { "" }) + str(c),
+        LUnknown => "?",
+    }
+}
+
+fn at_text(a: At) -> str {
+    match a {
+        AAlways => "always",
+        AEnd(l) => "end(" + lin_text(l) + ")",
+        ALate => "late",
+    }
+}
+
+// one line, as `kairos hir` prints it (src/temporal.rs `tv_text`)
+fn tv_text(v: TV) -> str {
+    var rows = "-"
+    if v.has_rows {
+        let r = v.rows
+        let lag = if r.has_lag { str(r.lag) } else { "?" }
+        let end = if r.has_end { lin_text(r.end) } else { "-" }
+        let span = if r.lo >= 0 { str(r.lo) + ":" + str(r.hi) } else { "-" }
+        let store = if r.has_store { lin_text(r.store_row) + "/" + at_text(r.store_at) } else { "-" }
+        rows = "rows(" + str(r.ax) + " " + lag + " " + end + " " + span + " " + store + ")"
+    }
+    at_text(v.time.at) + (if v.time.lo >= 0 { "@" + str(v.time.lo) + ":" + str(v.time.hi) } else { "" }) + " " + rows + " " + lin_text(v.int)
+}
+
 struct Checker {
     structs: List[StructDef],
     struct_ids: Map[str, i64],
@@ -179,6 +260,9 @@ struct Checker {
     fn_at: List[H],
     lambdas: List[LambdaH],
     tops: List[H],
+    // the temporal analysis: the knowledge time of each top-level slot, what each batch found
+    tmain: List[TV],
+    tlog: List[str],
     // the first error
     failed: bool,
     code: str,
@@ -199,7 +283,7 @@ fn new_checker(std_dir: str) -> Checker {
         sigs: [], fn_ids: [:], subst: [], bound: [], kinds: [], generic_scope: [:], type_param_names: [],
         builtins: b, imported: [:], std_dir: std_dir,
         ctxs: [], main: ctx_new(0, Ty.TUnit), top_names: [:], bodies: [], has_body: [],
-        fn_hir: [], fn_at: [], lambdas: [], tops: [],
+        fn_hir: [], fn_at: [], lambdas: [], tops: [], tmain: [], tlog: [],
         failed: false, code: "", elo: 0, ehi: 0, msg: "", hint: "",
     }
 }
@@ -745,7 +829,7 @@ fn resolve_import(inout ck: Checker, from: str, path: str, lo: i64, hi: i64) -> 
 // ------------------------------------------------------------------ the description
 
 fn mark(ck: Checker) -> List[i64] {
-    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs), len(ck.main.slot_tys), len(ck.lambdas)]
+    [len(ck.structs), len(ck.enums), len(ck.axes), len(ck.protocols), len(ck.sigs), len(ck.main.slot_tys), len(ck.lambdas), len(ck.tlog)]
 }
 
 fn hex_of(s: str) -> str {
@@ -826,5 +910,17 @@ fn hir_since(ck: Checker, m: List[i64]) -> List[str] {
         out.push("hir lambda " + str(i) + " " + str(l.n_params) + " " + str(l.n_slots) + " [" + join(caps, " ") + "]: " + h_line(l.body))
     }
     for t in ck.tops { out.push("hir top: " + h_line(t)) }
+    out
+}
+
+// What the temporal analysis found since a mark, as `kairos hir` prints it at the end.
+fn temporal_since(ck: Checker, m: List[i64]) -> List[str] {
+    var out = []
+    for i in m[7]..len(ck.tlog) { out.push(ck.tlog[i]) }
+    if len(ck.tmain) > m[5] {
+        var tvs = []
+        for i in m[5]..len(ck.tmain) { tvs.push(tv_text(ck.tmain[i])) }
+        out.push("temporal main(" + join(tvs, "; ") + ")")
+    }
     out
 }

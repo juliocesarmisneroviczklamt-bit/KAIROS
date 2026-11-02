@@ -1,0 +1,8 @@
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var weights = zeros_like(ret)
+for m in 12..size(ret, month) {
+    let k = if len(args()) > 0 and today() > 0 { 0.01 } else { 0.02 }
+    weights[month: m] = where(elig[month: m], k, 0.0)
+}
+let ev = b3.evaluate(weights, lag: 0)

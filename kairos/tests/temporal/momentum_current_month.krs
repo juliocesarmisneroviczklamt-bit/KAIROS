@@ -1,0 +1,34 @@
+// Momentum on B3, written in Kairós: the acceptance test of milestone M2.
+//
+// Every month m, among the stocks of the NEFIN liquid universe that traded in m - 1: rank the
+// return from m - 12 to m - 2 (skipping the last month) and buy the top third, equal-weighted.
+// The quant-b3 realistic simulator judges it: 25 bps per side, orders at the close of the
+// previous month (lag 0), R$ 1 million, no taxes. This is the "long-only winners" portfolio of
+// quant-b3 (src/risk.rs); tests/b3_bridge.rs checks that both give the same numbers, bit for bit.
+
+let ret = b3.monthly_returns()        // Tensor[month, asset; f64], NaN where it did not trade
+let elig = b3.eligible()              // Tensor[month, asset; bool], liquid universe of the year
+let n = size(ret, month)
+
+var weights = zeros_like(ret)
+for m in max(12, b3.month_index(200101))..n {
+    let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+    let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m], 0.0), over: month) - 1.0
+    let s = where(alive, signal, nan)
+    let cnt = int(nan_count(s, over: asset))
+    if cnt < 15 { continue }
+    let k = int(round(float(cnt) / 3.0))
+    weights[month: m] = where(top_k(s, k, over: asset), 1.0 / float(k), 0.0)
+}
+
+let ev = b3.evaluate(weights, cost_bps: 25.0, lag: 0)
+print("months", ev.months)
+print("cagr", ev.cagr)
+print("vol", ev.vol)
+print("sharpe", ev.sharpe)
+print("max_dd", ev.max_dd)
+print("beta", ev.beta)
+print("alpha", ev.alpha)
+print("t_alpha", ev.t_alpha)
+print("turnover", ev.turnover)
+print("cost_bps", ev.cost_bps)

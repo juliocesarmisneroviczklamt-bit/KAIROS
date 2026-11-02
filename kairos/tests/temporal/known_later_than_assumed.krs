@@ -1,0 +1,5 @@
+fn last(r: Tensor[month; f64], m: i64) -> f64 @ end(m - 1) {
+    r[month: m - 1]
+}
+let late = observed(zeros(month: 12), lag: 1)
+print(last(late, 5))

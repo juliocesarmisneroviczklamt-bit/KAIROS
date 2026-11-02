@@ -1,0 +1,3 @@
+let d = b3.daily_returns()
+let days = merge_days(d)
+print(sum(fill_nan(days, 0.0)))

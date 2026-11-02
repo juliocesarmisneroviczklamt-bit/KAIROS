@@ -287,10 +287,13 @@ impl TV {
     }
 }
 
-/// The analysis state kept across REPL inputs: the top-level frame.
+/// The analysis state kept across REPL inputs: the top-level frame; and what each batch found
+/// about its functions, as text (`kairos hir`: M12 compares the analysis written in Kairós with
+/// this).
 #[derive(Clone, Default, Debug)]
 pub struct State {
     pub main: Vec<TV>,
+    pub log: Vec<String>,
 }
 
 /// Checks one batch: the new functions (annotations, decisions inside them) and the new
@@ -298,7 +301,10 @@ pub struct State {
 pub fn check(ck: &Checker, new_fns: &[u32], top: &[&HExpr], state: &mut State) -> KResult<()> {
     let mut an = An { ck, names: Vec::new(), summaries: HashMap::new(), pc: Time::ALWAYS, ret: None, in_ctx: Vec::new() };
     for &id in new_fns {
-        an.summary(id)?;
+        let s = an.summary(id)?;
+        let syms: Vec<String> = s.param_syms.iter().map(|p| p.map_or("-".to_string(), |x| format!("s{x}"))).collect();
+        let h = s.horizon.map_or("-".to_string(), |x| format!("s{x}"));
+        state.log.push(format!("temporal fn {} [{}] {h}: {}", ck.sigs[id as usize].name, syms.join(" "), tv_text(&s.result)));
     }
     state.main.resize(ck.main_slots() as usize, TV::ALWAYS);
     for e in top {
@@ -306,6 +312,45 @@ pub fn check(ck: &Checker, new_fns: &[u32], top: &[&HExpr], state: &mut State) -
         an.eval(e, &mut state.main)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------- the canonical text (M12)
+
+fn lin_text(l: Lin) -> String {
+    match l {
+        Lin::Const(c) => c.to_string(),
+        Lin::Sym(s, c) => format!("s{s}{c:+}"),
+        Lin::Unknown => "?".into(),
+    }
+}
+
+fn at_text(a: At) -> String {
+    match a {
+        At::Always => "always".into(),
+        At::End(l) => format!("end({})", lin_text(l)),
+        At::Late => "late".into(),
+    }
+}
+
+fn span_text(sp: Option<Span>) -> String {
+    sp.map_or(String::new(), |s| format!("@{}:{}", s.lo, s.hi))
+}
+
+/// What the analysis knows about a value, as one line: its time (and the code that made it that
+/// late), the rows of a temporal tensor, and an integer's linear form.
+pub fn tv_text(v: &TV) -> String {
+    let rows = match v.rows {
+        None => "-".to_string(),
+        Some(r) => format!(
+            "rows({} {} {} {} {})",
+            r.axis,
+            r.lag.map_or("?".to_string(), |l| l.to_string()),
+            r.end.map_or("-".to_string(), lin_text),
+            r.span.map_or("-".to_string(), |s| format!("{}:{}", s.lo, s.hi)),
+            r.store.map_or("-".to_string(), |(l, a)| format!("{}/{}", lin_text(l), at_text(a)))
+        ),
+    };
+    format!("{}{} {rows} {}", at_text(v.time.at), span_text(v.time.span), lin_text(v.int))
 }
 
 #[derive(Clone)]

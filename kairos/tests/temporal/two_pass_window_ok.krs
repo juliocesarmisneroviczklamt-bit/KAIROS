@@ -1,0 +1,18 @@
+fn spread(r: Tensor[month, asset; f64]) -> Tensor[asset; f64] {
+    var s = zeros(asset: size(r, asset))
+    for k in 0..size(r, month) { s = s + fill_nan(r[month: k], 0.0) }
+    let mu = s / float(size(r, month))
+    var ss = zeros(asset: size(r, asset))
+    for k in 0..size(r, month) {
+        let e = fill_nan(r[month: k], 0.0) - mu
+        ss = ss + e * e
+    }
+    sqrt(ss / float(size(r, month)))
+}
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var weights = zeros_like(ret)
+for m in 12..size(ret, month) {
+    weights[month: m] = where(elig[month: m] and spread(ret[month: m - 12 ..= m - 1]) < 0.1, 0.01, 0.0)
+}
+let ev = b3.evaluate(weights, lag: 0)

@@ -1,0 +1,4 @@
+protocol "tp2" { research: until 201812  holdout: from 201901  rule: "r" }
+let ret = b3.monthly_returns()
+let h = b3.holdout("tp2")
+let ev = open_once(h, || fill_nan(ret, 0.0), lag: 0)

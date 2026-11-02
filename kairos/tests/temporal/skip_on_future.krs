@@ -1,0 +1,8 @@
+let ret = b3.monthly_returns()
+let elig = b3.eligible()
+var weights = zeros_like(ret)
+for m in 12..size(ret, month) {
+    if is_nan(ret[month: m, asset: 0]) { continue }
+    weights[month: m, asset: 0] = 1.0
+}
+let ev = b3.evaluate(weights, lag: 0)

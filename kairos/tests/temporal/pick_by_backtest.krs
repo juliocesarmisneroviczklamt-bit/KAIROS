@@ -1,0 +1,11 @@
+let ret = b3.monthly_returns()
+var a = zeros_like(ret)
+var b = zeros_like(ret)
+for m in 12..size(ret, month) {
+    a[month: m] = where(fill_nan(ret[month: m - 1], 0.0) > 0.0, 0.01, 0.0)
+    b[month: m] = where(fill_nan(ret[month: m - 1], 0.0) < 0.0, 0.01, 0.0)
+}
+let ea = b3.evaluate(a, lag: 0)
+var w = zeros_like(ret)
+if ea.sharpe > 0.3 { w = a } else { w = b }
+print(b3.evaluate(w, lag: 0).cagr)

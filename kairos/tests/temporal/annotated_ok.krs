@@ -1,0 +1,5 @@
+fn signal(r: Tensor[month, asset; f64], m: i64) -> Tensor[asset; f64] @ end(m - 1) {
+    prod(1.0 + fill_nan(r[month: m - 12 ..= m - 2], 0.0), over: month) - 1.0
+}
+let r = observed(zeros(month: 24, asset: 3))
+print(signal(r, 20))
