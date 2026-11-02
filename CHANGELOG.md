@@ -2,6 +2,32 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.9.0 — M9: arquivos, texto, mapas, internet e a biblioteca padrão em Kairós
+
+**A Kairós passa a ler e escrever arquivos, baixar da internet e processar texto, e a biblioteca padrão é escrita nela mesma.** Com isso, mais duas partes do laboratório saíram do Rust: o registro de tentativas e a coleta dos dados macro.
+
+- **Texto:**
+  - `split`, `lines`, `join`, `trim`, `upper`, `lower`, `replace`, `starts_with`, `ends_with`, `find`, `contains`, `codes` e `from_codes`;
+  - `parse_int` (texto que não é número dá R0010) e `parse_float` (dá NaN, como dado faltando);
+  - escapes novos: `\r`, `\0` e `\u{e9}`.
+- **Arquivos e ambiente:**
+  - `read_text` (UTF-8, ou Latin-1 quando não é UTF-8, como os arquivos da B3), `write_text`, `append_text`, `file_exists`, `list_dir`, `make_dir`; erros de arquivo são R0011;
+  - `args()` (`kairos run prog.krs a b`), `env(nome)` e `today()`.
+- **Internet:** `http_get(url)` e `download(url, arquivo)` usam o `curl` do sistema (Windows 10+, macOS, Linux). O HTTPS fica com o TLS do sistema e o binário continua Rust puro nas 20 plataformas; falha é R0013.
+- **Mapas `Map[K, V]`:**
+  - chaves `i64` ou `str`, na ordem de inserção: `["PETR4": 38.5]`, `[:]`, `m[k] = v`, `get`, `keys`, `values`, `items`, `remove`;
+  - semântica de valor, como as listas;
+  - chave ausente é R0012.
+- **Biblioteca padrão escrita em Kairós**, embutida no executável (`import "std/json.krs"`):
+  - `std/json.krs`: leitura e escrita (RFC 8259);
+  - `std/csv.krs` (RFC 4180);
+  - `std/dates.krs`: datas AAAAMMDD.
+- **Tempo:** o que vem de arquivo ou da rede não tem hora conhecida. Um valor lido assim não decide pesos (E0301), a menos que se declare com `observed` quando ele fica conhecido. `args()`, `env()` e `today()` são conhecidos antes de tudo.
+- **Laboratório:**
+  - [`lab/registry.krs`](kairos/lab/registry.krs) é o `registro`: o DSR, a normal e a inversa dela escritos em Kairós, com o relatório igual ao do Rust;
+  - [`lab/fetch_macro.krs`](kairos/lab/fetch_macro.krs) é o `fetch-macro`: CDI e IPCA da API do Banco Central e os fatores do NEFIN, com os 6 arquivos iguais aos do Rust, byte a byte.
+- **Desempenho:** fora do `grad`, as funções nativas não percorrem mais listas inteiras procurando valores rastreados. Um `len(xs)` dentro de um laço deixou de ser quadrático, e um JSON de 300 KB da B3, que levava 70 s, agora é lido em 0,2 s.
+
 ## 0.8.0 — M8: o laboratório escrito em Kairós
 
 **Os cinco estudos do laboratório `quant-b3` agora são programas Kairós, e cada um imprime o relatório do Rust linha por linha.** As regras de pesquisa saíram do Rust: universo, estatística, carteiras, simulações e decisões. O runtime em Rust ficou com os dados, o simulador e o registro de tentativas, como o CPython fica com o C.
