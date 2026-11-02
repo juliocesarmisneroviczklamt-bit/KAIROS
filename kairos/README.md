@@ -2,7 +2,7 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.17.0**, com o roteiro M1–M17 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.18.0**, com o roteiro M1–M18 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
@@ -19,7 +19,8 @@ Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.17.0**, com 
 - M14: o back-end WebAssembly completo: closures, tensores, a ponte `b3`, os holdouts e o `grad`, com os mesmos números do interpretador;
 - M15: o interpretador escrito em Kairós ([`compiler/interp.krs`](compiler/interp.krs)), que roda como WebAssembly sem nenhum Rust;
 - M16: o comando `kairos` inteiro escrito em Kairós ([`compiler/kairos.krs`](compiler/kairos.krs)): subcomandos, `exec` e REPL, em WebAssembly sem nenhum Rust;
-- M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB.
+- M17: um alocador que reaproveita a memória: o `momentum` em WebAssembly caiu de 1.565 MB para 542 MB;
+- M18: o elemento ternário `t3` ({−1, 0, +1}): pesos do BitNet b1.58 e carteiras comprada/fora/vendida, com `contract` só com somas e subtrações.
 
 Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
@@ -28,6 +29,7 @@ cargo build --release -p kairos              # gera target/release/kairos (kairo
 kairos run kairos/examples/momentum.krs      # momentum na B3, escrito em Kairós (rode da raiz do repositório)
 kairos run kairos/examples/finance.krs       # exemplo do núcleo
 kairos run kairos/examples/holdout.krs       # protocolo, holdout de uso único e registro de tentativas
+kairos run kairos/examples/ternary.krs       # t3: uma camada ternária treinada e uma carteira comprada/fora/vendida
 kairos check arquivo.krs                     # só verifica os tipos
 kairos run kairos/compiler/kc.krs kairos/std saida arquivo.krs
                                              # o compilador escrito em Kairós grava saida/arquivo.kim
@@ -174,10 +176,16 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 - **O alocador do runtime, escrito em Kairós, reaproveita a memória entre tamanhos:** blocos grandes de tamanho exato, juntados quando se tocam; objetos pequenos em placas; listas e `Bytes` que crescem no lugar, sem cópia ([spec §18](docs/spec.md)).
 - **O `momentum` em WebAssembly caiu de 1.565 MB para 542 MB**, com os mesmos números bit a bit.
 
+**M18 (o elemento ternário `t3`)**
+- **`t3` vale −1, 0 ou +1**, sozinho ou como elemento de tensor ([spec §19](docs/spec.md)).
+- **`ternary(x)`** é a quantização do BitNet b1.58, e **`ternary(x, threshold: t)`** monta a carteira de um sinal. A escala de `ternary(x)` usa o tensor inteiro, então a análise temporal recusa usá-la sobre o histórico numa decisão.
+- **`contract` com um lado `t3` só soma e subtrai.** No interpretador Rust, um tensor `t3` guarda cinco trits por byte.
+- **`grad` treina camadas ternárias** pelo estimador *straight-through* ([`examples/ternary.krs`](examples/ternary.krs)).
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M18 | o elemento ternário `t3`: tensores de pesos {−1, 0, +1}, 5 por byte, e `contract` só com somas e subtrações (como no BitNet b1.58); uma carteira comprada/vendida/fora é um tensor `t3` |
+| M19 | os dados fundamentalistas da CVM (DFP e ITR) em Kairós, no ponto do tempo da entrega: cada número conhecido só a partir da data em que a empresa o entregou |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

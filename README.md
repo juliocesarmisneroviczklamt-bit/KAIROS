@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.17.0 (M17)
+## Estado: v0.18.0 (M18)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -42,7 +42,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M15 | o interpretador escrito em Kairós | ✅ [`interp.krs`](kairos/compiler/interp.krs) roda o HIR do front-end em Kairós com a saída, os erros e os números do interpretador Rust, inclusive tensores, `grad`, a ponte `b3` e os holdouts; compilado para WebAssembly (`ki.wasm`), roda programas Kairós sem nenhum Rust: os 158 programas de teste saem iguais |
 | M16 | o comando `kairos` escrito em Kairós | ✅ [`kairos.krs`](kairos/compiler/kairos.krs) faz tudo o que o executável Rust faz (`run`, `check`, `exec`, `repl`, `ledger`, `tokens`, `ast`, `types`, `hir`), com a mesma saída, os mesmos erros e o mesmo código de saída; compilado para WebAssembly, é o comando inteiro sem nenhum Rust (`kairos-selfhost.wasm` nas releases) |
 | M17 | memória: um alocador que reaproveita blocos entre tamanhos | ✅ o `momentum` compilado para WebAssembly caiu de 1.565 MB para 542 MB (−65%), com os mesmos números bit a bit |
-| M18 | o elemento ternário `t3`: tensores de pesos {−1, 0, +1}, 5 por byte, e `contract` só com somas e subtrações (como no BitNet b1.58); uma carteira comprada/vendida/fora é um tensor `t3` | em andamento |
+| M18 | o elemento ternário `t3`: tensores de pesos {−1, 0, +1} e `contract` só com somas e subtrações (como no BitNet b1.58); uma carteira comprada/vendida/fora é um tensor `t3` | ✅ `ternary(x)` (a quantização do BitNet) e `ternary(x, threshold: t)` (a carteira de um sinal); cinco trits por byte no interpretador Rust; `grad` treina camadas ternárias pelo *straight-through* ([`examples/ternary.krs`](kairos/examples/ternary.krs)); a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
+| M19 | os dados fundamentalistas da CVM (DFP e ITR) em Kairós | cada número conhecido só a partir da data de entrega (ponto no tempo), num painel por empresa e trimestre ao lado do da B3 |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

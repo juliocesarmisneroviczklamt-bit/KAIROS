@@ -1,0 +1,49 @@
+// The ternary element t3 (M18): values of {-1, 0, +1}.
+//
+// 1. A ternary layer, as in BitNet b1.58: the model keeps f64 weights and uses their trits on
+//    every step. `grad` goes through `ternary` as if it were the identity (the straight-through
+//    estimator), so the f64 weights learn and the trits follow them. With a fixed threshold the
+//    trits change when a weight crosses it; ternary(w) without one (the scale mean|w|) does not
+//    change when all of w grows, which can stall plain gradient steps.
+// 2. A portfolio that is long, out or short: ternary(signal, threshold: t). Its return is a
+//    contraction with no multiplication: the returns of the longs added, those of the shorts
+//    subtracted.
+//
+//   kairos run kairos/examples/ternary.krs
+axis sample
+axis feature
+
+// ---------------------------------------------------------------- 1. a ternary layer
+
+// the target is made by trits: y = x . w_true
+let x = randn(seed: 1, sample: 64, feature: 8)
+let w_true = ternary(randn(seed: 2, feature: 8), threshold: 0.6)
+let y = contract(x, w_true, over: feature)
+
+fn loss(w: Tensor[feature; f64], x: Tensor[sample, feature; f64], y: Tensor[sample; f64]) -> f64 {
+    let err = contract(x, ternary(w, threshold: 0.5), over: feature) - y
+    mean(err * err)
+}
+
+var w = 0.1 * randn(seed: 3, feature: 8)
+print("step 0, loss", loss(w, x, y))
+for step in 1..=20 {
+    w = w - 0.05 * grad(loss)(w, x, y)
+    if step % 5 == 0 { print("step " + str(step) + ", loss", loss(w, x, y)) }
+}
+print("learned", ternary(w, threshold: 0.5))
+print("true   ", w_true)
+print("the same trits:", count(ternary(w, threshold: 0.5) == w_true) == 8.0)
+
+// ---------------------------------------------------------------- 2. a ternary portfolio
+
+// returns that follow a signal a little
+let signal = randn(seed: 5, asset: 12)
+let returns = 0.02 * signal + 0.03 * randn(seed: 6, asset: 12)
+let pos = ternary(signal, threshold: 0.5)
+print("positions", pos)
+let longs = count(float(pos) > 0.0)
+let shorts = count(float(pos) < 0.0)
+print("long", longs, "short", shorts, "net exposure", sum(pos))
+// an equal weight on each position: the return with no products, then one division
+print("return of the long-short portfolio", contract(returns, pos, over: asset) / (longs + shorts))

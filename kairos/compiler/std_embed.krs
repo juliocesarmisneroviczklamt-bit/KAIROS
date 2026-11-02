@@ -2,7 +2,7 @@
 // version the command written in Kairós carries (as the Rust one, with include_str!). Do not edit.
 
 fn std_version() -> str {
-    "0.17.0"
+    "0.18.0"
 }
 
 // the files by the name the checker gives them ("<prelude>", "<std/sim.krs>"...)

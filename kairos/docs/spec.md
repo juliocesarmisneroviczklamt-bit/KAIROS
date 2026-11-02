@@ -759,6 +759,8 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M15 | o interpretador escrito em Kairós (§16) | ✅ os 158 programas de teste (55 com `b3`) saem iguais pelo `ki.wasm` |
 | M16 | o comando `kairos` escrito em Kairós (§17) | ✅ subcomandos, `exec` e REPL iguais aos do executável Rust, em WebAssembly sem Rust |
 | M17 | memória: um alocador que reaproveita blocos entre tamanhos (§18) | ✅ o `momentum` em WebAssembly cai de 1.565 MB para 542 MB, com os mesmos números |
+| M18 | o elemento ternário `t3` (§19) | ✅ `ternary`, `contract` só com somas e subtrações, cinco trits por byte no Rust, `grad` pelo *straight-through*; a mesma saída no Rust, no WebAssembly e no interpretador em Kairós |
+| M19 | os dados fundamentalistas da CVM (DFP e ITR) em Kairós, no ponto do tempo da entrega | cada número conhecido só a partir da data em que a empresa o entregou; um painel por empresa e trimestre ao lado do da B3 |
 | — | paper trading em Kairós | depende de como tratar o holdout reservado do M6 (os dados de 2026-11 em diante) |
 
 ## 14. O compilador escrito em Kairós (M12)
@@ -981,3 +983,42 @@ Antes, cada bloco liberado ficava na lista do seu tamanho, uma potência de 2, e
 - `tests/wasm/heap.krs` exercita listas que crescem juntas, blocos liberados e tomados de novo, `Bytes`, textos e mapas grandes;
 - o teste `b3` do back-end falha se o `momentum` voltar a passar de 750 MB;
 - o compilador continua compilando a si mesmo num ponto fixo, e o interpretador e o comando escritos em Kairós continuam iguais aos do Rust.
+
+## 19. O elemento ternário `t3` (M18, v0.18.0)
+
+Um `t3` vale −1, 0 ou +1. É o tipo dos pesos ternários do BitNet b1.58, matrizes de {−1, 0, +1} que se multiplicam só com somas e subtrações. Também é o tipo de uma carteira comprada, fora ou vendida.
+
+**O tipo.** `t3` é um tipo escalar e um tipo de elemento de tensor: `Tensor[feature, hidden; t3]`. Não tem literal. Os valores vêm de `ternary`, de um índice completo num tensor `t3` (`w[feature: 0, hidden: 2]`) ou de `-t`.
+
+**Construir.**
+- `ternary(x)` é a quantização do BitNet b1.58. Seja γ a média de |x| nos elementos que não são NaN: cada elemento vira `round(x / γ)`, limitado a [−1, 1]. `round` arredonda o meio para longe do zero, como o `round` da linguagem. NaN vira 0; se γ é 0 ou NaN, tudo vira 0.
+- `ternary(x, threshold: τ)` dá +1 onde `x > τ`, −1 onde `x < −τ` e 0 no resto, NaN incluído. É a carteira de um sinal: comprada acima do limiar, vendida abaixo do oposto.
+
+**No tempo.** A escala γ de `ternary(x)` usa o tensor inteiro. Num tensor `[month, asset]`, isso inclui os meses futuros: usar `ternary(sinal)` numa decisão é erro E0301, como a média do histórico inteiro. Mês a mês, `ternary(sinal[month: m - 1])` usa só o passado. Com `threshold:` a operação é elemento a elemento.
+
+**Usar.**
+- `contract(x, w, over: eixo)` com um operando `t3` e o outro `f64`: em cada célula, soma os `x` onde `w` é +1 e subtrai os `x` onde `w` é −1, na ordem do eixo, a partir de 0.0. Não há multiplicação. Com `x` finito, dá os mesmos bits de `contract(x, float(w), over: eixo)`.
+- Conversões e sinal:
+  - `float(w)` dá o tensor `f64` (−1.0, 0.0, 1.0);
+  - `float(t)` e `int(t)` convertem um `t3` sozinho;
+  - `-w` e `-t` trocam o sinal.
+- `sum` e `mean` de um tensor `t3` contam +1 e −1. Numa carteira, `sum(w, over: asset)` é a exposição líquida.
+- O resto funciona como em qualquer tensor:
+  - índices, fatias e atribuição a fatias (um `t3` só recebe `t3`);
+  - `where` com ramos `t3`;
+  - `==` e `!=`;
+  - `size`, `to_list` (uma `List[t3]`) e `print` (`Tensor[asset: 3; t3] [1, 0, -1]`).
+- Sozinho, um `t3` entra em listas, tuplas, structs e funções, e se ordena como −1 < 0 < 1.
+- Aritmética com `t3` (`w + w`, `t * 2`) é erro de tipo: escreve-se `float(w)`.
+
+**Treinar.** Dentro de `grad`, `ternary(w)` de um `w` rastreado deixa o gradiente passar como se fosse a identidade: é o estimador *straight-through* do BitNet. Treinam-se pesos `f64`, e os trits seguem esses pesos (`examples/ternary.krs` aprende os trits exatos de um alvo em 10 passos). Com `threshold:`, um trit muda quando o peso cruza o limiar. Já `ternary(w)` não muda quando todo o `w` é multiplicado por uma constante, e isso pode travar passos simples de gradiente. Dentro de `grad`, um `t3` que vem de um tensor rastreado aparece como o `f64` correspondente.
+
+**Guardar.**
+- No interpretador Rust, um tensor `t3` guarda cinco trits por byte (3⁵ = 243 ≤ 256), 1/40 do espaço de um `f64`.
+- No WebAssembly, ainda guarda um `f64` por trit (−1.0, 0.0, 1.0, nunca −0.0), com uma marca no tensor do runtime (`RtT.trit`).
+- Sozinho, um `t3` é um `i64` no WebAssembly.
+
+**Conferido:**
+- `tests/programs/ternary.krs` e `tests/wasm/t3.krs` dão a mesma saída no interpretador Rust, no WebAssembly e no interpretador escrito em Kairós. Os casos cobrem NaN, infinito, tudo zero, o meio do arredondamento, contrações com eixos de lote dos dois lados, `t3` em structs e listas, e `grad`;
+- o verificador escrito em Kairós dá os mesmos tipos, HIR e erros em 23 casos de `tests/checker/t3_*.krs`;
+- a análise temporal tem dois casos novos em `tests/temporal/ternary_*.krs`.

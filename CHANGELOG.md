@@ -2,6 +2,28 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.18.0 — M18: o elemento ternário `t3`
+
+**A Kairós ganhou um tipo para valores de {−1, 0, +1}.** São os pesos do BitNet b1.58, matrizes ternárias que se multiplicam só com somas e subtrações. Também é a forma natural de uma carteira comprada, fora ou vendida. `t3` é um tipo escalar e um elemento de tensor (`Tensor[feature, hidden; t3]`).
+
+- **Construir:**
+  - `ternary(x)`, a quantização do BitNet b1.58: `round(x / γ)` limitado a [−1, 1], com γ a média de |x|. NaN vira 0;
+  - `ternary(x, threshold: t)`, a carteira de um sinal: +1 acima de `t`, −1 abaixo de `−t`, 0 no resto.
+- **No tempo:** a escala de `ternary(x)` usa o tensor inteiro. Sobre o histórico, numa decisão, a análise temporal recusa (E0301). Mês a mês, ou com `threshold:`, passa.
+- **Usar:**
+  - `contract` com um lado `t3` só soma e subtrai: o retorno de uma carteira sem nenhuma multiplicação;
+  - `sum` e `mean` dão a exposição líquida;
+  - `float(w)`, `-w`, `==`, índices, fatias, atribuição, `where`, `to_list` e `print`;
+  - um `t3` sozinho entra em listas, tuplas, structs e funções.
+- **Guardar:** no interpretador Rust, um tensor `t3` guarda cinco trits por byte (1/40 de um `f64`).
+- **Treinar:** dentro de `grad`, `ternary` passa o gradiente como a identidade (o estimador *straight-through*). [`examples/ternary.krs`](kairos/examples/ternary.krs) treina uma camada ternária que acha os trits exatos de um alvo em 10 passos, e monta uma carteira comprada/fora/vendida.
+- **As três implementações:** o interpretador Rust, o back-end WebAssembly e o interpretador escrito em Kairós dão a mesma saída, bit a bit. O verificador escrito em Kairós dá os mesmos tipos, HIR e erros.
+- **Testes:**
+  - `tests/programs/ternary.krs` e `tests/wasm/t3.krs` cobrem NaN, infinito, tudo zero, o meio do arredondamento, contrações com eixos de lote, `t3` em structs e listas, e `grad`;
+  - 23 casos de erro em `tests/checker/t3_*.krs` e dois casos temporais;
+  - um teste de unidade cobre o empacotamento de cinco trits por byte.
+- **Limites:** no WebAssembly, um tensor `t3` ainda ocupa um `f64` por trit. Dentro de `grad`, um `t3` que vem de um tensor rastreado aparece como o `f64` correspondente.
+
 ## 0.17.0 — M17: um alocador que reaproveita a memória
 
 **Os programas compilados para WebAssembly passaram a usar uma fração da memória, com os mesmos números.** O `momentum` sobre os dados reais da B3 terminava com 1.565 MB, dos quais 1.283 MB estavam livres mas presos: cada bloco liberado ficava na lista do seu tamanho (uma potência de 2) e nunca era juntado a outro, então uma lista que cresce dobrando deixava um rastro de blocos de todos os tamanhos. Agora o mesmo programa termina com 542 MB (−65%) e roda um pouco mais rápido. O modelo do M6 (treinado com `grad`) caiu de 2,75 GB para 1,1 GB.
