@@ -329,6 +329,24 @@ fn rt_split(s: str, sep: str) -> List[str] {
     out
 }
 
+// lines(s): the lines of a text, without the \n (or \r\n) that ends each (as Rust's str::lines)
+fn rt_lines(s: str) -> List[str] {
+    let p = wasm_str_addr(s)
+    let n = wasm_load32(p + 4)
+    var out: List[str] = []
+    var start = 0
+    for i in 0..n {
+        if wasm_load8(p + 8 + i) == 10 {
+            var e = i
+            if e > start and wasm_load8(p + 7 + e) == 13 { e -= 1 }
+            out.push(rt_bytes_str(p, start, e))
+            start = i + 1
+        }
+    }
+    if start < n { out.push(rt_bytes_str(p, start, n)) }
+    out
+}
+
 // The byte where the text at q first appears in the text at p, or -1.
 fn rt_find_bytes(p: i64, q: i64) -> i64 {
     let n = wasm_load32(p + 4)
@@ -726,6 +744,148 @@ fn wasm_wasi_path_create_directory(dir: i64, path_at: i64, path_len: i64) -> i64
 
 fn wasm_wasi_path_filestat_get(dir: i64, flags: i64, path_at: i64, path_len: i64, stat_at: i64) -> i64 {
     0
+}
+
+fn wasm_wasi_clock_time_get(id: i64, precision: i64, time_at: i64) -> i64 {
+    0
+}
+
+// today(): the date (UTC, YYYYMMDD) of WASI's clock, as the interpreter has it (civil_from_days)
+fn rt_today() -> i64 {
+    let at = rt_alloc(16)
+    let _ = wasm_wasi_clock_time_get(0, 1000, at)
+    let ns = wasm_load64(at)
+    rt_free(at, 16)
+    let z = ns / 1000000000 / 86400 + 719468
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    (if m <= 2 { y + 1 } else { y }) * 10000 + m * 100 + d
+}
+
+// ------------------------------------------------------------------ format_fixed
+//
+// format_fixed(x, d): x with d decimals (0 to 30), as Rust's `{:.d}` writes it: the exact value of
+// the float, rounded half to even. The float is m * 2^e, so its exact decimal digits are those of
+// m * 2^e, or of m * 5^-e with the point -e digits from the end: a big number, in limbs of 10^9
+// (the lowest first).
+
+// b * k, in place (k < 2^31)
+fn rt_big_mul(inout b: List[i64], k: i64) {
+    var carry = 0
+    for i in 0..len(b) {
+        let v = b[i] * k + carry
+        b[i] = v % 1000000000
+        carry = v / 1000000000
+    }
+    while carry > 0 {
+        b.push(carry % 1000000000)
+        carry = carry / 1000000000
+    }
+}
+
+fn rt_format_fixed(x: f64, d0: i64) -> str {
+    let d = if d0 < 0 { 0 } else if d0 > 30 { 30 } else { d0 }
+    let bits = to_bits(x)
+    let neg = bits < 0
+    let ieee_m = bit_and(bits, 4503599627370495)
+    let ieee_e = bit_and(shr(bits, 52), 2047)
+    if ieee_e == 2047 {
+        if ieee_m != 0 { return "NaN" }
+        return if neg { "-inf" } else { "inf" }
+    }
+    var m = ieee_m
+    var e = -1074
+    if ieee_e != 0 {
+        m = bit_or(4503599627370496, ieee_m)
+        e = ieee_e - 1075
+    }
+    var b = [m % 1000000000, m / 1000000000]
+    var point = 0
+    if m != 0 and e >= 0 {
+        var k = e
+        while k >= 30 {
+            rt_big_mul(inout b, 1073741824)
+            k -= 30
+        }
+        if k > 0 { rt_big_mul(inout b, shl(1, k)) }
+    } else if m != 0 {
+        var k = -e
+        point = k
+        while k >= 13 {
+            rt_big_mul(inout b, 1220703125)
+            k -= 13
+        }
+        var p = 1
+        for i in 0..k { p = p * 5 }
+        if k > 0 { rt_big_mul(inout b, p) }
+    }
+    // the digits, the highest first, at least point + 1 of them
+    var digs: List[i64] = []
+    let n9 = 9 * len(b)
+    for i in 0..point + 1 - n9 { digs.push(0) }
+    var li = len(b) - 1
+    while li >= 0 {
+        var limb = b[li]
+        var ds = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        var j = 8
+        while j >= 0 {
+            ds[j] = limb % 10
+            limb = limb / 10
+            j -= 1
+        }
+        for c in ds { digs.push(c) }
+        li -= 1
+    }
+    var lead = 0
+    while len(digs) - lead > point + 1 and digs[lead] == 0 { lead += 1 }
+    var int_n = len(digs) - lead - point
+    // the integer digits and d decimals, rounded at the first digit left out
+    var kept: List[i64] = []
+    let keep = int_n + min(d, point)
+    for k in 0..keep { kept.push(digs[lead + k]) }
+    if d < point {
+        let first = digs[lead + keep]
+        var tail = false
+        var k = lead + keep + 1
+        while not tail and k < len(digs) {
+            if digs[k] != 0 { tail = true }
+            k += 1
+        }
+        if first > 5 or (first == 5 and (tail or kept[keep - 1] % 2 == 1)) {
+            var i = keep - 1
+            var carry = true
+            while carry and i >= 0 {
+                if kept[i] == 9 {
+                    kept[i] = 0
+                    i -= 1
+                } else {
+                    kept[i] = kept[i] + 1
+                    carry = false
+                }
+            }
+            if carry {
+                var more = [1]
+                for x in kept { more.push(x) }
+                kept = more
+                int_n += 1
+            }
+        }
+    }
+    var cs: List[i64] = []
+    if neg { cs.push(45) }
+    for k in 0..int_n { cs.push(48 + kept[k]) }
+    if d > 0 {
+        cs.push(46)
+        for k in int_n..len(kept) { cs.push(48 + kept[k]) }
+        for k in len(kept) - int_n..d { cs.push(48) }
+    }
+    from_codes(cs)
 }
 
 fn rt_errno_text(e: i64) -> str {

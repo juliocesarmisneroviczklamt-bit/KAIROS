@@ -111,6 +111,11 @@ fn the_lab_data_in_kairos_is_the_rust_one() {
 }
 
 fn run_data_check() {
+    let panel = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data").join("processed").join("panel.bin");
+    if !panel.is_file() {
+        eprintln!("skipped: no B3 data in {}", panel.display());
+        return;
+    }
     lab_check("check_data.krs", &["monthly returns: the same", "eligible: the same", "cdi: the same", "nefin: the same"]);
     // b3.evaluate written in Kairós (lab/bridge.krs): the momentum portfolio, number for number
     lab_check("check_evaluate.krs", &["evaluate: the same"]);

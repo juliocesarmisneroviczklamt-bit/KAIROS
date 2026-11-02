@@ -32,6 +32,7 @@ struct WGen {
     strs: Map[str, (i64, i64)],     // a constant text -> (address, byte length)
     objs: Map[str, i64],            // a constant text -> the address of its object
     vobjs: Map[str, i64],           // "enum variant" -> the constant of a variant without fields
+    prog: str,                      // the program's name (its file without .krs: `b3` records it)
     // the function being generated
     code: List[i64],
     ltypes: List[i64],              // the type of each local (the parameters first)
@@ -60,37 +61,37 @@ fn f_proc_exit() -> i64 {
     1
 }
 
-// after the 11 functions imported from WASI (wasi_imports)
+// after the 12 functions imported from WASI (wasi_imports)
 fn f_write() -> i64 {
-    11
-}
-
-fn f_fail() -> i64 {
     12
 }
 
-fn f_print_i64() -> i64 {
+fn f_fail() -> i64 {
     13
 }
 
-fn f_alloc() -> i64 {
+fn f_print_i64() -> i64 {
     14
 }
 
-fn f_print_str() -> i64 {
+fn f_alloc() -> i64 {
     15
 }
 
-fn f_incref() -> i64 {
+fn f_print_str() -> i64 {
     16
 }
 
-fn f_start() -> i64 {
+fn f_incref() -> i64 {
     17
 }
 
-fn first_user_fn() -> i64 {
+fn f_start() -> i64 {
     18
+}
+
+fn first_user_fn() -> i64 {
+    19
 }
 
 // The function index of a Kairós function, which is compiled once its index is asked for.
@@ -102,11 +103,16 @@ fn fn_index(inout g: WGen, id: i64) -> i64 {
     i
 }
 
-// Is function `id` an instruction: a `wasm_*` function of the runtime (rt.krs)?
+// Is function `id` an instruction: a `wasm_*` function of the runtime (rt.krs, rt_b3.krs)?
 fn is_intrinsic(g: WGen, id: i64) -> bool {
     if not starts_with(g.ck.sigs[id].name, "wasm_") { return false }
     let f = g.ck.fn_hir[id].f
-    f >= 0 and f < len(g.ck.files) and ends_with(g.ck.files[f], "rt.krs")
+    f >= 0 and f < len(g.ck.files) and (ends_with(g.ck.files[f], "rt.krs") or ends_with(g.ck.files[f], "rt_b3.krs"))
+}
+
+// The address where the state of `b3` (rt_b3.krs) is kept: 0 until it is read.
+fn b3_state_at() -> i64 {
+    192
 }
 
 // A function of the runtime (rt.krs), by name.
@@ -904,6 +910,7 @@ fn gen(inout g: WGen, e: H) {
         return
     }
     if k == "builtin" { return builtin_w(inout g, e) }
+    if k == "host" { return host_w(inout g, e) }
     wg_fail(inout g, e, "`" + k + "`")
 }
 
@@ -1371,6 +1378,7 @@ fn builtin_w(inout g: WGen, e: H) {
         return
     }
     if tensor_builtin_w(inout g, e) { return }
+    if b == "format_fixed" { return call_rt_borrowing(inout g, "rt_format_fixed", args) }
     if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
     if b == "float" {
         gen(inout g, args[0].kids[0])
@@ -1493,6 +1501,7 @@ fn builtin_w(inout g: WGen, e: H) {
     if b == "write_bytes" { return io_w(inout g, e, "rt_write_bytes", "write", Ty.TUnit) }
     if b == "make_dir" { return io_w(inout g, e, "rt_make_dir", "create", Ty.TUnit) }
     if b == "args" { return call_f(inout g, rt_fn(inout g, "rt_args")) }
+    if b == "today" { return call_f(inout g, rt_fn(inout g, "rt_today")) }
     if b == "len" and (is_list(args[0].kids[0].t) or is_map(args[0].kids[0].t) or args[0].kids[0].t == Ty.TBytes) {
         let tl = gen_borrow(inout g, args[0].kids[0], true)
         load_at(inout g, wt_i32(), 4)
@@ -1502,7 +1511,7 @@ fn builtin_w(inout g: WGen, e: H) {
     // functions of the runtime on texts and lists, which borrow their arguments
     let on_rt = [("join", "rt_join"), ("codes", "rt_codes"), ("starts_with", "rt_starts_with"), ("ends_with", "rt_ends_with"),
         ("find", "rt_find"), ("file_exists", "rt_file_exists"), ("file_size", "rt_file_size"), ("env", "rt_env"), ("trim", "rt_trim"),
-        ("replace", "rt_replace"), ("to_hex", "rt_to_hex"), ("parse_float", "rt_parse_float")]
+        ("replace", "rt_replace"), ("to_hex", "rt_to_hex"), ("parse_float", "rt_parse_float"), ("lines", "rt_lines")]
     for r in on_rt {
         if b == r.0 { return call_rt_borrowing(inout g, r.1, args) }
     }
@@ -1781,7 +1790,113 @@ fn intrinsic(inout g: WGen, name: str, e: H) {
     }
     if name == "wasm_str_addr" { return op(inout g, 173) }
     if name == "wasm_str_at" { return op(inout g, 167) }
+    // the state of `b3`: a reference kept at a fixed address
+    if name == "wasm_b3_has" {
+        i32c(inout g, b3_state_at())
+        load_at(inout g, wt_i32(), 0)
+        i32c(inout g, 0)
+        return op(inout g, 71)
+    }
+    if name == "wasm_b3_get" {
+        i32c(inout g, b3_state_at())
+        load_at(inout g, wt_i32(), 0)
+        return call_f(inout g, f_incref())
+    }
+    if name == "wasm_b3_set" {
+        // the new state, one more reference; the old one dropped
+        let st = e.kids[0].kids[0].t
+        call_f(inout g, f_incref())
+        let v = new_local(inout g, wt_i32())
+        lset(inout g, v)
+        i32c(inout g, b3_state_at())
+        load_at(inout g, wt_i32(), 0)
+        let old = new_local(inout g, wt_i32())
+        op_u(inout g, 34, old)
+        open(inout g, 4, 0)
+        lget(inout g, old)
+        drop_v(inout g, st)
+        close(inout g)
+        i32c(inout g, b3_state_at())
+        lget(inout g, v)
+        return store_at(inout g, wt_i32(), 0)
+    }
+    if name == "wasm_program" { return i32c(inout g, intern_obj(inout g, g.prog)) }
+    // a text to the standard error; a text to the standard error, then exit code 1
+    if name == "wasm_eprint" or name == "wasm_fail" {
+        let p = new_local(inout g, wt_i32())
+        lset(inout g, p)
+        if name == "wasm_eprint" { return write_obj(inout g, 2, p) }
+        lget(inout g, p)
+        i32c(inout g, 8)
+        op(inout g, 106)
+        lget(inout g, p)
+        load_at(inout g, wt_i32(), 4)
+        call_f(inout g, f_fail())
+        return op(inout g, 0)
+    }
     wg_fail(inout g, e, "the instruction `" + name + "`")
+}
+
+// ------------------------------------------------------------------ b3
+
+// `b3.f(...)`: the bridge written in Kairós (rt_b3.krs). Each `rt_b3_*` function gives (an
+// error's code or "", its message, the value): an error stops the program as the interpreter
+// does, with the same diagnostic (rt_b3_fail writes it, with the location rendered here).
+fn host_w(inout g: WGen, e: H) {
+    let parts = split(e.text, " ")
+    let what = parts[0]
+    let known = ["monthly_returns", "eligible", "cdi", "month_index", "nefin", "evaluate"]
+    if not contains(known, what) { return wg_fail(inout g, e, "`b3." + what + "`") }
+    if len(g.ck.protocols) > 0 { return wg_fail(inout g, e, "`b3` in a program with protocols") }
+    let name = "rt_b3_" + what
+    if not contains(g.ck.fn_ids, name) {
+        // the runtime of `b3` was not checked with the program: kw.krs checks it and comes back
+        if not g.failed {
+            g.failed = true
+            g.msg = "b3"
+        }
+        return
+    }
+    let id = g.ck.fn_ids[name]
+    // the arguments, borrowed (nefin: the factor first)
+    if what == "nefin" { i64c(inout g, parse_int(parts[1])) }
+    var tmps: List[(i64, Ty)] = []
+    for i in 0..len(e.kids) {
+        var safe = true
+        for j in i + 1..len(e.kids) {
+            if changes(e.kids[j]) { safe = false }
+        }
+        tmps.push((gen_borrow(inout g, e.kids[i], safe), e.kids[i].t))
+    }
+    call_f(inout g, fn_index(inout g, id))
+    for x in tmps { drop_tmp(inout g, x.0, x.1) }
+    let rty = fin_ty(g.ck, g.ck.sigs[id].ret)
+    let r = new_local(inout g, wt_i32())
+    lset(inout g, r)
+    // an error: its code is not empty
+    lget(inout g, r)
+    load_at(inout g, wt_i32(), 8)
+    load_at(inout g, wt_i32(), 4)
+    open(inout g, 4, 0)
+    let f = if e.f >= 0 and e.f < len(g.srcs) { e.f } else { 0 }
+    let full = render_diag("R0000", "", "", g.srcs[f], g.ck.files[f], e.lo, e.hi)
+    let nl = from_codes([10])
+    let loc = substr(full, find(full, nl) + 1, len(full))
+    lget(inout g, r)
+    load_at(inout g, wt_i32(), 8)
+    lget(inout g, r)
+    load_at(inout g, wt_i32(), 16)
+    i32c(inout g, intern_obj(inout g, loc))
+    i32c(inout g, intern_obj(inout g, substr(loc, 0, find(loc, "-->"))))
+    call_f(inout g, rt_fn(inout g, "rt_b3_fail"))
+    op(inout g, 0)
+    close(inout g)
+    // the value, one more reference; the result dropped
+    lget(inout g, r)
+    load_at(inout g, vt(e.t), 24)
+    incref(inout g, e.t)
+    lget(inout g, r)
+    drop_v(inout g, rty)
 }
 
 // ------------------------------------------------------------------ lists
@@ -2735,7 +2850,7 @@ fn wasi_imports() -> List[(str, List[i64], List[i64])] {
     [("fd_write", [i, i, i, i], [i]), ("proc_exit", [i], []), ("args_sizes_get", [i, i], [i]), ("args_get", [i, i], [i]),
         ("environ_sizes_get", [i, i], [i]), ("environ_get", [i, i], [i]), ("path_open", [i, i, i, i, i, l, l, i, i], [i]),
         ("fd_read", [i, i, i, i], [i]), ("fd_close", [i], [i]), ("path_create_directory", [i, i, i], [i]),
-        ("path_filestat_get", [i, i, i, i, i], [i])]
+        ("path_filestat_get", [i, i, i, i, i], [i]), ("clock_time_get", [i, l, i], [i])]
 }
 
 // `wasm_wasi_<name>(...)`: the arguments (i64 in Kairós) as WASI takes them, the result as an i64.
@@ -3722,6 +3837,12 @@ fn tensor_builtin_w(inout g: WGen, e: H) -> bool {
         drop_tmp(inout g, tb, rtt(g))
         return true
     }
+    if b == "to_list" {
+        let tx = gen_borrow(inout g, x, true)
+        call_f(inout g, rt_fn(inout g, if elem_ty(g, e.t) == Ty.TBool { "rt_t_to_bools" } else { "rt_t_to_list" }))
+        drop_tmp(inout g, tx, rtt(g))
+        return true
+    }
     if b == "size" {
         let tx = gen_borrow(inout g, x, true)
         gen(inout g, args[1].kids[0])
@@ -4479,8 +4600,9 @@ fn runtime_fns(inout g: WGen) {
     call_f(inout g, f_write())
     op(inout g, 11)
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i64t], []), locals: [i32t, i64t, i32t], code: g.code })
-    // alloc(n): the heap's next free byte (global 0), then rounded up to 8; the memory grows a
-    // page at a time when the heap passes its end
+    // alloc(n): the heap's next free byte (global 0), then rounded up to 8. While the heap passes
+    // the memory's end, the memory grows by an eighth (a page at least; a page when an eighth is
+    // not to be had), and the program traps when it cannot grow
     g.code = []
     op_u(inout g, 35, 0)
     lset(inout g, 1)
@@ -4500,15 +4622,34 @@ fn runtime_fns(inout g: WGen) {
     op(inout g, 116)
     op(inout g, 77)
     op_u(inout g, 13, 1)
+    // max(size / 8, 1) pages
+    op_u(inout g, 63, 0)
+    i32c(inout g, 3)
+    op(inout g, 118)
+    op_u(inout g, 34, 2)
+    i32c(inout g, 1)
+    lget(inout g, 2)
+    i32c(inout g, 1)
+    op(inout g, 75)
+    op(inout g, 27)
+    op_u(inout g, 64, 0)
+    i32c(inout g, -1)
+    op(inout g, 70)
+    open(inout g, 4, 0)
     i32c(inout g, 1)
     op_u(inout g, 64, 0)
-    op(inout g, 26)
+    i32c(inout g, -1)
+    op(inout g, 70)
+    open(inout g, 4, 0)
+    op(inout g, 0)
+    close(inout g)
+    close(inout g)
     op_u(inout g, 12, 0)
     close(inout g)
     close(inout g)
     lget(inout g, 1)
     op(inout g, 11)
-    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
+    g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t, i32t], code: g.code })
     // print_str(p): the bytes of the text at p
     g.code = []
     write_obj(inout g, 1, 0)
@@ -4537,10 +4678,11 @@ fn runtime_fns(inout g: WGen) {
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
 }
 
-// The module of a checked program: (it compiled, the module, the error: file lo hi message).
-fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
+// The module of a checked program named `prog`: (it compiled, the module, the error: file lo hi
+// message).
+fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:],
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:], prog: prog,
         code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], live: [], pool: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
         efile: 0, elo: 0, ehi: 0,
     }
@@ -4562,6 +4704,8 @@ fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
         k += 1
     }
     if g.failed {
+        // "b3": the program reaches `b3`, whose runtime (rt_b3.krs) was not checked with it
+        if g.msg == "b3" { return (false, bytes(), "b3") }
         return (false, bytes(), str(g.efile) + " " + str(g.elo) + " " + str(g.ehi) + " " + g.msg)
     }
     g.m.exports.push(("_start", 0, f_start()))

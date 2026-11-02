@@ -1,0 +1,178 @@
+// The bridge `b3.*` of programs compiled to WebAssembly (M14), written in Kairós: the lab's data
+// (lab/data.krs), the fence of the holdout ledger and its record of who saw the data
+// (lab/ledger.krs), the evaluation and the registry of trials (lab/bridge.krs), with the rules of
+// the Rust bridge (src/bridge.rs). The back end checks this file with a program that uses `b3`.
+//
+// The data folder: KAIROS_DATA, else `data` or `../data` (relative to the folder the WASI runtime
+// opens: `wasmtime --dir=. program.wasm`); the results: KAIROS_RESULTS, else `results` next to
+// the data. The data is read once: the state lives in the module's memory (wasm_b3_*).
+import "../lab/bridge.krs"
+import "../lab/ledger.krs"
+
+struct B3State {
+    d: LabData,
+    cdi_d: List[f64],
+    cdi_m: List[f64],
+    nef: Map[i64, List[f64]],
+    nef_vw: Map[i64, List[f64]],
+    n: i64,                     // the months the program sees
+    results: str,
+    seen: List[str],            // the strategies evaluated in this run
+}
+
+// the state, kept at a fixed place of the module's memory (instructions of the back end)
+fn wasm_b3_has() -> bool {
+    false
+}
+
+fn wasm_b3_get() -> B3State {
+    rt_b3_empty()
+}
+
+fn wasm_b3_set(s: B3State) {
+}
+
+// the program's name (its file, without .krs), and a text to the standard error
+fn wasm_program() -> str {
+    ""
+}
+
+fn wasm_eprint(s: str) {
+}
+
+// a text to the standard error, then the end of the program (exit code 1)
+fn wasm_fail(s: str) {
+}
+
+// The hint the interpreter gives with an error of the bridge.
+fn rt_b3_hint(code: str, msg: str) -> str {
+    if code == "R0100" { return "set KAIROS_DATA to the quant-b3 `data` folder (the one with processed/panel.bin), or run from the quant-b3 folder" }
+    if code == "R0101" { return "e.g. `b3.month_index(200101)`" }
+    if code == "R0500" { return "the ledger is a CSV file: fix or restore it (Kairós will not run evaluations without it)" }
+    if starts_with(msg, "the weights have ") { return "build them from the data, e.g. `zeros_like(b3.monthly_returns())`" }
+    if starts_with(msg, "invalid weight ") { return "weights are long-only fractions of wealth: finite and >= 0" }
+    if starts_with(msg, "the weights of ") { return "Kairós evaluates long-only portfolios without leverage: what is not invested earns CDI" }
+    if msg == "the simulation produced no months" { return "are the weights only in the first month or after the end of the data?" }
+    ""
+}
+
+// An error of the bridge stops the program as in the interpreter: the diagnostic (`loc`: where,
+// rendered by the back end; `pad`: the margin of its lines) to the standard error, exit code 1.
+fn rt_b3_fail(code: str, msg: str, loc: str, pad: str) {
+    let nl = from_codes([10])
+    let hint = rt_b3_hint(code, msg)
+    var s = "runtime error[" + code + "]: " + msg + nl + loc
+    if hint != "" { s = s + pad + " = hint: " + hint + nl }
+    wasm_fail(s)
+}
+
+fn rt_b3_empty() -> B3State {
+    let cal = Cal { months: [], mfrom: [], mto: [], date_month: [] }
+    B3State { d: LabData { dates: [], tks: [], cal: cal, mret: [], traded: [] }, cdi_d: [], cdi_m: [], nef: [:], nef_vw: [:], n: 0, results: "", seen: [] }
+}
+
+// The data folder (the first with processed/panel.bin), or "".
+fn rt_b3_dir() -> str {
+    var cands: List[str] = []
+    let e = env("KAIROS_DATA")
+    if e != "" { cands.push(e) }
+    cands.push("data")
+    cands.push("../data")
+    for c in cands {
+        if file_exists(c + "/processed/panel.bin") { return c }
+    }
+    ""
+}
+
+// KAIROS_RESULTS, else `results` in the folder that holds the data's
+fn rt_b3_results(dir: str) -> str {
+    let e = env("KAIROS_RESULTS")
+    if e != "" { return e }
+    var p = replace(dir, from_codes([92]), "/")
+    while len(p) > 1 and ends_with(p, "/") { p = substr(p, 0, len(p) - 1) }
+    var last = -1
+    for i in 0..len(p) {
+        if substr(p, i, 1) == "/" { last = i }
+    }
+    if last < 0 { "results" } else { substr(p, 0, last + 1) + "results" }
+}
+
+// The state: the data read (once), the months the program sees under the ledger's fence, and the
+// record that it saw them. (code, message, state): the code of an error, or "".
+fn rt_b3_state() -> (str, str, B3State) {
+    if wasm_b3_has() { return ("", "", wasm_b3_get()) }
+    let dir = rt_b3_dir()
+    if dir == "" { return ("R0100", "B3 data not found", rt_b3_empty()) }
+    let d = load_lab_data(dir)
+    let cdi_d = cdi_days(d.dates, load_cdi(dir))
+    let results = rt_b3_results(dir)
+    let lo = open_ledger(results, 201901)
+    if lo.0 != "" { return ("R0500", lo.0, rt_b3_empty()) }
+    var rows = lo.1
+    let nm = len(d.cal.months)
+    let f = fence(rows)
+    let n = if f.0 > 0 { cal_idx_from(d.cal, next_ym(f.0)) } else { nm }
+    if n > 0 { ledger_saw(results, inout rows, d.cal.months[n - 1], "program " + wasm_program()) }
+    if n < nm {
+        let last = if n > 0 { fmt_ym(d.cal.months[n - 1]) } else { "before the first month" }
+        let q = from_codes([34])
+        let why = "the months from " + ledger_ym(f.1.holdout_from) + " are the holdout of protocol " + q + f.1.proto + q + " (registered on " + ledger_date(f.1.date) + "), which opens only through `open_once`"
+        wasm_eprint("note: this program sees the data up to " + last + ": " + why + from_codes([10]))
+    }
+    let s = B3State {
+        d: d, cdi_d: cdi_d, cdi_m: cdi_months(d.cal, cdi_d),
+        nef: load_factors(dir + "/raw/nefin/nefin_factors_equally_weighted_monthly.csv"),
+        nef_vw: load_factors(dir + "/raw/nefin/nefin_factors_monthly.csv"),
+        n: n, results: results, seen: [],
+    }
+    wasm_b3_set(s)
+    ("", "", s)
+}
+
+fn rt_b3_monthly_returns() -> (str, str, Tensor[month, asset; f64]) {
+    let s = rt_b3_state()
+    if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0)) }
+    ("", "", data_monthly_returns(s.2.d)[month: 0 .. s.2.n])
+}
+
+fn rt_b3_eligible() -> (str, str, Tensor[month, asset; bool]) {
+    let s = rt_b3_state()
+    if s.0 != "" { return (s.0, s.1, zeros(month: 0, asset: 0) > 0.0) }
+    ("", "", data_eligible(s.2.d)[month: 0 .. s.2.n])
+}
+
+fn rt_b3_cdi() -> (str, str, Tensor[month; f64]) {
+    let s = rt_b3_state()
+    if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
+    ("", "", tensor(s.2.cdi_m, month)[month: 0 .. s.2.n])
+}
+
+fn rt_b3_nefin(k: i64, vw: bool) -> (str, str, Tensor[month; f64]) {
+    let s = rt_b3_state()
+    if s.0 != "" { return (s.0, s.1, zeros(month: 0)) }
+    ("", "", data_nefin(s.2.d.cal, if vw { s.2.nef_vw } else { s.2.nef }, k)[month: 0 .. s.2.n])
+}
+
+fn rt_b3_month_index(ym: i64) -> (str, str, i64) {
+    if ym < 100001 or ym > 999912 or ym % 100 < 1 or ym % 100 > 12 { return ("R0101", "`" + str(ym) + "` is not a month in YYYYMM form", 0) }
+    let s = rt_b3_state()
+    if s.0 != "" { return (s.0, s.1, 0) }
+    ("", "", min(cal_idx_from(s.2.d.cal, ym), s.2.n))
+}
+
+// b3.evaluate: the simulation of the weights and its statistics, a trial in the registry
+fn rt_b3_evaluate(w: Tensor[month, asset; f64], cost_bps: f64, lag: i64, capital: f64, real_costs: bool, tax: bool, cap_adv: f64, trial: bool) -> (str, str, Evaluation) {
+    let none = Evaluation { months: 0, cagr: nan, vol: nan, sharpe: nan, max_dd: nan, beta: nan, alpha: nan, t_alpha: nan, turnover: nan, cost_bps: nan, trials: 0, dsr: nan }
+    let s0 = rt_b3_state()
+    if s0.0 != "" { return (s0.0, s0.1, none) }
+    var s = s0.2
+    let cfg = SimCfg { capital: capital, lag: lag, real_costs: real_costs, cost_bps: cost_bps, tax: tax, cap_adv: cap_adv }
+    let r = kairos_evaluate(s.d, s.cdi_d, w, s.n, cfg)
+    if r.0 != "" { return ("R0102", r.0, none) }
+    let sha = weights_sha(w, s.n)
+    let t = evaluation_trial(s.d, s.cdi_m, r.1, sha, cfg, wasm_program())
+    let rec = record_evaluation(s.results, t, sha, inout s.seen, trial)
+    wasm_b3_set(s)
+    let e = r.2
+    ("", "", Evaluation { months: len(r.1.ret), cagr: e.cagr, vol: e.vol, sharpe: e.sharpe, max_dd: e.max_dd, beta: e.beta, alpha: e.alpha, t_alpha: e.t_alpha, turnover: e.turnover, cost_bps: e.cost_bps, trials: rec.0, dsr: rec.1 })
+}

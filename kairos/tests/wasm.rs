@@ -59,6 +59,7 @@ struct Wasi {
     files: std::collections::HashMap<i32, std::fs::File>,
     next_fd: i32,
     args: Vec<String>,
+    env: Vec<String>,
 }
 
 /// WASI's code for an error of the file system.
@@ -112,8 +113,11 @@ fn put_c_strings(c: &mut Caller<'_>, list: &[String], ptrs: i32, buf: i32) {
     }
 }
 
-fn wasi_environ() -> Vec<String> {
-    std::env::vars().map(|(k, v)| format!("{k}={v}")).collect()
+/// The environment of the module: the process's, with the variables of `extra` set (or replaced).
+fn wasi_environ(extra: &[(&str, &str)]) -> Vec<String> {
+    let mut env: Vec<String> = std::env::vars().filter(|(k, _)| !extra.iter().any(|(x, _)| x == k)).map(|(k, v)| format!("{k}={v}")).collect();
+    env.extend(extra.iter().map(|(k, v)| format!("{k}={v}")));
+    env
 }
 
 /// Runs a module's `_start` with the WASI functions it imports: a minimal WASI, with the program's
@@ -125,6 +129,11 @@ fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
 
 /// The same with the program's arguments (the first one its name).
 fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
+    run_wasm_env(bytes, args, &[])
+}
+
+/// The same with variables set in its environment.
+fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (String, String, i32) {
     use std::io::{Read, Write};
     use wasmi::{Config, Engine, Linker, Module, Store};
     // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
@@ -133,7 +142,7 @@ fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
     let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, args, ..Wasi::default() });
+    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, args, env: wasi_environ(extra), ..Wasi::default() });
     let mut linker = <Linker<Wasi>>::new(&engine);
     let w = "wasi_snapshot_preview1";
     linker
@@ -180,7 +189,8 @@ fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
         .unwrap();
     linker
         .func_wrap(w, "environ_sizes_get", |mut c: Caller<'_>, count: i32, size: i32| -> i32 {
-            let (n, total, _) = c_strings(&wasi_environ());
+            let env = c.data().env.clone();
+            let (n, total, _) = c_strings(&env);
             mem_write(&mut c, count, &n.to_le_bytes());
             mem_write(&mut c, size, &total.to_le_bytes());
             0
@@ -188,7 +198,8 @@ fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
         .unwrap();
     linker
         .func_wrap(w, "environ_get", |mut c: Caller<'_>, ptrs: i32, buf: i32| -> i32 {
-            put_c_strings(&mut c, &wasi_environ(), ptrs, buf);
+            let env = c.data().env.clone();
+            put_c_strings(&mut c, &env, ptrs, buf);
             0
         })
         .unwrap();
@@ -274,6 +285,13 @@ fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
             }
         })
         .unwrap();
+    linker
+        .func_wrap(w, "clock_time_get", |mut c: Caller<'_>, _id: i32, _precision: i64, at: i32| -> i32 {
+            let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+            mem_write(&mut c, at, &ns.to_le_bytes());
+            0
+        })
+        .unwrap();
     let instance = linker.instantiate_and_start(&mut store, &module).expect("instantiation");
     let start = instance.get_typed_func::<(), ()>(&store, "_start").expect("`_start`");
     let code = match start.call(&mut store, ()) {
@@ -343,6 +361,81 @@ fn programs_compiled_to_webassembly_run_like_the_interpreter() {
         let _ = std::fs::remove_dir_all(&out);
         assert!(files.len() >= 10 && errors >= 5, "{} programs, {errors} with errors", files.len());
         println!("{} programs run the same in WebAssembly, {errors} of them stopping with the same runtime error", files.len());
+    })
+}
+
+/// What the interpreter does with a program that uses `b3` (the bridge in Rust), its ledger and
+/// its registry of trials in `results`: (stdout, the rendered error, exit code).
+fn run_interp_b3(path: &str, src: &str, results: &Path, name: &str) -> (String, String, i32) {
+    let buf = Rc::new(RefCell::new(Vec::new()));
+    let host = kairos::bridge::Host::new().with_results(results);
+    host.set_program(name);
+    let mut s = Session::with_host(Box::new(Buf(buf.clone())), host);
+    s.mark_imported(path);
+    let err = match s.run(path, src) {
+        Ok(_) => String::new(),
+        Err(d) => s.render(&d),
+    };
+    let code = if err.is_empty() { 0 } else { 1 };
+    (String::from_utf8(buf.borrow().clone()).unwrap(), err, code)
+}
+
+/// M14: `b3` in WebAssembly. The bridge written in Kairós (compiler/rt_b3.krs, over kairos/lab)
+/// is compiled with each program that uses `b3`: examples/momentum.krs and the programs of
+/// tests/wasm_b3, run in wasmi, print what the interpreter (with the bridge in Rust) prints, stop
+/// with the same errors, and leave the same registry of trials and the same holdout ledger, each
+/// in a folder of its own (data.krs under the fence of a pending protocol). Skipped without the
+/// B3 data and in a debug build (slow): `cargo test --release -p kairos --test wasm b3`.
+#[test]
+fn b3_programs_compiled_to_webassembly_run_like_the_interpreter() {
+    if cfg!(target_family = "wasm") || cfg!(debug_assertions) {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if !root.join("..").join("data").join("processed").join("panel.bin").is_file() {
+            eprintln!("skipped: no B3 data");
+            return;
+        }
+        // relative to the crate's folder, where the module's paths start (as `wasmtime --dir=.`)
+        let tmp = "tests/wasm/tmp/b3";
+        let _ = std::fs::remove_dir_all(root.join(tmp));
+        let progs = ["examples/momentum.krs", "tests/wasm_b3/data.krs", "tests/wasm_b3/err_month.krs", "tests/wasm_b3/err_weights.krs"];
+        let paths: Vec<String> = progs.iter().map(|p| root.join(p).to_string_lossy().into_owned()).collect();
+        let out = root.join(tmp).join("modules");
+        let mut args = vec![root.join("std").to_string_lossy().into_owned(), out.to_string_lossy().into_owned()];
+        args.extend(paths.iter().cloned());
+        assert_eq!(run_compiler("kw.krs", args), "", "the programs that use b3 compile to WebAssembly");
+        let ledger = "kind,protocol,sha256,holdout_from,data_until,date,note\nprotocol,teste,0123abcd,2020-01,,2026-01-01,a protocol of the tests\n";
+        let note = "note: this program sees the data up to 2019-12: the months from 2020-01 are the holdout of protocol \"teste\" (registered on 2026-01-01), which opens only through `open_once`\n";
+        for path in &paths {
+            let name = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+            let fenced = name == "data";
+            let (wdir, idir) = (format!("{tmp}/{name}-wasm"), format!("{tmp}/{name}-interp"));
+            for d in [&wdir, &idir] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+                if fenced {
+                    std::fs::write(root.join(d).join("holdout_ledger.csv"), ledger).unwrap();
+                }
+            }
+            let src = std::fs::read_to_string(path).unwrap();
+            let mut interp = run_interp_b3(path, &src, &root.join(&idir), &name);
+            // the interpreter writes the fence's note to the process's standard error
+            if fenced {
+                interp.1 = format!("{note}{}", interp.1);
+            }
+            let wasm = std::fs::read(out.join(format!("{name}.wasm"))).unwrap();
+            let t = std::time::Instant::now();
+            let got = run_wasm_env(&wasm, vec![format!("{name}.wasm")], &[("KAIROS_RESULTS", wdir.as_str())]);
+            assert_eq!(got, interp, "{path}: WebAssembly and the interpreter differ");
+            for f in ["registro_testes.csv", "holdout_ledger.csv"] {
+                let a = std::fs::read(root.join(&wdir).join(f)).ok();
+                let b = std::fs::read(root.join(&idir).join(f)).ok();
+                assert!(a == b, "{path}: {f} differs between WebAssembly and the interpreter");
+            }
+            println!("{name}: the same in WebAssembly ({:.1} s in wasmi)", t.elapsed().as_secs_f64());
+        }
+        let _ = std::fs::remove_dir_all(root.join(tmp));
     })
 }
 

@@ -1,0 +1,2 @@
+// b3.month_index of what is not a month: R0101, with the interpreter's message and hint
+print(b3.month_index(5))

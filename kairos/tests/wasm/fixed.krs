@@ -1,0 +1,18 @@
+// format_fixed: the exact value of the float, rounded half to even (Rust's `{:.d}`); lines; today
+print(format_fixed(0.125, 2), format_fixed(2.5, 0), format_fixed(0.5, 0), format_fixed(1.5, 0), format_fixed(0.375, 2))
+print(format_fixed(-0.0, 2), format_fixed(-0.004, 2), format_fixed(1e21, 1), format_fixed(5e-324, 3), format_fixed(0.0, 0))
+print(format_fixed(0.1, 30), format_fixed(123.456, 1), format_fixed(nan, 2), format_fixed(-inf, 1), format_fixed(inf, 0))
+print(format_fixed(0.063921, 6), format_fixed(-0.80176, 4), format_fixed(9.9999, 3), format_fixed(99.95, 1), format_fixed(1.0, -3))
+print(format_fixed(1.7976931348623157e308, 0) == "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368")
+print(format_fixed(2.2250738585072014e-308, 30), format_fixed(0.3, 17), format_fixed(1234.5, 0), format_fixed(1235.5, 0))
+print(len(lines("a\nb\r\n\nc")), lines("x\r\ny\n"), len(lines("")), lines("one"), lines("z\r"))
+let d = today()
+print(d > 20260000 and d < 30000000, d % 100 >= 1 and d % 100 <= 31)
+// out: 0.12 2 0 2 0.38
+// out: -0.00 -0.00 1000000000000000000000.0 0.000 0
+// out: 0.100000000000000005551115123126 123.5 NaN -inf inf
+// out: 0.063921 -0.8018 10.000 100.0 1
+// out: true
+// out: 0.000000000000000000000000000000 0.29999999999999999 1234 1236
+// out: 4 ["x", "y"] 0 ["one"] ["z\r"]
+// out: true true

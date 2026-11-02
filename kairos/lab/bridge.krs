@@ -30,7 +30,8 @@ fn make_plans(d: LabData, w: Tensor[month, asset; f64], n: i64, cfg: SimCfg) -> 
     let nm = len(d.cal.months)
     let nt = len(d.tks)
     if size(w, month) != n or size(w, asset) != nt {
-        p.err = "the weights have " + str(size(w, month)) + " months x " + str(size(w, asset)) + " assets, but the B3 data has " + str(n) + " x " + str(nt)
+        let cut = if n < nm { " visible to this program (see the note above)" } else { "" }
+        p.err = "the weights have " + str(size(w, month)) + " months x " + str(size(w, asset)) + " assets, but the B3 data has " + str(n) + " x " + str(nt) + cut
         return p
     }
     if cfg.lag < 0 {

@@ -1,0 +1,3 @@
+// weights without the data's shape: R0102, with the interpreter's message and hint
+let w = zeros(month: 3, asset: 2)
+print(b3.evaluate(w).months)

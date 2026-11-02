@@ -1,0 +1,12 @@
+// b3.* compiled to WebAssembly (M14): the data the bridge written in Kairós gives, under the
+// fence of the holdout ledger (tests/wasm.rs registers a protocol whose holdout starts in 2020)
+let r = b3.monthly_returns()
+let e = b3.eligible()
+let c = b3.cdi()
+print("months", size(r, month), "assets", size(r, asset))
+print("returns", nan_sum(r), nan_count(r))
+print("eligible", count(e))
+print("cdi", sum(c))
+print("wml", nan_sum(b3.nefin("wml")))
+print("rm_rf vw", nan_sum(b3.nefin("rm_rf", vw: true)))
+print("2019-01", b3.month_index(201901), "2030-01", b3.month_index(203001))

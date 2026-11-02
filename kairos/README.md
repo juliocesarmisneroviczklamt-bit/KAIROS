@@ -152,6 +152,6 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 
 | marco | entrega |
 |---|---|
-| M14 | o back-end WebAssembly completo: closures, tensores e `grad` |
+| M14 | o back-end WebAssembly completo. Já compilam closures, tensores e a ponte `b3` escrita em Kairós: o `momentum` compilado dá os mesmos números e o mesmo registro. Faltam `grad`, protocolos e holdouts, e o resto de `b3` |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

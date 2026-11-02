@@ -67,6 +67,17 @@ fn rt_t_from_bools(xs: List[bool], ax: i64) -> RtT {
     RtT { axes: [ax], shape: [len(xs)], data: d, boolean: true }
 }
 
+// to_list: the values, row-major (true and false for a tensor of bool)
+fn rt_t_to_list(t: RtT) -> List[f64] {
+    t.data
+}
+
+fn rt_t_to_bools(t: RtT) -> List[bool] {
+    var out: List[bool] = []
+    for x in t.data { out.push(x != 0.0) }
+    out
+}
+
 // The offset in t of each element of the frame (axes, shape), in row-major order: t's own
 // strides along the axes it has, 0 along the others (its values repeat there).
 fn rt_t_offsets(t: RtT, axes: List[i64], shape: List[i64]) -> List[i64] {

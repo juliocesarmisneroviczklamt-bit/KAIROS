@@ -823,4 +823,30 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
 
 `cargo test --release -p kairos --test wasm -- --ignored the_compiler` confere o ponto fixo no wasmi.
 
-**Ainda não compila:** closures, tensores, `grad`, protocolos e holdouts, a ponte `b3` e a internet. Um programa que os usa é recusado com W0001, no ponto exato.
+### 15.1 M14 (em andamento): closures, tensores e a ponte `b3`
+
+- **Closures** (lambdas com capturas, funções como valores) e **tensores com eixos nomeados** compilam. O runtime dos tensores é escrito em Kairós ([`rt_tensor.krs`](../compiler/rt_tensor.krs)), operação por operação como o `src/tensor.rs` do interpretador, e dá os mesmos bits.
+- **A ponte `b3` escrita em Kairós** ([`rt_b3.krs`](../compiler/rt_b3.krs), sobre [`kairos/lab`](../lab)) faz o que a ponte em Rust faz:
+  - lê os dados do laboratório (`processed/panel.bin`, o CDI, os fatores NEFIN);
+  - aplica a cerca do livro-razão de holdouts e registra o que o programa viu;
+  - avalia os pesos no simulador e grava o teste no registro, com o DSR.
+- `kw.krs` só inclui esse runtime nos programas que chegam a `b3`. O estado (os dados lidos, os meses visíveis) fica num endereço fixo da memória e é lido uma vez por execução.
+- `examples/momentum.krs` compilado para WebAssembly imprime os mesmos números. Também grava a mesma linha no registro de testes e no livro-razão que o interpretador grava. A cerca de um protocolo pendente corta os mesmos meses, com a mesma nota. Os erros da ponte saem com as mesmas mensagens e dicas. Quem confere: `cargo test --release -p kairos --test wasm b3`, com os dados.
+- Por enquanto, de `b3`: `monthly_returns`, `eligible`, `cdi`, `nefin`, `month_index` e `evaluate`.
+- Programas que declaram protocolos e usam `b3` são recusados com W0001, para não enfraquecer as garantias do M5.
+- Os nomes do runtime e os do programa dividem um espaço só. Um programa que usa `b3` e define um nome do laboratório (`Bar`, `load`…) é recusado com W0001.
+- **Builtins novos no runtime:**
+  - `format_fixed`: o valor exato do float, arredondado para o par, como o `{:.N}` do Rust, com inteiros grandes em Kairós;
+  - `lines`;
+  - `today`, pelo relógio do WASI.
+- **A memória cresce um oitavo por vez**, não uma página por vez: o `momentum` compilado roda em 1,4 s no node, contra 40 s antes.
+- No Windows, o node 22 pode cair (segfault) com alguns desses módulos. Eles rodam quando as funções do WASI são chamadas através de JavaScript, e também no wasmi.
+
+**Ainda não compila:**
+- `grad`;
+- protocolos e holdouts (`open_once`);
+- `b3.simulate`, `b3.record_trial`, `deflate_trial`, `results_sha256` e os tensores diários;
+- `upper` e `lower`;
+- a internet.
+
+Um programa que os usa é recusado com W0001, no ponto exato.
