@@ -570,12 +570,26 @@ A escala pode cair durante o treino (recozimento). O compilador avisa quando uma
 - Mês com todos os pesos zerados não opera.
 - `real_costs: true` usa o custo realista do laboratório: emolumentos + meio spread + impacto.
 
-**Ainda por vir:**
+**Acrescentado no M8**, para escrever o laboratório em Kairós:
 
-| Kairós | chama no `quant-b3` (biblioteca) |
+| Kairós | o que devolve |
 |---|---|
-| tentativas e DSR | `registry::{Trial, record_and_describe, deflate}` (M5) |
-| `b3.paper(...)` | `paper` |
+| `b3.daily_returns()`, `daily_volume()`, `daily_price()`, `daily_dividends()` | `Tensor[month, session, asset; f64]`: o pregão `session` (até 23 por mês), com a linha m conhecida em `end(m)` |
+| `b3.sessions()` / `b3.session_dates()` | os pregões de cada mês (`Tensor[month, session; bool]`) e suas datas (AAAAMMDD) |
+| `b3.issuers()` / `b3.classes()` | a empresa e a classe de cada ativo |
+| `b3.nefin(fator, vw: false)` / `b3.nefin_daily(...)` / `b3.ipca()` | fatores do NEFIN (mensais e diários) e a inflação |
+| `b3.simulate(w, ...)` | `Simulation`: o simulador mês a mês (retorno, exposição, giro, custo, IR, valor final, meses isentos); conta como tentativa, como `b3.evaluate` |
+| `b3.record_trial(estudo, nome, parâmetros, período, excesso)` | grava uma série no registro e devolve a linha (Sharpe, tentativas, acaso, DSR) |
+| `b3.deflate_trial(excesso)` | `[tentativas, Sharpe do acaso, DSR]` contra o registro, sem gravar |
+| `b3.results_sha256(arquivo)` | o SHA-256 de um arquivo da pasta de resultados (protocolos registrados) |
+
+Opções de `b3.evaluate` e `b3.simulate`:
+- `cap_adv: d` limita cada posição a `d` dias do volume mediano;
+- `trial: false` marca uma referência que não conta como tentativa, visível no código.
+
+Uma estratégia é uma tentativa: os mesmos pesos executados de novo, com outro custo, atraso, capital ou IR, não contam outra vez.
+
+**Ainda em Rust**, para os próximos marcos: o paper trading (`paper`), a coleta e a montagem dos dados e o simulador.
 
 ## 11. Reprodutibilidade e procedência
 
@@ -634,3 +648,7 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M5 | holdout de uso único + protocolo + registro e DSR automáticos | ✅ 2º acesso = erro (E0501 na compilação, R0502 entre execuções, pelo livro-razão); o protocolo cerca os dados de pesquisa e reserva o holdout para todos os programas; toda avaliação vira tentativa no `registro_testes.csv` com DSR; 7 testes dourados e 5 de integração num mercado sintético |
 | M6 | primeiro modelo inédito (carteira com IR suave) | ✅ protocolo publicado antes (commit `52a186d`, `research/m6-protocol.md`); walk-forward provado causal; simulador real com custos e IR; 3 tentativas no registro; DSR 0,8%: **rejeitado** pela própria regra ([relatório](../research/m6-report.md)); holdout (o futuro, ≥ 24 meses) reservado no livro-razão |
 | M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ✅ JIT de funções escalares puras, com os mesmos bits e erros do interpretador; `kairos-bench`: 1,20× Rust na média geométrica de 6 programas (1,00× a 1,50×); `t3` fica para depois (§9.1) |
+| M8 | o laboratório escrito em Kairós: `import`, dados diários, `b3.simulate`, registro (§10) | ✅ os 5 estudos do `quant-b3` (`lab/*.krs`) imprimem o relatório do Rust linha por linha; universo NEFIN igual (41.106 pares); estatística bit a bit; o registro não muda |
+| M9 | arquivos e texto: leitura e escrita, CSV, JSON, datas | o paper trading e a coleta de dados escritos em Kairós |
+| M10 | o simulador em Kairós (custos, impacto, IR) | os relatórios continuam idênticos com o simulador escrito em Kairós |
+| M11 | auto-hospedagem | o compilador da Kairós, escrito em Kairós, compila a si mesmo |

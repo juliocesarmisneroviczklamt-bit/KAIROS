@@ -2,6 +2,41 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.8.0 — M8: o laboratório escrito em Kairós
+
+**Os cinco estudos do laboratório `quant-b3` agora são programas Kairós, e cada um imprime o relatório do Rust linha por linha.** As regras de pesquisa saíram do Rust: universo, estatística, carteiras, simulações e decisões. O runtime em Rust ficou com os dados, o simulador e o registro de tentativas, como o CPython fica com o C.
+
+- **Os estudos** ([`kairos/lab/`](kairos/lab)), conferidos nos dados reais por `cargo test --release -p kairos --test lab -- --ignored`:
+
+  | programa | estudo do laboratório | relatório |
+  |---|---|---|
+  | `momentum.krs` | `quant-b3 momentum`: replicação do WML do NEFIN, prêmio long-short, long-only depois de custos, regressões de fatores | 31 linhas, idênticas |
+  | `risk.krs` | `momentum-risco`: WML escalado pela vol realizada, long-only com exposição controlada | 21 linhas, idênticas |
+  | `realistic.krs` | `realista`: custo real, 1 pregão de atraso e IR de pessoa física em três capitais | 25 linhas, idênticas |
+  | `smallcaps.krs` | `small-caps`: duas hipóteses registradas, pesquisa, holdout e capacidade | 34 linhas, idênticas |
+  | `search.krs` | `busca`: a busca de alpha do protocolo registrado (6 sinais de ações + tendência) | 25 linhas, idênticas |
+
+- **A biblioteca do laboratório em Kairós:**
+  - `universe.krs`: o universo líquido do NEFIN e o segmento small. Dá exatamente o do Rust (41.106 pares ativo-mês, nenhuma diferença), e a análise temporal prova que ele é causal;
+  - `stats.krs`: média, desvio, correlação, CAGR, maxDD, defasagens de Newey-West e MQO com estatística t de Newey-West, bit a bit iguais ao Rust;
+  - `portfolios.krs`: formação do momentum, carteiras diárias equal-weight, vol realizada;
+  - `fmt.krs`: a formatação dos relatórios.
+- **Linguagem:**
+  - `import "arquivo.krs"`: cada arquivo roda uma vez, e o caminho é relativo ao arquivo que importa ou a `KAIROS_PATH`;
+  - dados diários como `Tensor[month, session, asset]`, com a linha m conhecida em `end(m)`: `b3.daily_returns()`, `daily_volume()`, `daily_price()` e `daily_dividends()`, mais `b3.sessions()` e `b3.session_dates()`;
+  - `b3.issuers()`, `b3.classes()`, `b3.nefin(fator, vw:)`, `b3.nefin_daily(...)` e `b3.ipca()`;
+  - `b3.simulate(w, ...)`: o simulador do laboratório mês a mês (retorno, exposição, giro, custo, IR, isenções), como a struct `Simulation`;
+  - `b3.record_trial(...)`, `b3.deflate_trial(série)` e `b3.results_sha256(arquivo)`;
+  - as opções `cap_adv:` (limite de posição em dias de volume) e `trial: false` (referência que não conta como tentativa, visível no código);
+  - as funções nativas `format_fixed(x, d)`, `substr(s, início, n)`, `nan_quantile(x, q, over:)` e `merge_days(x)`.
+- **Contagem honesta de tentativas:** uma estratégia é uma tentativa, por mais vezes que seja executada. Os mesmos pesos com outro custo, atraso, capital ou IR não contam de novo. Rodar os cinco estudos deixa o registro igual byte a byte, com as mesmas 16 tentativas.
+- **Análise temporal mais precisa:**
+  - uma chamada cujo argumento temporal é conhecido antes ou depois do que a função supõe é analisada no contexto da chamada, como se estivesse expandida no lugar. Assim, uma função que recebe o universo, conhecido um mês antes, pode usá-lo no próprio mês;
+  - um símbolo de laço limitado por outro se junta a ele: estatísticas de duas passadas numa janela (a média, depois os desvios) são provadas causais;
+  - simular sob uma condição que depende de um resultado continua rejeitado, porque é escolher a estratégia pelo backtest. A busca simula todos os candidatos antes de escolher.
+- **Testes:** `tests/lab.rs` confere universo, estatística, formatação e segmento small num mercado sintético feito para os casos de borda, e tem os 5 testes de relatório com os dados reais. Há também 1 teste temporal novo.
+- **Ainda em Rust:** a coleta e a montagem dos dados (B3, BCB, NEFIN, `panel.bin`), o simulador e o registro, chamados pelo módulo `b3`, e o paper trading. Os próximos marcos levam isso para Kairós (§13 da spec).
+
 ## 0.7.0 — M7: código nativo com Cranelift
 
 **Funções escalares puras viram código de máquina na primeira chamada, com os mesmos bits e os mesmos erros do interpretador.** Na média geométrica de seis programas numéricos, o resultado fica em 1,20× do Rust.

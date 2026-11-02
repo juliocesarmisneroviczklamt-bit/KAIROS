@@ -2,14 +2,17 @@
 
 Linguagem de programação para pesquisa e IA no mercado financeiro. *Kairós*: "o momento certo". Cada decisão só enxerga o que já era conhecido quando foi tomada.
 
-Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.7.0**, com o roteiro M1–M7 pronto:
+Especificação: [`docs/spec.md`](docs/spec.md). Versão atual: **0.8.0**, com o roteiro M1–M8 pronto:
 - M1: núcleo;
 - M2: tensores + dados da B3;
 - M3: tipos temporais;
 - M4: diferenciação nativa + motor de IA em Kairós;
 - M5: holdout de uso único + registro de tentativas;
 - M6: primeiro modelo, pré-registrado e avaliado;
-- M7: código nativo com Cranelift. Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
+- M7: código nativo com Cranelift;
+- M8: o laboratório escrito em Kairós ([`lab/`](lab)).
+
+Roda em 32 e 64 bits (x86, ARM, RISC-V, PowerPC, s390x) e em Linux, macOS, Windows, FreeBSD, NetBSD, OpenBSD e WebAssembly: é Rust puro, e a matemática dá os mesmos bits em todos eles.
 
 ```text
 cargo build --release -p kairos              # gera target/release/kairos (kairos.exe no Windows)
@@ -105,8 +108,17 @@ cargo test -p kairos                         # testes dourados + teste de aceita
 
 A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs), com `variance`, `std_dev`, `compound`, `wealth`, `max_drawdown`, `sharpe`, a struct `Evaluation` e o motor de IA.
 
+**M8 (o laboratório em Kairós)**
+- **Os cinco estudos** do `quant-b3` em [`lab/`](lab) (`momentum`, `risk`, `realistic`, `smallcaps`, `search`) imprimem o relatório do Rust linha por linha.
+- **A biblioteca do laboratório:** universo NEFIN e segmento small ([`lab/universe.krs`](lab/universe.krs)), estatística com Newey-West ([`lab/stats.krs`](lab/stats.krs)), carteiras ([`lab/portfolios.krs`](lab/portfolios.krs)) e formatação ([`lab/fmt.krs`](lab/fmt.krs)).
+- **`import "arquivo.krs"`**, dados diários `Tensor[month, session, asset]`, `b3.simulate` e `b3.record_trial`.
+- **Uma estratégia é uma tentativa,** por mais vezes que seja executada.
+
 ## Próximos marcos
 
 | marco | entrega |
 |---|---|
-| M8 | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |
+| M9 | arquivos e texto (CSV, JSON, datas): paper trading e coleta de dados em Kairós |
+| M10 | o simulador (custos, impacto, IR) escrito em Kairós |
+| M11 | auto-hospedagem: o compilador da Kairós escrito em Kairós |
+| depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

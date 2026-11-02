@@ -21,7 +21,7 @@ O repositório tem duas partes que trabalham juntas:
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.7.0 (M7)
+## Estado: v0.8.0 (M8)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -32,6 +32,10 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M5 | holdout de uso único + protocolos + registro de testes e DSR automáticos | ✅ |
 | M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR), pré-registrado | ✅ rejeitado pela própria regra ([relatório](kairos/research/m6-report.md)); holdout reservado até 2028-11 |
 | M7 | back-end nativo (Cranelift) + `kairos-bench` | ✅ 1,20× Rust na média geométrica, com os mesmos bits |
+| M8 | o laboratório escrito em Kairós: universo, estatística, carteiras e os 5 estudos | ✅ cada estudo imprime o relatório do Rust linha por linha |
+| M9 | arquivos e texto: CSV, JSON, datas; paper trading e coleta de dados em Kairós | próximo |
+| M10 | o simulador (custos, impacto, IR) escrito em Kairós | |
+| M11 | auto-hospedagem: o compilador da Kairós escrito em Kairós | |
 
 ## Exemplo: momentum na B3
 
@@ -135,6 +139,20 @@ cargo run --release -p kairos --bin kairos-bench
 ```
 
 O JIT funciona em x86_64 (Linux, macOS, Windows, FreeBSD) e ARM64 (Linux, macOS). Nas outras plataformas tudo roda no interpretador, com os mesmos resultados.
+
+## O laboratório em Kairós (M8)
+
+A pesquisa do laboratório `quant-b3` é escrita em Kairós, em [`kairos/lab/`](kairos/lab). O universo, a estatística, as carteiras e as decisões ficam em `.krs`. O Rust guarda os dados, o simulador e o registro de tentativas. Cada estudo imprime o relatório do Rust linha por linha:
+
+```text
+kairos run kairos/lab/momentum.krs     # replicação do NEFIN e momentum (= quant-b3 momentum)
+kairos run kairos/lab/risk.krs         # controle de risco (= momentum-risco)
+kairos run kairos/lab/realistic.krs    # custo real, atraso e IR (= realista)
+kairos run kairos/lab/smallcaps.krs    # small caps, hipóteses registradas (= small-caps)
+kairos run kairos/lab/search.krs       # busca de alpha do protocolo registrado (= busca)
+```
+
+O universo líquido do NEFIN, em [`universe.krs`](kairos/lab/universe.krs), dá exatamente o do Rust: 41.106 pares ativo-mês, sem nenhuma diferença. O compilador também prova que ele só usa o passado. As estatísticas de [`stats.krs`](kairos/lab/stats.krs), MQO com Newey-West incluído, são bit a bit iguais às do Rust. Rodar os estudos não infla o registro: uma estratégia conta como uma tentativa, por mais vezes que seja executada.
 
 ## Como usar
 
