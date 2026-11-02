@@ -83,6 +83,11 @@ fn randn_draws_the_samples_of_the_interpreter() {
 }
 
 #[test]
+fn the_tape_of_grad_gives_the_gradients_of_the_interpreter() {
+    check("diff.krs", 30);
+}
+
+#[test]
 fn floats_are_read_as_rust_reads_them() {
     // big integers in the interpreter of a debug build need more stack than WebAssembly's 4 MiB
     if cfg!(target_family = "wasm") {

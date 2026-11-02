@@ -1,0 +1,163 @@
+// The tape of rt_diff.krs (the runtime of `grad` in WebAssembly, written in Kairós) against the
+// interpreter's `grad`, bit for bit: each case runs a function under `grad`, and builds the same
+// tape by hand. kairos run diff.krs <how many>
+import "../../compiler/rt.krs"
+import "../../compiler/rt_diff.krs"
+
+fn same(a: f64, b: f64) -> bool {
+    if is_nan(a) or is_nan(b) { return is_nan(a) and is_nan(b) }
+    to_bits(a) == to_bits(b)
+}
+
+var count = 0
+var bad = 0
+
+fn sc(x: f64) -> RtT {
+    rt_t_scalar(x, false)
+}
+
+fn v(t: Tensor[asset; f64]) -> RtT {
+    RtT { axes: [2], shape: [size(t, asset)], data: to_list(t), boolean: false }
+}
+
+fn check(what: str, got: RtT, want: List[f64]) -> i64 {
+    var b = 0
+    if len(got.data) != len(want) {
+        print("DIFF", what, "sizes", len(got.data), len(want))
+        return 1
+    }
+    for i in 0..len(want) {
+        if not same(got.data[i], want[i]) {
+            b += 1
+            print("DIFF", what, i, got.data[i], want[i])
+        }
+    }
+    b
+}
+
+// ---------------------------------------------------------------- scalars: + - * / % ^ and maps
+fn f1(x: f64) -> f64 {
+    let y = x * x + 3.0 * x - x / 7.0
+    let z = y % 5.0 + exp(x) * ln(x) - sqrt(x) + abs(-x)
+    z ^ 1.5 + tanh(z) + sigmoid(-z) + softplus(z) + relu(x - 2.0) + x ^ x
+}
+
+fn tape1(x0: f64) -> RtT {
+    var tp = d_new()
+    let x = d_leaf(inout tp, sc(x0))
+    let xx = d_bin(inout tp, 2, x, x, sc(x0 * x0))
+    let c3 = d_const(inout tp, sc(3.0))
+    let tx = d_bin(inout tp, 2, c3, x, sc(3.0 * x0))
+    let s1 = d_bin(inout tp, 0, xx, tx, sc(x0 * x0 + 3.0 * x0))
+    let c7 = d_const(inout tp, sc(7.0))
+    let d7 = d_bin(inout tp, 3, x, c7, sc(x0 / 7.0))
+    let yv = x0 * x0 + 3.0 * x0 - x0 / 7.0
+    let y = d_bin(inout tp, 1, s1, d7, sc(yv))
+    let c5 = d_const(inout tp, sc(5.0))
+    let ym = d_bin(inout tp, 4, y, c5, sc(yv % 5.0))
+    let ex = d_map(inout tp, 4, x, sc(exp(x0)))
+    let lx = d_map(inout tp, 5, x, sc(ln(x0)))
+    let el = d_bin(inout tp, 2, ex, lx, sc(exp(x0) * ln(x0)))
+    let a1 = d_bin(inout tp, 0, ym, el, sc(yv % 5.0 + exp(x0) * ln(x0)))
+    let sq = d_map(inout tp, 3, x, sc(sqrt(x0)))
+    let a2 = d_bin(inout tp, 1, a1, sq, sc(yv % 5.0 + exp(x0) * ln(x0) - sqrt(x0)))
+    let nx = d_map(inout tp, 0, x, sc(-x0))
+    let ab = d_map(inout tp, 2, nx, sc(abs(-x0)))
+    let zv = yv % 5.0 + exp(x0) * ln(x0) - sqrt(x0) + abs(-x0)
+    let z = d_bin(inout tp, 0, a2, ab, sc(zv))
+    let c15 = d_const(inout tp, sc(1.5))
+    let p = d_bin(inout tp, 5, z, c15, sc(zv ^ 1.5))
+    let th = d_map(inout tp, 9, z, sc(tanh(zv)))
+    let r1 = d_bin(inout tp, 0, p, th, sc(zv ^ 1.5 + tanh(zv)))
+    let nz = d_map(inout tp, 0, z, sc(-zv))
+    let sg = d_map(inout tp, 10, nz, sc(sigmoid(-zv)))
+    let r2 = d_bin(inout tp, 0, r1, sg, sc(zv ^ 1.5 + tanh(zv) + sigmoid(-zv)))
+    let spv = d_map(inout tp, 12, z, sc(softplus(zv)))
+    let r3 = d_bin(inout tp, 0, r2, spv, sc(zv ^ 1.5 + tanh(zv) + sigmoid(-zv) + softplus(zv)))
+    let c2 = d_const(inout tp, sc(2.0))
+    let xm2 = d_bin(inout tp, 1, x, c2, sc(x0 - 2.0))
+    let re = d_map(inout tp, 11, xm2, sc(relu(x0 - 2.0)))
+    let r4 = d_bin(inout tp, 0, r3, re, sc(zv ^ 1.5 + tanh(zv) + sigmoid(-zv) + softplus(zv) + relu(x0 - 2.0)))
+    let xx2 = d_bin(inout tp, 5, x, x, sc(x0 ^ x0))
+    let out = d_bin(inout tp, 0, r4, xx2, sc(zv ^ 1.5 + tanh(zv) + sigmoid(-zv) + softplus(zv) + relu(x0 - 2.0) + x0 ^ x0))
+    d_grad(tp, d_backward(tp, out), x)
+}
+
+// ---------------------------------------------------------------- tensors: reductions
+fn f2(t: Tensor[asset; f64]) -> f64 {
+    sum(t * t) + mean(exp(t)) + prod(t) + max(t) - min(t * 2.0) + nan_sum(t) + nan_mean(t)
+}
+
+fn tape2(t0: Tensor[asset; f64]) -> RtT {
+    var tp = d_new()
+    let t = d_leaf(inout tp, v(t0))
+    let tt = d_bin(inout tp, 2, t, t, v(t0 * t0))
+    let s = d_reduce(inout tp, 0, tt, -1, sc(sum(t0 * t0)))
+    let e = d_map(inout tp, 4, t, v(exp(t0)))
+    let m = d_reduce(inout tp, 1, e, -1, sc(mean(exp(t0))))
+    let a1 = d_bin(inout tp, 0, s, m, sc(sum(t0 * t0) + mean(exp(t0))))
+    let p = d_reduce(inout tp, 2, t, -1, sc(prod(t0)))
+    let a2 = d_bin(inout tp, 0, a1, p, sc(sum(t0 * t0) + mean(exp(t0)) + prod(t0)))
+    let mx = d_reduce(inout tp, 3, t, -1, sc(max(t0)))
+    let a3 = d_bin(inout tp, 0, a2, mx, sc(sum(t0 * t0) + mean(exp(t0)) + prod(t0) + max(t0)))
+    let c2 = d_const(inout tp, sc(2.0))
+    let t2 = d_bin(inout tp, 2, t, c2, v(t0 * 2.0))
+    let mn = d_reduce(inout tp, 4, t2, -1, sc(min(t0 * 2.0)))
+    let a4v = sum(t0 * t0) + mean(exp(t0)) + prod(t0) + max(t0) - min(t0 * 2.0)
+    let a4 = d_bin(inout tp, 1, a3, mn, sc(a4v))
+    let ns = d_reduce(inout tp, 5, t, -1, sc(nan_sum(t0)))
+    let a5 = d_bin(inout tp, 0, a4, ns, sc(a4v + nan_sum(t0)))
+    let nm = d_reduce(inout tp, 6, t, -1, sc(nan_mean(t0)))
+    let out = d_bin(inout tp, 0, a5, nm, sc(a4v + nan_sum(t0) + nan_mean(t0)))
+    d_grad(tp, d_backward(tp, out), t)
+}
+
+// ---------------------------------------------------------------- selections, where, stacks
+fn f3(t: Tensor[asset; f64]) -> f64 {
+    var u = t * 3.0
+    u[asset: 1] = t[asset: 0] * t[asset: 2]
+    let w = where(u > 2.0, u, t)
+    let xs = to_list(w)
+    let st = tensor([xs[0], xs[1] * 2.0, xs[2]], asset)
+    sum(st * t)
+}
+
+fn tape3(t0: Tensor[asset; f64]) -> RtT {
+    var tp = d_new()
+    let t = d_leaf(inout tp, v(t0))
+    let c3 = d_const(inout tp, sc(3.0))
+    var uv = t0 * 3.0
+    var u = d_bin(inout tp, 2, t, c3, v(uv))
+    let s0 = d_select(inout tp, t, [(2, 0, 0, 1)], sc(t0[asset: 0]))
+    let s2 = d_select(inout tp, t, [(2, 0, 2, 3)], sc(t0[asset: 2]))
+    let pr = d_bin(inout tp, 2, s0, s2, sc(t0[asset: 0] * t0[asset: 2]))
+    uv[asset: 1] = t0[asset: 0] * t0[asset: 2]
+    u = d_assign(inout tp, u, pr, [(2, 0, 1, 2)], v(uv))
+    let cond = uv > 2.0
+    let wv = where(cond, uv, t0)
+    let w = d_where(inout tp, RtT { axes: [2], shape: [3], data: to_list(where(cond, 1.0, 0.0)), boolean: true }, u, t, v(wv))
+    let xs = to_list(wv)
+    var parts: List[i64] = []
+    for k in 0..3 { parts.push(d_elem(inout tp, w, k, sc(xs[k]))) }
+    let c2 = d_const(inout tp, sc(2.0))
+    let x1 = d_bin(inout tp, 2, parts[1], c2, sc(xs[1] * 2.0))
+    let stv = tensor([xs[0], xs[1] * 2.0, xs[2]], asset)
+    let st = d_stack(inout tp, [parts[0], x1, parts[2]], v(stv))
+    let pt = d_bin(inout tp, 2, st, t, v(stv * t0))
+    let out = d_reduce(inout tp, 0, pt, -1, sc(sum(stv * t0)))
+    d_grad(tp, d_backward(tp, out), t)
+}
+
+let n = parse_int(args()[0])
+var seed = 1
+for i in 0..n {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    let x0 = 0.5 + float(seed % 1000) / 250.0
+    count += 1
+    bad += check("f1 " + str(x0), tape1(x0), [grad(f1)(x0)])
+    let t0 = tensor([x0, 1.5 - x0 / 3.0, float(seed % 7) - 2.5], asset)
+    count += 2
+    bad += check("f2", tape2(t0), to_list(grad(f2)(t0)))
+    bad += check("f3", tape3(t0), to_list(grad(f3)(t0)))
+}
+print(count, "gradients,", bad, "different")
