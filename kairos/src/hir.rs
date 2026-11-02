@@ -153,6 +153,10 @@ pub enum Builtin {
     TryReadLines,
     TryHttpGet,
     TryDownload,
+    /// M16: `read_line()`, a line of the standard input with its line break ("" at its end), and
+    /// `print_raw(s)`, a text to the standard output without a line break (the REPL's prompt)
+    ReadLine,
+    PrintRaw,
     // ---- M9: maps
     /// `keys(m)`, `values(m)`, `items(m)`: in insertion order
     Keys,
@@ -221,6 +225,8 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("try_read_lines", Builtin::TryReadLines),
     ("try_http_get", Builtin::TryHttpGet),
     ("try_download", Builtin::TryDownload),
+    ("read_line", Builtin::ReadLine),
+    ("print_raw", Builtin::PrintRaw),
     ("len", Builtin::Len),
     ("push", Builtin::Push),
     ("pop", Builtin::Pop),

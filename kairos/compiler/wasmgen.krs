@@ -1301,6 +1301,15 @@ fn builtin_w(inout g: WGen, e: H) {
         for l in parts { drop_tmp(inout g, l, Ty.TStr) }
         return
     }
+    if b == "print_raw" {
+        let x = args[0].kids[0]
+        let t = gen_borrow(inout g, x, true)
+        let l = new_local(inout g, wt_i32())
+        lset(inout g, l)
+        write_obj(inout g, 1, l)
+        return drop_tmp(inout g, t, x.t)
+    }
+    if b == "read_line" { return call_f(inout g, rt_fn(inout g, "rt_read_line")) }
     if b == "exit" {
         // the standard output is written as it goes: nothing to flush
         gen(inout g, args[0].kids[0])

@@ -989,7 +989,7 @@ impl<'a> An<'a> {
                 Ok(self.load_place(p, f)?.no_int())
             }
             B::Sort | B::Reverse => Ok(TV::ALWAYS),
-            B::Print | B::Assert | B::Eprint | B::Exit => {
+            B::Print | B::Assert | B::Eprint | B::Exit | B::PrintRaw => {
                 for a in args {
                     self.val(a, f)?;
                 }
@@ -1069,7 +1069,7 @@ impl<'a> An<'a> {
             // what is in a file has no known time: it cannot reach a decision unless declared
             // with `observed` (configuration and market data look the same to the compiler)
             B::ReadText | B::FileExists | B::ListDir | B::HttpGet | B::Download | B::ReadLines | B::ReadBytes | B::FileSize | B::FileDate | B::HttpGetAll
-            | B::TryReadText | B::TryReadBytes | B::TryListDir | B::TryReadLines | B::TryHttpGet | B::TryDownload => {
+            | B::TryReadText | B::TryReadBytes | B::TryListDir | B::TryReadLines | B::TryHttpGet | B::TryDownload | B::ReadLine => {
                 for a in args {
                     self.val(a, f)?;
                 }

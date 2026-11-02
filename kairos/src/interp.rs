@@ -686,6 +686,19 @@ impl<'a> Interp<'a> {
                 eprintln!("{s}");
                 Ok(Value::Unit)
             }
+            Builtin::PrintRaw => {
+                let _ = write!(self.out, "{}", str_of(&v[0]));
+                let _ = self.out.flush();
+                Ok(Value::Unit)
+            }
+            Builtin::ReadLine => {
+                let _ = self.out.flush();
+                let mut s = String::new();
+                if std::io::stdin().read_line(&mut s).is_err() {
+                    s.clear();
+                }
+                Ok(Value::Str(s.into()))
+            }
             Builtin::Exit => {
                 let _ = self.out.flush();
                 let code = as_int(v[0].clone());

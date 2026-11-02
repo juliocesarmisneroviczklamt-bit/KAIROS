@@ -61,6 +61,9 @@ struct Wasi {
     next_fd: i32,
     args: Vec<String>,
     env: Vec<String>,
+    /// the standard input, and how much of it was read
+    input: Vec<u8>,
+    input_at: usize,
 }
 
 /// WASI's code for an error of the file system.
@@ -135,6 +138,11 @@ fn run_wasm_with(bytes: &[u8], args: Vec<String>) -> (String, String, i32) {
 
 /// The same with variables set in its environment.
 fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (String, String, i32) {
+    run_wasm_io(bytes, args, extra, b"")
+}
+
+/// The same with a standard input.
+fn run_wasm_io(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)], input: &[u8]) -> (String, String, i32) {
     use std::io::{Read, Write};
     use wasmi::{Config, Engine, Linker, Module, Store};
     // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
@@ -145,7 +153,7 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
     let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, args, env: wasi_environ(extra), ..Wasi::default() });
+    let mut store = Store::new(&engine, Wasi { root, next_fd: 4, args, env: wasi_environ(extra), input: input.to_vec(), ..Wasi::default() });
     let mut linker = <Linker<Wasi>>::new(&engine);
     let w = "wasi_snapshot_preview1";
     linker
@@ -255,12 +263,20 @@ fn run_wasm_env(bytes: &[u8], args: Vec<String>, extra: &[(&str, &str)]) -> (Str
                 let ptr = u32_at(&c, iovs + 8 * k);
                 let len = u32_at(&c, iovs + 8 * k + 4);
                 let mut buf = vec![0u8; len as u32 as usize];
-                let got = match c.data_mut().files.get_mut(&fd) {
-                    Some(f) => match f.read(&mut buf) {
-                        Ok(g) => g,
-                        Err(e) => return errno(&e),
-                    },
-                    None => return 8,
+                let got = if fd == 0 {
+                    let w = c.data_mut();
+                    let g = (w.input.len() - w.input_at).min(buf.len());
+                    buf[..g].copy_from_slice(&w.input[w.input_at..w.input_at + g]);
+                    w.input_at += g;
+                    g
+                } else {
+                    match c.data_mut().files.get_mut(&fd) {
+                        Some(f) => match f.read(&mut buf) {
+                            Ok(g) => g,
+                            Err(e) => return errno(&e),
+                        },
+                        None => return 8,
+                    }
                 };
                 mem_write(&mut c, ptr, &buf[..got]);
                 total += got;
@@ -672,5 +688,97 @@ fn the_standard_library_the_command_in_kairos_carries_is_up_to_date() {
         let kept = std::fs::read_to_string(root.join("compiler").join("std_embed.krs")).unwrap();
         // (a checkout may keep the file with CR LF)
         assert!(made.replace("\r\n", "\n") == kept.replace("\r\n", "\n"), "compiler/std_embed.krs is stale: `kairos run kairos/compiler/gen_std.krs kairos`");
+    })
+}
+
+/// M16: the `kairos` command written in Kairós (compiler/kairos.krs), compiled to WebAssembly by
+/// the compiler written in Kairós, does what the Rust command does: each subcommand gives the same
+/// output, the same errors and the same exit code, and a REPL session given on its standard input
+/// goes the same way.
+#[test]
+fn the_command_written_in_kairos_runs_like_the_rust_one() {
+    if cfg!(target_family = "wasm") {
+        return;
+    }
+    on_big_stack(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(std::env::current_dir().unwrap().canonicalize().unwrap(), root.canonicalize().unwrap(), "run from the crate's folder");
+        let out = std::env::temp_dir().join(format!("kairos-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let report = run_compiler("kw.krs", vec!["std".to_string(), out.to_string_lossy().into_owned(), "compiler/kairos.krs".to_string()]);
+        assert_eq!(report, "", "the command compiles to WebAssembly");
+        let cmd = std::fs::read(out.join("kairos.wasm")).unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        // what the programs write goes to a folder of their own (no registry, no ledger of the lab)
+        let tmp = root.join("tests/wasm/tmp/cmd");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let results = tmp.to_string_lossy().into_owned();
+        std::fs::write(tmp.join("show_args.krs"), "print(args())\nprint(len(args()))\n").unwrap();
+        std::fs::write(tmp.join("lib.krs"), "fn twice(n: i64) -> i64 { 2 * n }\nprint(\"lib loaded\")\n").unwrap();
+        // images for `exec`, written by the compiler in Kairós, and two that are not right
+        let kim = tmp.join("kim");
+        let progs = ["basics", "closures", "grad", "rt_div"];
+        let mut kc = vec!["std".to_string(), kim.to_string_lossy().into_owned()];
+        kc.extend(progs.iter().map(|p| format!("tests/programs/{p}.krs")));
+        assert_eq!(run_compiler("kc.krs", kc), "", "the images");
+        std::fs::write(kim.join("bad_item.kim"), "kairos-image 1\n(main 0 ())\n(bogus x41)\n").unwrap();
+        std::fs::write(kim.join("bad_body.kim"), "kairos-image 1\n(fn x66 () i64)\n(body 0 0 () - -)\n").unwrap();
+        let rust = |args: &[&str], input: &str| -> (String, String, i32) {
+            let mut p = std::process::Command::new(env!("CARGO_BIN_EXE_kairos"))
+                .args(args)
+                .current_dir(root)
+                .env("KAIROS_RESULTS", &results)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            p.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+            let o = p.wait_with_output().unwrap();
+            (String::from_utf8(o.stdout).unwrap(), String::from_utf8(o.stderr).unwrap(), o.status.code().unwrap_or(-1))
+        };
+        // the text of a system's error is the host's (WASI writes POSIX's, Windows its own)
+        let os = |s: &str| -> String {
+            s.lines()
+                .map(|l| match l.find(": ") {
+                    Some(i) if l.starts_with("cannot read ") => format!("{}: <the system's error>", &l[..i]),
+                    _ => l.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let words = |s: &str| -> Vec<String> { s.split(' ').map(|w| w.to_string()).collect() };
+        let mut lines: Vec<Vec<String>> = ["--version", "-V", "run", "types", "bogus", "check tests/nope.krs", "tests/programs/shebang.krs"].iter().map(|l| words(l)).collect();
+        lines.push(vec!["run".into(), "tests/wasm/tmp/cmd/show_args.krs".into(), "a".into(), "b c".into()]);
+        lines.push(words("tests/wasm/tmp/cmd/show_args.krs x"));
+        for p in progs.iter().chain(["bad_item", "bad_body"].iter()) {
+            lines.push(words(&format!("exec tests/wasm/tmp/cmd/kim/{p}.kim a b")));
+        }
+        lines.push(words("exec tests/programs/basics.krs"));
+        lines.push(words("exec"));
+        for p in ["basics", "closures", "grad", "err_type", "err_future", "rt_div", "rt_index"] {
+            for sub in ["check", "run", "tokens", "ast", "types", "hir"] {
+                lines.push(vec![sub.to_string(), format!("tests/programs/{p}.krs")]);
+            }
+        }
+        for line in &lines {
+            let mut args = vec!["kairos.wasm".to_string()];
+            args.extend(line.iter().cloned());
+            let k = run_wasm_io(&cmd, args, &[("KAIROS_RESULTS", &results)], b"");
+            let r = rust(&line.iter().map(|a| a.as_str()).collect::<Vec<_>>(), "");
+            assert_eq!((k.0, os(&k.1), k.2), (r.0, os(&r.1), r.2), "`kairos {}`: the command written in Kairós and the Rust one differ", line.join(" "));
+        }
+        let session = "1 + 2\nlet x = 5\nx * 2\n\n  :help\n\"abc\"\n[1, 2, 3]\nprint(\"printed\")\n\
+            fn sq(n: i64) -> i64 {\n    n * n\n}\nsq(7)\nlet y: i64 = \"a\"\ny\nvar c = 0\nc += 1\nc\n[1, 2][5]\n\
+            struct P { a: i64, b: str }\nP { a: 1, b: \"q\" }\nlet f = |k: i64| k + x\nf(10)\nmean([1.0, 2.0, 4.0])\n\
+            import \"tests/wasm/tmp/cmd/lib.krs\"\ntwice(21)\nimport \"tests/wasm/tmp/cmd/nope.krs\"\nimport \"std/json.krs\"\n\
+            json_parse(\"[1, 2]\")\nlet = 5\n1 + )\nsq(3)\r\n[\n:q\n]\n\
+            let a = [1,\n2,\n";
+        for input in [session, "1 + 1\n:quit\n2 + 2\n", ""] {
+            let k = run_wasm_io(&cmd, vec!["kairos.wasm".to_string(), "repl".to_string()], &[("KAIROS_RESULTS", &results)], input.as_bytes());
+            let r = rust(&["repl"], input);
+            assert_eq!(k, r, "a REPL session: the command written in Kairós and the Rust one differ:\n{input}");
+        }
+        println!("{} command lines and 3 REPL sessions: the same from the command written in Kairós", lines.len());
     })
 }

@@ -1634,6 +1634,8 @@ fn fixed_sig(name: str) -> (bool, List[Ty], Ty) {
     if name == "try_make_dir" { return (true, [s], s) }
     if name == "try_read_lines" { return (true, [s, Ty.TList(Ty.TTuple([i, s]))], Ty.TTuple([ls, s])) }
     if name == "try_download" { return (true, [s, s], Ty.TTuple([i, s])) }
+    if name == "read_line" { return (true, [], s) }
+    if name == "print_raw" { return (true, [s], u) }
     if name == "from_bits" { return (true, [i], Ty.TFloat) }
     if name == "http_get_all" { return (true, [ls, i], Ty.TList(Ty.TTuple([b, s]))) }
     if name == "download" { return (true, [s, s], i) }

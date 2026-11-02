@@ -1104,6 +1104,36 @@ fn rt_file_date(p: str) -> i64 {
 
 // append_text(p, s): the text at the end of the file, which is created if it is not there (WASI's
 // error code).
+// read_line(): a line of the standard input with its line break ("" at its end), read a byte at a
+// time (what follows the line stays there for the next call); "" when it is not UTF-8, as Rust's
+// read_line leaves it.
+fn rt_read_line() -> str {
+    let io = rt_alloc(16)
+    var cap = 64
+    var buf = rt_alloc(cap)
+    var n = 0
+    while true {
+        wasm_store32(io, buf + n)
+        wasm_store32(io + 4, 1)
+        let e = wasm_wasi_fd_read(0, io, 1, io + 8)
+        if e != 0 or wasm_load32(io + 8) == 0 { break }
+        let c = wasm_load8(buf + n)
+        n += 1
+        if c == 10 { break }
+        if n == cap {
+            let nb = rt_alloc(cap * 2)
+            rt_copy(nb, buf, n)
+            rt_free(buf, cap)
+            buf = nb
+            cap = cap * 2
+        }
+    }
+    let s = if rt_utf8_ok(buf, n) { rt_text_of(buf, n) } else { "" }
+    rt_free(buf, cap)
+    rt_free(io, 16)
+    s
+}
+
 // The try_ builtins: what the plain ones give, and the text of their error ("" when there is none).
 fn rt_try_read_text(p: str) -> (str, str) {
     let r = rt_read_text(p)

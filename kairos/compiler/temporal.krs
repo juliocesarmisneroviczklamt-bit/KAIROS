@@ -970,7 +970,7 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
     }
     if b == "pop" { return tv_no_int(load_place(inout an, ck, args[0].kids[0], inout f)) }
     if b == "sort" or b == "reverse" { return tv_always() }
-    if b == "print" or b == "eprint" or b == "exit" or b == "assert" or b == "zeros" or b == "ones" or b == "zeros_like" {
+    if b == "print" or b == "eprint" or b == "exit" or b == "print_raw" or b == "assert" or b == "zeros" or b == "ones" or b == "zeros_like" {
         for a in args {
             let _ = val(inout an, ck, a, inout f)
             if an.failed { return tv_always() }
@@ -1029,7 +1029,7 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
         return tv_no_int(tv_join(an.bounds, over_time(an, x, ax.0, ax.1, e.lo, e.hi), over_time(an, y, ax.0, ax.1, e.lo, e.hi)))
     }
     if contains(["read_text", "file_exists", "list_dir", "http_get", "download", "read_lines", "read_bytes", "file_size", "file_date", "http_get_all",
-        "try_read_text", "try_read_bytes", "try_list_dir", "try_read_lines", "try_http_get", "try_download"], b) {
+        "try_read_text", "try_read_bytes", "try_list_dir", "try_read_lines", "try_http_get", "try_download", "read_line"], b) {
         // what is in a file has no known time: it cannot reach a decision unless declared
         for a in args {
             let _ = val(inout an, ck, a, inout f)

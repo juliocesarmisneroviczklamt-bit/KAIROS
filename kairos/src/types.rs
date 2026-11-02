@@ -2025,6 +2025,8 @@ impl Checker {
                 (self.fixed_args(&all, &[Ty::Str, keep], sp, name)?, Ty::Tuple(vec![Ty::List(Box::new(Ty::Str)), Ty::Str]))
             }
             Builtin::TryDownload => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Tuple(vec![Ty::Int, Ty::Str])),
+            Builtin::ReadLine => (self.fixed_args(&all, &[], sp, name)?, Ty::Str),
+            Builtin::PrintRaw => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Unit),
             Builtin::FromBits => (self.fixed_args(&all, &[Ty::Int], sp, name)?, Ty::Float),
             Builtin::HttpGetAll => (
                 self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Int], sp, name)?,

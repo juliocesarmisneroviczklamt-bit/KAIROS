@@ -2,6 +2,7 @@
 // ki.krs (`run`, the standard library from a folder) and kairos.krs (every subcommand, the
 // standard library carried in the program) use it.
 import "interp.krs"
+import "image_read.krs"
 
 fn cli_usage() -> str {
     let lines_ = [
@@ -98,6 +99,32 @@ fn cli_file(base: Checker, path: str, prog_args: List[str], run: bool) -> i64 {
         return 0
     }
     var st = ki_new(ck, cli_sources(ck, none), prog_args)
+    st.prog = cli_stem(path)
+    if not ki_run(inout st) {
+        eprint(cli_chomp(ki_render(st)))
+        return 1
+    }
+    0
+}
+
+// `kairos exec <file.kim> [args]` (src/main.rs exec_cmd): runs the image of a program, on a new
+// checker (std_dir, srcs: where the standard library's text is, for messages).
+fn cli_exec(std_dir: str, srcs: Map[str, str], path: str, prog_args: List[str]) -> i64 {
+    let src = try_read_text(path)
+    if src.1 != "" {
+        eprint("cannot read " + path + ": " + src.1)
+        return 2
+    }
+    var base = new_checker(std_dir)
+    base.std_srcs = srcs
+    let r = image_read(base, src.0)
+    if r.0 != "" {
+        eprint(path + ": " + r.0)
+        return 2
+    }
+    let none: Map[str, str] = [:]
+    let known: List[str] = []
+    var st = ki_new(r.1, cli_srcs_of(r.1, known, none), prog_args)
     st.prog = cli_stem(path)
     if not ki_run(inout st) {
         eprint(cli_chomp(ki_render(st)))
@@ -204,5 +231,168 @@ fn cli_ledger(rest: List[str]) -> i64 {
         return 1
     }
     print(cli_chomp(text))
+    0
+}
+
+// ------------------------------------------------------------------ the REPL (src/main.rs repl)
+
+// How many ( [ { are open in the text (strings and comments aside): the REPL reads on while any is.
+fn cli_open_delims(src: str) -> i64 {
+    var depth = 0
+    var in_str = false
+    var prev = 0
+    for line in lines(src) {
+        let code = if in_str { line } else { split(line, "//")[0] }
+        for c in codes(code) {
+            if in_str {
+                if c == 34 and prev != 92 { in_str = false }
+            } else if c == 34 {
+                in_str = true
+            } else if c == 40 or c == 91 or c == 123 {
+                depth += 1
+            } else if c == 41 or c == 93 or c == 125 {
+                depth -= 1
+            }
+            prev = c
+        }
+    }
+    depth
+}
+
+// The source of each file the checker read: `known` for the first ones, then the others (the
+// session's inputs from `texts`).
+fn cli_srcs_of(ck: Checker, known: List[str], texts: Map[str, str]) -> List[str] {
+    var out = known
+    for i in len(known)..len(ck.files) {
+        let f = ck.files[i]
+        if contains(texts, f) {
+            out.push(texts[f])
+        } else if f == "<prelude>" or starts_with(f, "<std/") {
+            out.push(cli_std_text(ck, f))
+        } else {
+            out.push(try_read_text(f).0)
+        }
+    }
+    out
+}
+
+// Runs the top-level statements from the t0-th on, on the session's frame (a runtime error is
+// written): (no error, whether the last one shows its value, its text). A statement of the file
+// `echo` shows its value when it is not `()`.
+fn cli_repl_run(inout st: KSt, inout f: List[KV], texts: Map[str, str], t0: i64, echo: i64) -> (bool, bool, str) {
+    st.srcs = cli_srcs_of(st.ck, st.srcs, texts)
+    while len(f) < len(st.ck.main.slot_tys) { f.push(st.unit) }
+    // each input runs as a new interpreter on the session's frame (src/session.rs run)
+    st.ctl = 0
+    st.depth = 0
+    st.tracking = false
+    st.tape = rt_d_new()
+    var shows = false
+    var text = ""
+    for i in t0..len(st.ck.all_tops) {
+        let t = st.ck.all_tops[i]
+        let v = ki_ev(inout st, inout f, t)
+        if st.ctl == 4 {
+            eprint(cli_chomp(ki_render(st)))
+            st.ctl = 0
+            return (false, false, "")
+        }
+        st.ctl = 0
+        shows = t.f == echo and v.k != 0
+        text = if shows { ki_show(st, v, false) } else { "" }
+    }
+    (true, shows, text)
+}
+
+// A check that failed: its error is written and the session goes back to `back`.
+fn cli_repl_undo(inout st: KSt, back: Checker, texts: Map[str, str], file: i64) {
+    if st.ck.efile < 0 { st.ck.efile = file }
+    eprint(cli_chomp(cli_check_error(st.ck, cli_srcs_of(st.ck, st.srcs, texts))))
+    st.ck = back
+}
+
+// One input, as the Rust session takes it: each import checked and run first (each file once),
+// then the input's own items, checked against everything before them, and run. A failed check
+// leaves the session as it was before it.
+fn cli_repl_input(inout st: KSt, inout f: List[KV], texts: Map[str, str], name: str, src: str) {
+    var back = st.ck
+    let file = len(st.ck.files)
+    st.ck.files.push(name)
+    let r = parse_program(src)
+    if not r.0 {
+        ck_fail(inout st.ck, r.2.code, r.2.elo, r.2.ehi, r.2.msg, r.2.hint)
+        cli_repl_undo(inout st, back, texts, file)
+        return
+    }
+    var items: List[Node] = []
+    for it in r.1 {
+        if it.kind != "import" {
+            items.push(it)
+            continue
+        }
+        let rp = resolve_import(inout st.ck, name, unhex(it.text), it.lo, it.hi)
+        if st.ck.failed {
+            cli_repl_undo(inout st, back, texts, file)
+            return
+        }
+        if contains(st.ck.imported, rp.1) { continue }
+        st.ck.imported[rp.1] = true
+        let t0 = len(st.ck.all_tops)
+        check_file(inout st.ck, if starts_with(rp.1, "<") { rp.1 } else { rp.0 }, ck_text(st.ck, rp))
+        if st.ck.failed {
+            cli_repl_undo(inout st, back, texts, file)
+            return
+        }
+        if not cli_repl_run(inout st, inout f, texts, t0, -1).0 { return }
+        back = st.ck
+    }
+    let t0 = len(st.ck.all_tops)
+    check_items(inout st.ck, items, file)
+    if st.ck.failed {
+        cli_repl_undo(inout st, back, texts, file)
+        return
+    }
+    let run = cli_repl_run(inout st, inout f, texts, t0, file)
+    if run.1 { print("= " + run.2) }
+}
+
+// `kairos repl` (and `kairos` alone): an interactive session; the exit code.
+fn cli_repl(base: Checker, version: str) -> i64 {
+    print("Kairós " + version + " — type :help for help, :q to quit")
+    var texts: Map[str, str] = [:]
+    let none: List[str] = []
+    var st = ki_new(base, none, none)
+    st.prog = "repl"
+    var f: List[KV] = []
+    // the prelude's statements
+    let _ = cli_repl_run(inout st, inout f, texts, 0, -1)
+    var buf = ""
+    var n = 0
+    while true {
+        print_raw(if buf == "" { "kai> " } else { "...  " })
+        let line = read_line()
+        if line == "" {
+            print("")
+            return 0
+        }
+        let t = trim(line)
+        if buf == "" {
+            if t == ":q" or t == ":quit" or t == ":exit" { return 0 }
+            if t == ":help" or t == ":h" {
+                print("Write declarations (fn, struct, enum) or statements; the value of an expression is shown.")
+                print("Multi-line input continues while ( [ { are open. Standard library: mean, variance,")
+                print("std_dev, product, compound, wealth, max_drawdown, sharpe (std/prelude.krs).")
+                continue
+            }
+            if t == "" { continue }
+        }
+        buf = buf + line
+        if cli_open_delims(buf) > 0 { continue }
+        n += 1
+        let name = "<repl:" + str(n) + ">"
+        texts[name] = buf
+        cli_repl_input(inout st, inout f, texts, name, buf)
+        buf = ""
+    }
     0
 }

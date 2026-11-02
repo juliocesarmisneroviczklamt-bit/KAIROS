@@ -1,0 +1,380 @@
+// Reading the image of a program (image.krs writes it; `kairos run compiler/kc.krs` makes one):
+// the checker's tables and the HIR come back, so the program runs without being checked again
+// (`kairos exec`), as src/types/image.rs `Checker::from_image` does it, with its error messages.
+// The nodes are read as they were written (the Rust reader turns each into its own HIR, and so
+// also rejects a node it does not know; this one leaves that to the run).
+import "front.krs"
+
+// A line of the image: an atom (its text in `a`) or a list.
+struct Sx {
+    list: bool,
+    a: str,
+    xs: List[Sx],
+}
+
+// what was read, and the first error
+struct ImgRd {
+    err: str,
+}
+
+fn img_fail(inout r: ImgRd, msg: str) {
+    if r.err == "" { r.err = msg }
+}
+
+fn sx_atom(a: str) -> Sx {
+    let none: List[Sx] = []
+    Sx { list: false, a: a, xs: none }
+}
+
+// One line: an S-expression of atoms (ASCII, separated by blanks and parentheses).
+fn sx_parse(inout r: ImgRd, line: str) -> Sx {
+    var s = line
+    // (the blanks of Rust's is_ascii_whitespace)
+    for c in [9, 10, 12, 13] { s = replace(s, from_codes([c]), " ") }
+    s = replace(replace(s, "(", " ( "), ")", " ) ")
+    let none: List[Sx] = []
+    var stack: List[List[Sx]] = [none]
+    for t in split(s, " ") {
+        if t == "" { continue }
+        if t == "(" {
+            stack.push(none)
+        } else if t == ")" {
+            if len(stack) < 2 {
+                img_fail(inout r, "unbalanced `)`")
+                return sx_atom("")
+            }
+            let l = stack.pop()
+            stack[len(stack) - 1].push(Sx { list: true, a: "", xs: l })
+        } else {
+            stack[len(stack) - 1].push(sx_atom(t))
+        }
+    }
+    if len(stack) == 1 and len(stack[0]) == 1 { return stack[0][0] }
+    img_fail(inout r, "malformed line")
+    sx_atom("")
+}
+
+fn img_at(inout r: ImgRd, l: List[Sx], k: i64) -> Sx {
+    if k < len(l) { return l[k] }
+    img_fail(inout r, "missing part")
+    sx_atom("")
+}
+
+fn img_atom(inout r: ImgRd, s: Sx) -> str {
+    if s.list { img_fail(inout r, "expected an atom") }
+    s.a
+}
+
+fn img_items(inout r: ImgRd, s: Sx) -> List[Sx] {
+    if not s.list { img_fail(inout r, "expected a list, found `" + s.a + "`") }
+    s.xs
+}
+
+// the parts of a list from the k-th on
+fn img_from(l: List[Sx], k: i64) -> List[Sx] {
+    var out: List[Sx] = []
+    for i in k..len(l) { out.push(l[i]) }
+    out
+}
+
+// Is the text an i64 as Rust's `parse` reads it (a sign, then digits, in range)?
+fn img_int_ok(a: str) -> bool {
+    let cs = codes(a)
+    var i = 0
+    var neg = false
+    if len(cs) > 0 and (cs[0] == 43 or cs[0] == 45) {
+        neg = cs[0] == 45
+        i = 1
+    }
+    if i >= len(cs) { return false }
+    var digits = []
+    for k in i..len(cs) {
+        if cs[k] < 48 or cs[k] > 57 { return false }
+        digits.push(cs[k])
+    }
+    // leading zeros do not count
+    var first = 0
+    while first < len(digits) - 1 and digits[first] == 48 { first += 1 }
+    var ds = []
+    for k in first..len(digits) { ds.push(digits[k]) }
+    if len(ds) < 19 { return true }
+    if len(ds) > 19 { return false }
+    let lim = codes(if neg { "9223372036854775808" } else { "9223372036854775807" })
+    for k in 0..19 {
+        if ds[k] != lim[k] { return ds[k] < lim[k] }
+    }
+    true
+}
+
+fn img_num(inout r: ImgRd, s: Sx) -> i64 {
+    let a = img_atom(inout r, s)
+    if r.err != "" { return 0 }
+    if not img_int_ok(a) {
+        img_fail(inout r, "expected a number, found `" + a + "`")
+        return 0
+    }
+    // (parse_int has no `+`)
+    parse_int(if starts_with(a, "+") { substr(a, 1, len(a) - 1) } else { a })
+}
+
+fn img_idx(inout r: ImgRd, s: Sx) -> i64 {
+    let n = img_num(inout r, s)
+    if r.err != "" { return 0 }
+    if n < 0 or n > 4294967295 { img_fail(inout r, "expected an index, found " + str(n)) }
+    n
+}
+
+fn img_hex(h: str) -> i64 {
+    let cs = codes(h)
+    if len(cs) == 0 { return -1 }
+    var v = 0
+    for c in cs {
+        var d = -1
+        if c >= 48 and c <= 57 { d = c - 48 }
+        if c >= 97 and c <= 102 { d = c - 87 }
+        if c >= 65 and c <= 70 { d = c - 55 }
+        if d < 0 or v > 1114111 { return -1 }
+        v = v * 16 + d
+    }
+    v
+}
+
+// `x61.62` -> "ab"
+fn img_text(inout r: ImgRd, s: Sx) -> str {
+    let a = img_atom(inout r, s)
+    if r.err != "" { return "" }
+    if not starts_with(a, "x") {
+        img_fail(inout r, "expected a text, found `" + a + "`")
+        return ""
+    }
+    if a == "x" { return "" }
+    var cs = []
+    for h in split(substr(a, 1, len(a) - 1), ".") {
+        let c = img_hex(h)
+        if c < 0 or c > 1114111 or (c >= 55296 and c <= 57343) {
+            img_fail(inout r, "invalid character `" + h + "`")
+            return ""
+        }
+        cs.push(c)
+    }
+    from_codes(cs)
+}
+
+fn img_ty(inout r: ImgRd, inout ck: Checker, s: Sx) -> Ty {
+    if r.err != "" { return Ty.TUnit }
+    if not s.list {
+        let a = s.a
+        if a == "i64" { return Ty.TInt }
+        if a == "f64" { return Ty.TFloat }
+        if a == "bool" { return Ty.TBool }
+        if a == "str" { return Ty.TStr }
+        if a == "unit" { return Ty.TUnit }
+        if a == "never" { return Ty.TNever }
+        if a == "bytes" { return Ty.TBytes }
+        if a == "holdout" { return Ty.THoldout }
+        img_fail(inout r, "unknown type `" + a + "`")
+        return Ty.TUnit
+    }
+    let l = s.xs
+    let head = img_atom(inout r, img_at(inout r, l, 0))
+    if r.err != "" { return Ty.TUnit }
+    if head == "list" { return Ty.TList(img_ty(inout r, inout ck, img_at(inout r, l, 1))) }
+    if head == "map" {
+        let k = img_ty(inout r, inout ck, img_at(inout r, l, 1))
+        return Ty.TMap(k, img_ty(inout r, inout ck, img_at(inout r, l, 2)))
+    }
+    if head == "tuple" {
+        var ts: List[Ty] = []
+        for x in img_from(l, 1) { ts.push(img_ty(inout r, inout ck, x)) }
+        return Ty.TTuple(ts)
+    }
+    if head == "struct" { return Ty.TStruct(img_idx(inout r, img_at(inout r, l, 1))) }
+    if head == "enum" { return Ty.TEnum(img_idx(inout r, img_at(inout r, l, 1))) }
+    if head == "fn" {
+        var ps: List[Ty] = []
+        for x in img_items(inout r, img_at(inout r, l, 1)) { ps.push(img_ty(inout r, inout ck, x)) }
+        return Ty.TFn(ps, img_ty(inout r, inout ck, img_at(inout r, l, 2)))
+    }
+    if head == "param" { return Ty.TParam(img_idx(inout r, img_at(inout r, l, 1))) }
+    if head == "tensor" {
+        var axes: List[i64] = []
+        for x in img_items(inout r, img_at(inout r, l, 1)) { axes.push(img_idx(inout r, x)) }
+        return Ty.TTensor(axes, img_ty(inout r, inout ck, img_at(inout r, l, 2)))
+    }
+    // a type inference left open: a variable of its kind
+    if head == "var" {
+        let k = img_num(inout r, img_at(inout r, l, 1))
+        return fresh(inout ck, if k == 1 or k == 2 { k } else { 0 })
+    }
+    img_fail(inout r, "unknown type `" + head + "`")
+    Ty.TUnit
+}
+
+fn img_tys(inout r: ImgRd, inout ck: Checker, s: Sx) -> List[Ty] {
+    var out: List[Ty] = []
+    for x in img_items(inout r, s) { out.push(img_ty(inout r, inout ck, x)) }
+    out
+}
+
+// A HIR node: (KIND TEXT N M LO HI FILE CHILD ...); `-` is an absent part.
+fn img_node(inout r: ImgRd, s: Sx) -> H {
+    let none: List[H] = []
+    if r.err != "" { return hk("-", none) }
+    if not s.list {
+        if s.a != "-" { img_fail(inout r, "expected a node, found `" + s.a + "`") }
+        return hk("-", none)
+    }
+    let l = s.xs
+    let kind = img_atom(inout r, img_at(inout r, l, 0))
+    let text = img_text(inout r, img_at(inout r, l, 1))
+    let n = img_num(inout r, img_at(inout r, l, 2))
+    let m = img_num(inout r, img_at(inout r, l, 3))
+    let lo = img_num(inout r, img_at(inout r, l, 4))
+    let hi = img_num(inout r, img_at(inout r, l, 5))
+    let file = img_num(inout r, img_at(inout r, l, 6))
+    var kids: List[H] = []
+    for x in img_from(l, 7) { kids.push(img_node(inout r, x)) }
+    H { kind: kind, text: text, n: n, m: m, kids: kids, lo: lo, hi: hi, f: file, t: Ty.TUnit }
+}
+
+// a node that must be there (Rust's `expr`)
+fn img_expr(inout r: ImgRd, s: Sx) -> H {
+    let h = img_node(inout r, s)
+    if r.err == "" and h.kind == "-" { img_fail(inout r, "an absent expression") }
+    h
+}
+
+fn img_line(inout r: ImgRd, inout ck: Checker, line: str) {
+    let sx = sx_parse(inout r, line)
+    if r.err != "" { return }
+    let l = img_items(inout r, sx)
+    let head = img_atom(inout r, img_at(inout r, l, 0))
+    if r.err != "" { return }
+    if head == "file" {
+        ck.files.push(img_text(inout r, img_at(inout r, l, 2)))
+    } else if head == "axis" {
+        let name = img_text(inout r, img_at(inout r, l, 1))
+        let temporal = img_text(inout r, img_at(inout r, l, 2))
+        if r.err != "" { return }
+        if temporal != "" and temporal != "daily" and temporal != "monthly" {
+            img_fail(inout r, "unknown frequency `" + temporal + "`")
+            return
+        }
+        ck.axis_ids[name] = len(ck.axes)
+        ck.axes.push(AxisDef { name: name, temporal: temporal })
+    } else if head == "tparams" {
+        var ns: List[str] = []
+        for x in img_from(l, 1) { ns.push(img_text(inout r, x)) }
+        ck.type_param_names = ns
+    } else if head == "struct" {
+        let name = img_text(inout r, img_at(inout r, l, 1))
+        var fields: List[(str, Ty)] = []
+        for f in img_from(l, 2) {
+            let fl = img_items(inout r, f)
+            let fname = img_text(inout r, img_at(inout r, fl, 0))
+            fields.push((fname, img_ty(inout r, inout ck, img_at(inout r, fl, 1))))
+        }
+        ck.struct_ids[name] = len(ck.structs)
+        ck.structs.push(StructDef { name: name, fields: fields })
+    } else if head == "enum" {
+        let name = img_text(inout r, img_at(inout r, l, 1))
+        var variants: List[(str, List[Ty])] = []
+        for v in img_from(l, 2) {
+            let vl = img_items(inout r, v)
+            var ts: List[Ty] = []
+            for t in img_from(vl, 1) { ts.push(img_ty(inout r, inout ck, t)) }
+            variants.push((img_text(inout r, img_at(inout r, vl, 0)), ts))
+        }
+        ck.enum_ids[name] = len(ck.enums)
+        ck.enums.push(EnumDef { name: name, variants: variants })
+    } else if head == "protocol" {
+        let name = img_text(inout r, img_at(inout r, l, 1))
+        let until = img_num(inout r, img_at(inout r, l, 2))
+        let from = img_num(inout r, img_at(inout r, l, 3))
+        let min_months = img_num(inout r, img_at(inout r, l, 4))
+        let rule = img_text(inout r, img_at(inout r, l, 5))
+        ck.protocols.push(ProtoDef { name: name, research_until: until, holdout_from: from, min_months: min_months, rule: rule })
+    } else if head == "fn" {
+        let name = img_text(inout r, img_at(inout r, l, 1))
+        var tps: List[i64] = []
+        for x in img_items(inout r, img_at(inout r, l, 2)) { tps.push(img_idx(inout r, x)) }
+        let ret = img_ty(inout r, inout ck, img_at(inout r, l, 3))
+        var params: List[(str, Ty, bool)] = []
+        for p in img_from(l, 4) {
+            let pl = img_items(inout r, p)
+            let pname = img_text(inout r, img_at(inout r, pl, 0))
+            let pty = img_ty(inout r, inout ck, img_at(inout r, pl, 2))
+            params.push((pname, pty, img_num(inout r, img_at(inout r, pl, 1)) == 1))
+        }
+        let none: List[Ty] = []
+        let nk: List[H] = []
+        ck.fn_ids[name] = len(ck.sigs)
+        ck.sigs.push(FnSig { name: name, params: params, ret: ret, type_params: tps })
+        ck.bodies.push(none)
+        ck.has_body.push(false)
+        ck.fn_hir.push(hk("-", nk))
+        ck.fn_at.push(hk("-", nk))
+    } else if head == "body" {
+        let id = img_idx(inout r, img_at(inout r, l, 1))
+        let n_slots = img_idx(inout r, img_at(inout r, l, 2))
+        var tys = img_tys(inout r, inout ck, img_at(inout r, l, 3))
+        let body = img_expr(inout r, img_at(inout r, l, 4))
+        let known_at = img_node(inout r, img_at(inout r, l, 5))
+        // (`@ end(...)`: its expression is its first part)
+        if r.err == "" and known_at.kind != "-" {
+            if len(known_at.kids) == 0 {
+                img_fail(inout r, "missing part")
+            } else if known_at.kids[0].kind == "-" {
+                img_fail(inout r, "an absent expression")
+            }
+        }
+        if r.err != "" { return }
+        if id >= len(ck.sigs) {
+            img_fail(inout r, "no function " + str(id))
+            return
+        }
+        // the frame has the slots the image says
+        while len(tys) < n_slots { tys.push(Ty.TUnit) }
+        while len(tys) > n_slots { let _ = tys.pop() }
+        ck.bodies[id] = tys
+        ck.has_body[id] = true
+        ck.fn_hir[id] = body
+        ck.fn_at[id] = known_at
+    } else if head == "lambda" {
+        var caps: List[i64] = []
+        for x in img_items(inout r, img_at(inout r, l, 4)) { caps.push(img_idx(inout r, x)) }
+        let n_params = img_idx(inout r, img_at(inout r, l, 2))
+        let n_slots = img_idx(inout r, img_at(inout r, l, 3))
+        let body = img_expr(inout r, img_at(inout r, l, 5))
+        let none: List[Ty] = []
+        ck.lambdas.push(LambdaH { caps: caps, n_params: n_params, n_slots: n_slots, body: body, slot_tys: none })
+    } else if head == "main" {
+        let tys = img_tys(inout r, inout ck, img_at(inout r, l, 2))
+        var main = ctx_new(0, Ty.TUnit)
+        main.n_slots = len(tys)
+        main.slot_tys = tys
+        ck.main = main
+    } else if head == "top" {
+        ck.all_tops.push(img_expr(inout r, img_at(inout r, l, 1)))
+    } else {
+        img_fail(inout r, "unknown item `" + head + "`")
+    }
+}
+
+// The checker of an image, on `base` (a new checker: the image holds the prelude and every axis):
+// (the error or "", the checker).
+fn image_read(base: Checker, image: str) -> (str, Checker) {
+    var ck = base
+    ck.axes = []
+    let no_ids: Map[str, i64] = [:]
+    ck.axis_ids = no_ids
+    let ls = lines(image)
+    if len(ls) == 0 or ls[0] != "kairos-image 1" { return ("not an image of a Kairós program (version 1)", ck) }
+    var r = ImgRd { err: "" }
+    for k in 1..len(ls) {
+        if trim(ls[k]) == "" { continue }
+        img_line(inout r, inout ck, ls[k])
+        if r.err != "" { return ("line " + str(k + 1) + ": " + r.err, ck) }
+    }
+    ("", ck)
+}

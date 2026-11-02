@@ -15,12 +15,20 @@ fn cli_rest(a: List[str], from: i64) -> List[str] {
 // `kairos <command> ...`: the exit code
 fn cli_main(a: List[str]) -> i64 {
     let cmd = if len(a) > 0 { a[0] } else { "repl" }
+    if cmd == "repl" { return cli_repl(cli_checker("", std_embedded()), std_version()) }
     if cmd == "run" or cmd == "check" {
         if len(a) < 2 {
             eprint(cli_usage())
             return 2
         }
         return cli_file(cli_checker("", std_embedded()), a[1], cli_rest(a, 2), cmd == "run")
+    }
+    if cmd == "exec" {
+        if len(a) < 2 {
+            eprint(cli_usage())
+            return 2
+        }
+        return cli_exec("", std_embedded(), a[1], cli_rest(a, 2))
     }
     if cmd == "tokens" or cmd == "ast" {
         if len(a) < 2 {

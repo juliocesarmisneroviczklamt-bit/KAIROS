@@ -1828,6 +1828,11 @@ fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
         exit(vs[0].n)
         return st.unit
     }
+    if b == "read_line" { return kv_s(st, read_line()) }
+    if b == "print_raw" {
+        print_raw(vs[0].s)
+        return st.unit
+    }
     if b == "args" { return kv_str_list(st, st.args) }
     if b == "env" { return kv_s(st, env(vs[0].s)) }
     if b == "today" { return kv_i(st, today()) }
