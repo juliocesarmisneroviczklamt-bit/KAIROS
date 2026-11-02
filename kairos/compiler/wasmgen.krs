@@ -3333,11 +3333,22 @@ fn push_w(inout g: WGen, e: H) {
     let c = place_cell(inout g, e.kids[0].kids[0], false)
     if g.failed { return }
     cell_load(inout g, c)
-    call_f(inout g, glue_fn(inout g, "unique", c.ty))
+    unique_fast(inout g, c.ty)
+    // room for one more: the runtime only when the list is full
+    let o = new_local(inout g, wt_i32())
+    op_u(inout g, 34, o)
+    load_at(inout g, wt_i32(), 4)
+    lget(inout g, o)
+    load_at(inout g, wt_i32(), 8)
+    op(inout g, 79)
+    open(inout g, 4, wt_i32())
+    lget(inout g, o)
     op(inout g, 173)
     call_f(inout g, rt_fn(inout g, "rt_list_room"))
     op(inout g, 167)
-    let o = new_local(inout g, wt_i32())
+    else_(inout g)
+    lget(inout g, o)
+    close(inout g)
     op_u(inout g, 34, o)
     cell_store(inout g, c)
     // the element goes at the end, and the length grows
@@ -3355,6 +3366,22 @@ fn push_w(inout g: WGen, e: H) {
     i32c(inout g, 1)
     op(inout g, 106)
     store_at(inout g, wt_i32(), 4)
+}
+
+// The object on the stack made unique (copied when others have it): the glue only when its count
+// is not 1.
+fn unique_fast(inout g: WGen, t: Ty) {
+    let q = new_local(inout g, wt_i32())
+    op_u(inout g, 34, q)
+    load_at(inout g, wt_i32(), 0)
+    i32c(inout g, 1)
+    op(inout g, 70)
+    open(inout g, 4, wt_i32())
+    lget(inout g, q)
+    else_(inout g)
+    lget(inout g, q)
+    call_f(inout g, glue_fn(inout g, "unique", t))
+    close(inout g)
 }
 
 // `xs.pop()`: the last element (it moves out of the list); R0004 on an empty list
@@ -6221,6 +6248,29 @@ fn runtime_fns(inout g: WGen) {
     g.m.funcs.push(WFunc { tidx: wtype(inout g.m, [i32t], [i32t]), locals: [i32t], code: g.code })
 }
 
+// Each function's name, imports first, as the module has them: a Kairós function's own, an
+// instance's with its types, the glue's with what it does (none when they do not line up).
+fn wasm_names(g: WGen) -> List[str] {
+    var out: List[str] = []
+    for im in g.m.imports { out.push(im.0 + "." + im.1) }
+    for s in ["kairos.write", "kairos.fail", "kairos.print_i64", "kairos.alloc", "kairos.print_str", "kairos.incref", "_start"] { out.push(s) }
+    for id in g.order {
+        if id >= 1000000000 {
+            let inst = g.insts[id - 1000000000]
+            var ts: List[str] = []
+            for p in inst.1 { ts.push(show(g.ck, p.1)) }
+            out.push(g.ck.sigs[inst.0].name + "[" + join(ts, ", ") + "]")
+        } else if id >= 0 {
+            out.push(g.ck.sigs[id].name)
+        } else {
+            let gl = g.glue[-1 - id]
+            out.push("kairos." + gl.0 + " " + show(g.ck, gl.1))
+        }
+    }
+    if len(out) != len(g.m.imports) + len(g.m.funcs) { return [] }
+    out
+}
+
 // The module of a checked program named `prog`: (it compiled, the module, the error: file lo hi
 // message).
 fn wasm_module(ck: Checker, srcs: List[str], prog: str) -> (bool, Bytes, str) {
@@ -6285,6 +6335,7 @@ fn wasm_gen(ck: Checker, srcs: List[str], prog: str, native: bool) -> (bool, WMo
     }
     g.m.exports.push(("_start", 0, f_start()))
     g.m.exports.push(("memory", 2, 0))
+    g.m.names = wasm_names(g)
     // the heap starts after the data, at a multiple of 8
     let heap_at = (g.m.data_at + len(g.m.data) + 7) / 8 * 8
     g.m.globals.push((i32t, heap_at))

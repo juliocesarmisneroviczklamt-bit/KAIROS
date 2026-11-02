@@ -199,12 +199,35 @@ fn rt_t_shape_add(xs: List[i64], x: i64) -> List[i64] {
 }
 
 // The operand with the most axes gives the frame (the first of them on a tie).
+// Whether a tensor has these axes, in this order, with this shape: its offsets are 0, 1, 2...
+fn rt_t_same(t: RtT, axes: List[i64], shape: List[i64]) -> bool {
+    if len(t.axes) != len(axes) { return false }
+    for k in 0..len(axes) {
+        if t.axes[k] != axes[k] or t.shape[k] != shape[k] { return false }
+    }
+    true
+}
+
+// How a tensor's values line up with a layout: 1 one for one (the same layout), 0 one value for
+// all (no axes), -1 through its offsets.
+fn rt_t_step(t: RtT, axes: List[i64], shape: List[i64]) -> i64 {
+    if rt_t_same(t, axes, shape) { return 1 }
+    if len(t.axes) == 0 { return 0 }
+    -1
+}
+
 fn rt_t_map2(op: i64, a: RtT, b: RtT) -> RtT {
     let wide = if len(b.axes) > len(a.axes) { b } else { a }
-    let oa = rt_t_offsets(a, wide.axes, wide.shape)
-    let ob = rt_t_offsets(b, wide.axes, wide.shape)
     var d: List[f64] = []
-    for i in 0..len(oa) { d.push(rt_t_op(op, a.data[oa[i]], b.data[ob[i]])) }
+    let ka = rt_t_step(a, wide.axes, wide.shape)
+    let kb = rt_t_step(b, wide.axes, wide.shape)
+    if ka >= 0 and kb >= 0 {
+        for i in 0..rt_t_count(wide.shape) { d.push(rt_t_op(op, a.data[ka * i], b.data[kb * i])) }
+    } else {
+        let oa = rt_t_offsets(a, wide.axes, wide.shape)
+        let ob = rt_t_offsets(b, wide.axes, wide.shape)
+        for i in 0..len(oa) { d.push(rt_t_op(op, a.data[oa[i]], b.data[ob[i]])) }
+    }
     RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: rt_t_op_bool(op), trit: false }
 }
 
@@ -250,11 +273,18 @@ fn rt_t_where(c: RtT, a: RtT, b: RtT) -> RtT {
     var wide = c
     if len(a.axes) > len(wide.axes) { wide = a }
     if len(b.axes) > len(wide.axes) { wide = b }
-    let oc = rt_t_offsets(c, wide.axes, wide.shape)
-    let oa = rt_t_offsets(a, wide.axes, wide.shape)
-    let ob = rt_t_offsets(b, wide.axes, wide.shape)
     var d: List[f64] = []
-    for i in 0..len(oc) { d.push(if c.data[oc[i]] != 0.0 { a.data[oa[i]] } else { b.data[ob[i]] }) }
+    let kc = rt_t_step(c, wide.axes, wide.shape)
+    let ka = rt_t_step(a, wide.axes, wide.shape)
+    let kb = rt_t_step(b, wide.axes, wide.shape)
+    if kc >= 0 and ka >= 0 and kb >= 0 {
+        for i in 0..rt_t_count(wide.shape) { d.push(if c.data[kc * i] != 0.0 { a.data[ka * i] } else { b.data[kb * i] }) }
+    } else {
+        let oc = rt_t_offsets(c, wide.axes, wide.shape)
+        let oa = rt_t_offsets(a, wide.axes, wide.shape)
+        let ob = rt_t_offsets(b, wide.axes, wide.shape)
+        for i in 0..len(oc) { d.push(if c.data[oc[i]] != 0.0 { a.data[oa[i]] } else { b.data[ob[i]] }) }
+    }
     RtT { axes: wide.axes, shape: wide.shape, data: d, boolean: a.boolean, trit: a.trit or b.trit }
 }
 

@@ -102,10 +102,11 @@ struct WMod {
     data: List[i64],
     pages: i64,                         // 64 KiB each
     table: List[i64],                   // the functions a closure can call (call_indirect), in order
+    names: List[str],                   // each function's name, imports first (the name section)
 }
 
 fn wmod_new(data_at: i64) -> WMod {
-    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], globals: [], data_at: data_at, data: [], pages: 1, table: [] }
+    WMod { sigs: [], tparams: [], tresults: [], imports: [], funcs: [], exports: [], globals: [], data_at: data_at, data: [], pages: 1, table: [], names: [] }
 }
 
 // The index of a function type, added when new.
@@ -229,6 +230,21 @@ fn module_bytes(m: WMod) -> Bytes {
         uleb(inout data, len(m.data))
         append(inout data, m.data)
         section(inout out, 11, data)
+    }
+    if len(m.names) > 0 {
+        // the custom section "name": its function names (subsection 1)
+        var nm: List[i64] = []
+        wname(inout nm, "name")
+        var sub: List[i64] = []
+        uleb(inout sub, len(m.names))
+        for i in 0..len(m.names) {
+            uleb(inout sub, i)
+            wname(inout sub, m.names[i])
+        }
+        nm.push(1)
+        uleb(inout nm, len(sub))
+        append(inout nm, sub)
+        section(inout out, 0, nm)
     }
     var b = bytes()
     for x in out { b.put_u8(x) }

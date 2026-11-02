@@ -1085,7 +1085,8 @@ fn n_to_local(inout n: Nat, v: NVal, h: i64, j: i64) {
 
 // How much each local is used: its gets, sets and tees, 8 times more in each loop around them
 // (up to 8^5), with no instruction translated.
-fn n_weights(inout n: Nat) -> List[i64] {
+fn n_weights(inout n: Nat) -> (List[i64], bool) {
+    var leaf = true
     var w: List[i64] = []
     for j in 0..n.np + n.nl { w.push(0) }
     var open: List[i64] = []
@@ -1108,22 +1109,26 @@ fn n_weights(inout n: Nat) -> List[i64] {
                 open.push(op)
                 if op == 3 { loops += 1 }
             }
+            // calls (and memory.grow, which calls the system) clobber the scratch registers
+            if op == 16 or op == 17 or op == 64 { leaf = false }
             n_skip(inout n, op)
         }
     }
     n.dead_depth = depth0
     n.pos = 0
-    w
+    (w, leaf)
 }
 
-// The registers of the locals used most (at least 3 times, by weight): up to six.
+// The registers of the locals used most (at least 3 times, by weight): up to six, and in a
+// function that calls nothing four more first, r8-r11, which need no saving.
 fn n_alloc_regs(inout n: Nat) {
     let total = n.np + n.nl
     n.lreg = []
     n.saved = []
     for j in 0..total { n.lreg.push(-1) }
-    let w = n_weights(inout n)
-    let regs = [rbx(), rsi(), rdi(), 12, 13, 14]
+    let wl = n_weights(inout n)
+    let w = wl.0
+    let regs = if wl.1 { [r8(), r9(), 10, 11, rbx(), rsi(), rdi(), 12, 13, 14] } else { [rbx(), rsi(), rdi(), 12, 13, 14] }
     var taken = 0
     while taken < len(regs) {
         var best = -1
@@ -1132,7 +1137,7 @@ fn n_alloc_regs(inout n: Nat) {
         }
         if best < 0 { break }
         n.lreg[best] = regs[taken]
-        n.saved.push(regs[taken])
+        if regs[taken] < 8 or regs[taken] > 11 { n.saved.push(regs[taken]) }
         taken += 1
     }
 }
