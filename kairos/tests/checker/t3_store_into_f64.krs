@@ -1,0 +1,3 @@
+let v = ternary(tensor([1.0], asset))
+var w = tensor([1.0], asset)
+w[asset: 0] = v[asset: 0]

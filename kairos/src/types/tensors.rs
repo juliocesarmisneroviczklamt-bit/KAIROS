@@ -78,8 +78,8 @@ impl Checker {
             ids.push(id);
         }
         let e = self.resolve_type(elem)?;
-        if !matches!(e, Ty::Float | Ty::Bool) {
-            return Err(Diag::new("E0101", elem.span(), format!("tensor elements must be `f64` or `bool`, found `{}`", self.show(&e))));
+        if !matches!(e, Ty::Float | Ty::Bool | Ty::T3) {
+            return Err(Diag::new("E0101", elem.span(), format!("tensor elements must be `f64`, `bool` or `t3`, found `{}`", self.show(&e))));
         }
         Ok(Self::mk_tensor(ids, e))
     }
@@ -363,6 +363,7 @@ impl Checker {
                 | B::NanQuantile
                 | B::MergeDays
                 | B::Contract
+                | B::Ternary
                 | B::Observed
                 | B::Grad
                 | B::ValueAndGrad
@@ -511,6 +512,27 @@ impl Checker {
 
     /// `smooth_max(x, y, scale: s)`, `smooth_min`, `smooth_step(x, scale: s)`: the exact rule
     /// outside `grad`, a smooth relaxation (softplus, sigmoid) inside it.
+    /// `ternary(x)` and `ternary(x, threshold: t)` (M18): a `f64` tensor to a `t3` one.
+    fn ternary_ty(&mut self, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        if all.len() != 1 {
+            return Err(Diag::new("E0103", sp, format!("`ternary` takes 1 positional argument(s), but {} were given", all.len())));
+        }
+        if let Some((nm, nsp, _)) = named.iter().find(|(n, _, _)| *n != "threshold") {
+            return Err(Diag::new("E0120", *nsp, format!("`ternary` has no argument `{nm}`")).hint("its only named argument is `threshold:`"));
+        }
+        let float = Ty::Float;
+        let (hx, tx) = self.expr(all[0].0, None)?;
+        let (axes, ex) = self.need_tensor("ternary", &tx, all[0].0)?;
+        self.need_elem("ternary", &tx, &ex, &float, all[0].0)?;
+        let mut args = vec![HArg::Val(hx)];
+        if let Some((_, _, te)) = named.first() {
+            let (ht, tt) = self.expr(te, Some(&float))?;
+            self.expect_ty(&tt, &float, te.span)?;
+            args.push(HArg::Val(ht));
+        }
+        Ok((HExpr::CallBuiltin(Builtin::Ternary, args, sp), Self::mk_tensor(axes, Ty::T3)))
+    }
+
     fn smooth_ty(&mut self, b: Builtin, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
         let name = builtin_name(b);
         let want = if b == Builtin::SmoothStep { 1 } else { 2 };
@@ -639,6 +661,7 @@ impl Checker {
             B::Randn => return self.randn_ty(all, named, sp),
             B::SmoothMax | B::SmoothMin | B::SmoothStep => return self.smooth_ty(b, all, named, sp),
             B::OpenOnce => return self.open_once_ty(all, named, sp),
+            B::Ternary => return self.ternary_ty(all, named, sp),
             _ => {}
         }
         let name = builtin_name(b);
@@ -784,7 +807,8 @@ impl Checker {
                     return call(args, t);
                 }
                 let axes = self.frame_axes(&ops, "`where`", sp)?;
-                let elem = self.tensor_elem(&ea, all[1].0.span)?;
+                // M18: the branches may be `t3`
+                let elem = if self.resolve(&ea) == Ty::T3 { Ty::T3 } else { self.tensor_elem(&ea, all[1].0.span)? };
                 call(args, Self::mk_tensor(axes, elem))
             }
             B::Size => {
@@ -904,8 +928,13 @@ impl Checker {
                 let (hy, t_y) = self.expr(all[1].0, None)?;
                 let (ax_x, ex) = self.need_tensor(name, &t_x, all[0].0)?;
                 let (ax_y, ey) = self.need_tensor(name, &t_y, all[1].0)?;
-                self.need_elem(name, &t_x, &ex, &float, all[0].0)?;
-                self.need_elem(name, &t_y, &ey, &float, all[1].0)?;
+                // M18: one side may be `t3` (then there are only sums and differences)
+                if ex != Ty::T3 || ey == Ty::T3 {
+                    self.need_elem(name, &t_x, &ex, &float, all[0].0)?;
+                }
+                if ey != Ty::T3 || ex == Ty::T3 {
+                    self.need_elem(name, &t_y, &ey, &float, all[1].0)?;
+                }
                 let Some((a, asp)) = over else {
                     return Err(Diag::new("E0103", sp, "`contract` needs the axis to sum over").hint("e.g. `contract(x, w, over: feature)`"));
                 };

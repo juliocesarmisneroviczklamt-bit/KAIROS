@@ -1,0 +1,2 @@
+let v = ternary(tensor([1.0, 2.0], asset))
+print(contract(tensor([1.0, 2.0], asset), v))

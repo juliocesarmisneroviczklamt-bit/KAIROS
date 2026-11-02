@@ -167,6 +167,7 @@ fn img_ty(inout r: ImgRd, inout ck: Checker, s: Sx) -> Ty {
         if a == "i64" { return Ty.TInt }
         if a == "f64" { return Ty.TFloat }
         if a == "bool" { return Ty.TBool }
+        if a == "t3" { return Ty.TT3 }
         if a == "str" { return Ty.TStr }
         if a == "unit" { return Ty.TUnit }
         if a == "never" { return Ty.TNever }

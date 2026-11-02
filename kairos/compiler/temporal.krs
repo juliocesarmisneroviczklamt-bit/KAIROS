@@ -1022,6 +1022,12 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
         let x = val(inout an, ck, args[0], inout f)
         return over_time(an, x, true, 0, e.lo, e.hi)
     }
+    // M18: `ternary(x)` scales by the mean of |x| over all of it, so every row reaches each
+    // element (`ternary(x, threshold: t)` is element-wise)
+    if b == "ternary" and len(args) == 1 {
+        let x = val(inout an, ck, args[0], inout f)
+        return over_time(an, x, false, 0, e.lo, e.hi)
+    }
     if b == "contract" {
         let x = val(inout an, ck, args[0], inout f)
         let y = val(inout an, ck, args[1], inout f)

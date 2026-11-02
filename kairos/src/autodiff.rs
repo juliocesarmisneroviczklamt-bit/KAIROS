@@ -23,6 +23,8 @@ pub enum MapFn {
     Relu,
     Softplus,
     FillNan,
+    /// M18: `ternary`, by the straight-through estimator: the gradient passes as it is
+    Ste,
 }
 
 /// How a node was computed from its parents (node ids).
@@ -72,6 +74,7 @@ fn wrap(t: TensorVal) -> Value {
         match t.data {
             TData::F(v) => Value::Float(v[0]),
             TData::B(v) => Value::Bool(v[0]),
+            TData::T(v) => Value::T3(v.get(0)),
         }
     } else {
         Value::Tensor(Rc::new(t))
@@ -198,6 +201,7 @@ impl Tape {
                         MapFn::Relu => ew(&g, av, |x, y| if y > 0.0 { x } else { 0.0 })?,
                         MapFn::Softplus => ew(&g, av, |x, y| x * sigmoid(y))?,
                         MapFn::FillNan => ew(&g, av, |x, y| if y.is_nan() { 0.0 } else { x })?,
+                        MapFn::Ste => g.clone(),
                     };
                     add(&mut grads, *a, c)?;
                 }

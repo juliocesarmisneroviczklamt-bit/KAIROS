@@ -23,6 +23,7 @@ enum Ty {
     TVar(i64),
     TParam(i64),
     TTensor(List[i64], Ty),     // the axis ids, sorted
+    TT3,                        // a trit (M18): -1, 0 or +1
 }
 
 struct StructDef {
@@ -468,6 +469,7 @@ fn show(ck: Checker, t0: Ty) -> str {
         TNever => "!",
         TBytes => "Bytes",
         THoldout => "Holdout",
+        TT3 => "t3",
         TList(x) => "List[" + show(ck, x) + "]",
         TMap(k, x) => "Map[" + show(ck, k) + ", " + show(ck, x) + "]",
         TTuple(xs) => {
@@ -508,7 +510,7 @@ fn resolve_type(inout ck: Checker, te: Node) -> Ty {
         let arity_msg = "`" + name + "` takes "
         var want = 0
         if name == "List" { want = 1 } else if name == "Map" { want = 2 }
-        let known = contains(["i64", "f64", "bool", "str", "List", "Map", "Holdout", "Bytes"], name)
+        let known = contains(["i64", "f64", "bool", "str", "t3", "List", "Map", "Holdout", "Bytes"], name)
         if known and n != want {
             ck_fail(inout ck, "E0101", te.lo, te.hi, arity_msg + str(want) + " type argument(s)", "")
             return Ty.TUnit
@@ -516,6 +518,7 @@ fn resolve_type(inout ck: Checker, te: Node) -> Ty {
         if name == "i64" { return Ty.TInt }
         if name == "f64" { return Ty.TFloat }
         if name == "bool" { return Ty.TBool }
+        if name == "t3" { return Ty.TT3 }
         if name == "str" { return Ty.TStr }
         if name == "Holdout" { return Ty.THoldout }
         if name == "Bytes" { return Ty.TBytes }
@@ -538,7 +541,7 @@ fn resolve_type(inout ck: Checker, te: Node) -> Ty {
             return Ty.TUnit
         }
         if contains(["f32", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "Money", "date", "Option", "Result", "Simd"], name) {
-            ck_fail(inout ck, "E0002", te.lo, te.hi, "type `" + name + "` is not available yet", "Kairós supports i64, f64, bool, str, List[T], Tensor[axes; f64|bool], tuples, structs, enums and fn types")
+            ck_fail(inout ck, "E0002", te.lo, te.hi, "type `" + name + "` is not available yet", "Kairós supports i64, f64, bool, str, t3, List[T], Tensor[axes; f64|bool|t3], tuples, structs, enums and fn types")
             return Ty.TUnit
         }
         let arity0 = arity_msg + "0 type argument(s)"
@@ -603,8 +606,8 @@ fn resolve_type(inout ck: Checker, te: Node) -> Ty {
     let elem = te.kids[1]
     let e = resolve_type(inout ck, elem)
     if ck.failed { return Ty.TUnit }
-    if not (e == Ty.TFloat or e == Ty.TBool) {
-        ck_fail(inout ck, "E0101", elem.lo, elem.hi, "tensor elements must be `f64` or `bool`, found `" + show(ck, e) + "`", "")
+    if not (e == Ty.TFloat or e == Ty.TBool or e == Ty.TT3) {
+        ck_fail(inout ck, "E0101", elem.lo, elem.hi, "tensor elements must be `f64`, `bool` or `t3`, found `" + show(ck, e) + "`", "")
         return Ty.TUnit
     }
     Ty.TTensor(sorted_ids(ids), e)

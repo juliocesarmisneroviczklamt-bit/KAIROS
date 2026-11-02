@@ -1,0 +1,1 @@
+print(ternary(tensor([1.0], asset), threshold: 1))

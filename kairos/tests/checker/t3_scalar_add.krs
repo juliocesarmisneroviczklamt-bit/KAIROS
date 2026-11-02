@@ -1,0 +1,3 @@
+let v = ternary(tensor([1.0], asset))
+let t = v[asset: 0]
+print(t + t)

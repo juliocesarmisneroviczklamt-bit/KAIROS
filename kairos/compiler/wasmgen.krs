@@ -362,6 +362,7 @@ fn vt(t: Ty) -> i64 {
         TFn(_, _) => wt_i32(),
         TTensor(_, _) => wt_i32(),
         THoldout => wt_i64(),
+        TT3 => wt_i64(),
         TUnit => 0,
         TNever => 0,
         _ => -1,

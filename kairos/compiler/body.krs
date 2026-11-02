@@ -789,7 +789,8 @@ fn unary_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
         TTensor(a, elem) => {
             let want = if neg { Ty.TFloat } else { Ty.TBool }
             let word = if neg { "`-`" } else { "`not`" }
-            if elem != want {
+            // M18: a `t3` tensor changes sign
+            if elem != want and not (neg and elem == Ty.TT3) {
                 return fail_ex(inout ck, "E0101", e, word + " needs a `" + show(ck, want) + "` tensor, found `" + show(ck, t) + "`", "")
             }
             return typed(h, t)
@@ -797,7 +798,7 @@ fn unary_expr(inout ck: Checker, e: Node, has_exp: bool, exp: Ty) -> Ex {
         _ => {},
     }
     if neg {
-        if not tangent(ck, t) { ensure_numeric(inout ck, t, e, "`-`") }
+        if not tangent(ck, t) and resolve(ck, t) != Ty.TT3 { ensure_numeric(inout ck, t, e, "`-`") }
     } else {
         expect_at(inout ck, t, Ty.TBool, x)
     }
@@ -1645,7 +1646,7 @@ fn fixed_sig(name: str) -> (bool, List[Ty], Ty) {
 fn tensor_aware(name: str) -> bool {
     contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "abs", "sqrt", "exp",
         "ln", "floor", "ceil", "round", "is_nan", "fill_nan", "where", "size", "zeros", "ones", "full", "zeros_like", "full_like",
-        "tensor", "to_list", "rank", "top_k", "bottom_k", "nan_quantile", "merge_days", "contract", "observed", "grad",
+        "tensor", "to_list", "rank", "top_k", "bottom_k", "nan_quantile", "merge_days", "contract", "ternary", "observed", "grad",
         "value_and_grad", "tanh", "sigmoid", "relu", "softplus", "randn", "smooth_max", "smooth_min", "smooth_step", "open_once"], name)
 }
 
@@ -1775,6 +1776,15 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
     if name == "float" or name == "int" {
         if not arity_ok(inout ck, name, n, 1, e, false) { return bad() }
         let r = expr0(inout ck, all[0].0)
+        if ck.failed { return bad() }
+        // M18: a `t3` is -1, 0 or +1; `float` of a `t3` tensor is the `f64` one
+        match resolve(ck, r.t) {
+            TT3 => { return typed(bcall(name, [hval(r.h)], e), if name == "float" { Ty.TFloat } else { Ty.TInt }) },
+            TTensor(axes, el) => {
+                if el == Ty.TT3 and name == "float" { return typed(bcall(name, [hval(r.h)], e), Ty.TTensor(axes, Ty.TFloat)) }
+            },
+            _ => {},
+        }
         ensure_numeric(inout ck, r.t, all[0].0, "`" + name + "`")
         if ck.failed { return bad() }
         default_nums(inout ck, r.t)
@@ -2114,6 +2124,7 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
     if name == "randn" { return randn_ty(inout ck, all, named, e) }
     if name == "smooth_max" or name == "smooth_min" or name == "smooth_step" { return smooth_ty(inout ck, name, all, named, e) }
     if name == "open_once" { return open_once_ty(inout ck, all, named, e) }
+    if name == "ternary" { return ternary_ty(inout ck, all, named, e) }
     let n = len(all)
     let takes_over = contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "rank", "top_k", "bottom_k", "nan_quantile", "contract"], name)
     let takes_sizes = name == "zeros" or name == "ones" or name == "full"
@@ -2258,7 +2269,8 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         if not (is_tensor(ck, c.t) or is_tensor(ck, a.t) or is_tensor(ck, b.t)) { return typed(h, resolve(ck, ea)) }
         let axes = frame_axes(inout ck, [(c.t, all[0].0), (a.t, all[1].0), (b.t, all[2].0)], "`where`", e)
         if ck.failed { return bad() }
-        let elem = tensor_elem(inout ck, ea, all[1].0)
+        // M18: the branches may be `t3`
+        let elem = if resolve(ck, ea) == Ty.TT3 { Ty.TT3 } else { tensor_elem(inout ck, ea, all[1].0) }
         if ck.failed { return bad() }
         return typed(h, mk_tensor(axes, elem))
     }
@@ -2404,8 +2416,11 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         if ck.failed { return bad() }
         if not need_tensor(inout ck, name, x.t, all[0].0) { return bad() }
         if not need_tensor(inout ck, name, y.t, all[1].0) { return bad() }
-        need_elem(inout ck, name, x.t, fty, all[0].0)
-        need_elem(inout ck, name, y.t, fty, all[1].0)
+        // M18: one side may be `t3` (then there are only sums and differences)
+        let ex = elem_of(ck, x.t)
+        let ey = elem_of(ck, y.t)
+        if ex != Ty.TT3 or ey == Ty.TT3 { need_elem(inout ck, name, x.t, fty, all[0].0) }
+        if ey != Ty.TT3 or ex == Ty.TT3 { need_elem(inout ck, name, y.t, fty, all[1].0) }
         if ck.failed { return bad() }
         if not has_over { return fail_ex(inout ck, "E0103", e, "`contract` needs the axis to sum over", "e.g. `contract(x, w, over: feature)`") }
         let ax_x = tensor_axes(ck, x.t)
@@ -2495,6 +2510,29 @@ fn randn_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, 
     }
     if len(axes) == 0 { return fail_ex(inout ck, "E0103", e, "`randn` needs the size of each axis", example) }
     typed(bcall("randn", hs, e), mk_tensor(axes, Ty.TFloat))
+}
+
+// `ternary(x)` and `ternary(x, threshold: t)` (M18): a `f64` tensor to a `t3` one.
+fn ternary_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ex {
+    if len(all) != 1 { return fail_ex(inout ck, "E0103", e, "`ternary` takes 1 positional argument(s), but " + str(len(all)) + " were given", "") }
+    for q in named {
+        if q.0 != "threshold" { return fail_ex(inout ck, "E0120", q.1, "`ternary` has no argument `" + q.0 + "`", "its only named argument is `threshold:`") }
+    }
+    let fty = Ty.TFloat
+    let x = expr0(inout ck, all[0].0)
+    if ck.failed { return bad() }
+    if not need_tensor(inout ck, "ternary", x.t, all[0].0) { return bad() }
+    need_elem(inout ck, "ternary", x.t, fty, all[0].0)
+    if ck.failed { return bad() }
+    var args = [hval(x.h)]
+    if len(named) > 0 {
+        let th = expr1(inout ck, named[0].2, fty)
+        if ck.failed { return bad() }
+        expect_at(inout ck, th.t, fty, named[0].2)
+        if ck.failed { return bad() }
+        args.push(hval(th.h))
+    }
+    typed(bcall("ternary", args, e), mk_tensor(tensor_axes(ck, x.t), Ty.TT3))
 }
 
 // `smooth_max(x, y, scale: s)`, `smooth_min`, `smooth_step(x, scale: s)`: the exact rule outside

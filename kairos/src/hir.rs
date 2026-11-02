@@ -192,6 +192,8 @@ pub enum Builtin {
     TopK,
     BottomK,
     Contract,
+    /// `ternary(x)`, `ternary(x, threshold: t)` (M18): a `f64` tensor to a `t3` one
+    Ternary,
     /// `observed(x, lag: k)`: row t of x (over its temporal axis) is known at end(t + k); identity at run time
     Observed,
     // ---- M4: differentiation and the AI engine
@@ -343,6 +345,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("top_k", Builtin::TopK),
     ("bottom_k", Builtin::BottomK),
     ("contract", Builtin::Contract),
+    ("ternary", Builtin::Ternary),
     ("observed", Builtin::Observed),
     ("grad", Builtin::Grad),
     ("value_and_grad", Builtin::ValueAndGrad),

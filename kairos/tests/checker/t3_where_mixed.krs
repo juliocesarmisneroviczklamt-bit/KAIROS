@@ -1,0 +1,2 @@
+let v = ternary(tensor([1.0, 2.0], asset))
+print(where(v == v, v, 1.0))

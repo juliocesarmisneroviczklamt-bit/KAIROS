@@ -39,8 +39,10 @@ pub enum Ty {
     /// the holdout of a protocol (M5): affine, it can be used only once
     Holdout,
     /// named-axis tensor: axis ids kept sorted (the order of axes never matters for typing),
-    /// element `f64` or `bool`; never empty (a tensor with no axes is a scalar)
+    /// element `f64`, `bool` or `t3`; never empty (a tensor with no axes is a scalar)
     Tensor(Vec<u32>, Box<Ty>),
+    /// a trit (M18): -1, 0 or +1
+    T3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -699,6 +701,7 @@ impl Checker {
             }
             Ty::Param(p) => self.type_param_names.get(p as usize).cloned().unwrap_or_else(|| format!("T{p}")),
             Ty::Holdout => "Holdout".into(),
+            Ty::T3 => "t3".into(),
             Ty::Tensor(axes, e) => {
                 let names: Vec<&str> = axes.iter().map(|a| self.axes[*a as usize].name.as_str()).collect();
                 format!("Tensor[{}; {}]", names.join(", "), self.show(&e))
@@ -774,6 +777,10 @@ impl Checker {
                         arity(0)?;
                         Ty::Bool
                     }
+                    "t3" => {
+                        arity(0)?;
+                        Ty::T3
+                    }
                     "str" => {
                         arity(0)?;
                         Ty::Str
@@ -805,7 +812,7 @@ impl Checker {
                     "f32" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "Money" | "date" | "Option"
                     | "Result" | "Simd" => {
                         return Err(Diag::new("E0002", *span, format!("type `{name}` is not available yet")).hint(
-                            "Kairós supports i64, f64, bool, str, List[T], Tensor[axes; f64|bool], tuples, structs, enums and fn types",
+                            "Kairós supports i64, f64, bool, str, t3, List[T], Tensor[axes; f64|bool|t3], tuples, structs, enums and fn types",
                         ));
                     }
                     n if self.generic_scope.contains_key(n) => {
@@ -1256,7 +1263,8 @@ impl Checker {
                 let (h, t) = self.expr(x, exp)?;
                 if let Some((_, elem)) = self.tensor_parts(&t) {
                     let (want, word) = if *op == UnOp::Neg { (Ty::Float, "`-`") } else { (Ty::Bool, "`not`") };
-                    if elem != want {
+                    // M18: a `t3` tensor changes sign
+                    if elem != want && !(*op == UnOp::Neg && elem == Ty::T3) {
                         let s = self.show(&t);
                         return Err(Diag::new("E0101", sp, format!("{word} needs a `{}` tensor, found `{s}`", self.show(&want))));
                     }
@@ -1264,6 +1272,7 @@ impl Checker {
                 }
                 match op {
                     UnOp::Neg if self.tangent(&t) => {}
+                    UnOp::Neg if self.resolve(&t) == Ty::T3 => {}
                     UnOp::Neg => self.ensure_numeric(&t, sp, "`-`")?,
                     UnOp::Not => self.expect_ty(&t, &Ty::Bool, x.span)?,
                 }
@@ -1953,6 +1962,14 @@ impl Checker {
             Builtin::ToFloat | Builtin::ToInt => {
                 arity(1)?;
                 let (h, t) = self.expr(all[0].0, None)?;
+                // M18: a `t3` is -1, 0 or +1; `float` of a `t3` tensor is the `f64` one
+                match self.resolve(&t) {
+                    Ty::T3 => return Ok((HExpr::CallBuiltin(b, vec![HArg::Val(h)], sp), if b == Builtin::ToFloat { Ty::Float } else { Ty::Int })),
+                    Ty::Tensor(axes, e) if *e == Ty::T3 && b == Builtin::ToFloat => {
+                        return Ok((HExpr::CallBuiltin(b, vec![HArg::Val(h)], sp), Ty::Tensor(axes, Box::new(Ty::Float))));
+                    }
+                    _ => {}
+                }
                 self.ensure_numeric(&t, all[0].0.span, &format!("`{name}`"))?;
                 self.default_nums(&t);
                 (vec![HArg::Val(h)], if b == Builtin::ToFloat { Ty::Float } else { Ty::Int })

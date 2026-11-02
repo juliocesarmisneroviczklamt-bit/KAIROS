@@ -1,0 +1,49 @@
+// The ternary element `t3` (M18): weights of {-1, 0, +1}, as in BitNet b1.58, and portfolios that
+// are long, out or short. `contract` with a `t3` side only adds and subtracts.
+let x = tensor([0.9, -0.2, 0.05, -1.4, nan, 0.4], asset)
+
+// BitNet's quantization: round(x / mean|x|) limited to [-1, 1]; NaN is 0
+let w = ternary(x)
+print(w)                          // out: Tensor[asset: 6; t3] [1, 0, 0, -1, 0, 1]
+// a portfolio from a signal: long above the threshold, short below its opposite
+let v = ternary(x, threshold: 0.3)
+print(v)                          // out: Tensor[asset: 6; t3] [1, 0, 0, -1, 0, 1]
+print(float(w))                   // out: Tensor[asset: 6; f64] [1.0, 0.0, 0.0, -1.0, 0.0, 1.0]
+print(-w)                         // out: Tensor[asset: 6; t3] [-1, 0, 0, 1, 0, -1]
+
+// a t3 alone
+let t = w[asset: 3]
+print(t, -t, int(t), float(t), t == w[asset: 0], t != w[asset: 3])   // out: -1 1 -1 -1.0 false false
+print(to_list(v))                 // out: [1, 0, 0, -1, 0, 1]
+print(w == v)                     // out: Tensor[asset: 6; bool] [true, true, true, true, true, true]
+
+// the return of a portfolio: no products, only sums and differences
+let r = tensor([0.01, 0.02, -0.03, 0.04, 0.05, -0.06], asset)
+print(contract(r, v, over: asset), contract(v, r, over: asset))   // out: -0.09 -0.09
+print(contract(r, float(v), over: asset))                        // out: -0.09
+// the net exposure: longs minus shorts
+print(sum(v), mean(-v))           // out: 1.0 -0.16666666666666666
+
+// stored, sliced and chosen like any tensor
+var m = ternary(zeros(month: 2, asset: 3) + 1.0)
+m[month: 1] = -m[month: 0]
+print(m[month: 1], size(m, asset))   // out: Tensor[asset: 3; t3] [-1, -1, -1] 3
+let z: Tensor[asset; t3] = where(r > 0.0, v, -v)
+print(z)                          // out: Tensor[asset: 6; t3] [1, 0, 0, -1, 0, -1]
+let q: t3 = z[asset: 0]
+print(q)                          // out: 1
+
+// a ternary layer trains through the straight-through estimator: inside `grad`, `ternary` lets
+// the gradient pass as it is
+fn layer(w: Tensor[asset; f64]) -> f64 {
+    let input = tensor([0.5, -1.0, 2.0], asset)
+    contract(input, ternary(w), over: asset)
+}
+let w0 = tensor([0.3, -0.2, 0.9], asset)
+print(layer(w0))                  // out: 2.5
+print(grad(layer)(w0))            // out: Tensor[asset: 3; f64] [0.5, -1.0, 2.0]
+fn layer2(w: Tensor[asset; f64]) -> f64 {
+    let input = tensor([0.5, -1.0, 2.0], asset)
+    contract(w, ternary(input), over: asset)
+}
+print(grad(layer2)(w0))           // out: Tensor[asset: 3; f64] [0.0, -1.0, 1.0]

@@ -1,0 +1,1 @@
+let x: Tensor[asset; str] = 1

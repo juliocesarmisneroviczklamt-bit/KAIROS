@@ -90,6 +90,7 @@ impl Checker {
                     "i64" => Ty::Int,
                     "f64" => Ty::Float,
                     "bool" => Ty::Bool,
+                    "t3" => Ty::T3,
                     "str" => Ty::Str,
                     "unit" => Ty::Unit,
                     "never" => Ty::Never,

@@ -1,0 +1,1 @@
+print(ternary(1.0))

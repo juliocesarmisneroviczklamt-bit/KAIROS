@@ -228,6 +228,7 @@ fn first_months(t: &TensorVal, n: usize) -> TensorVal {
     match &t.data {
         crate::tensor::TData::F(v) => TensorVal::new_f(t.axes.clone(), shape, v[..n * row].to_vec()),
         crate::tensor::TData::B(v) => TensorVal::new_b(t.axes.clone(), shape, v[..n * row].to_vec()),
+        crate::tensor::TData::T(v) => TensorVal::new_t(t.axes.clone(), shape, &v.to_vec()[..n * row]),
     }
 }
 

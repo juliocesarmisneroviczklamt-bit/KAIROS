@@ -1,0 +1,2 @@
+fn f(w: Tensor[asset; t3]) -> t3 { -w[asset: 0] }
+print(f(ternary(tensor([1.0, -2.0], asset), threshold: 0.5)))

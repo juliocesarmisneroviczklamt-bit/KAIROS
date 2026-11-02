@@ -29,6 +29,8 @@ pub enum Value {
     Bytes(Rc<Vec<u8>>),
     /// a float or float tensor tracked by `grad` (M4): index of its node on the active tape
     Node(u32),
+    /// a `t3` (M18): -1, 0 or +1
+    T3(i8),
 }
 
 #[derive(Debug)]
@@ -57,6 +59,7 @@ impl PartialEq for Value {
             (Holdout(a), Holdout(b)) => a == b,
             (Map(a), Map(b)) => a == b,
             (Bytes(a), Bytes(b)) => a == b,
+            (T3(a), T3(b)) => a == b,
             _ => false,
         }
     }
@@ -69,6 +72,7 @@ pub fn total_cmp(a: &Value, b: &Value) -> Ordering {
         (Int(x), Int(y)) => x.cmp(y),
         (Float(x), Float(y)) => x.total_cmp(y),
         (Bool(x), Bool(y)) => x.cmp(y),
+        (T3(x), T3(y)) => x.cmp(y),
         (Str(x), Str(y)) => x.cmp(y),
         (List(x), List(y)) | (Tuple(x), Tuple(y)) => {
             for (p, q) in x.iter().zip(y.iter()) {

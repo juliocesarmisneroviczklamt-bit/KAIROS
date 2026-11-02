@@ -11,6 +11,54 @@ use std::cmp::Ordering;
 pub enum TData {
     F(Vec<f64>),
     B(Vec<bool>),
+    /// M18: trits (-1, 0, +1)
+    T(Trits),
+}
+
+/// Trits (M18), five to a byte (3^5 = 243 <= 256): a byte holds Σ (t_k + 1)·3^k for its five, and
+/// the unused places of the last byte hold 0, so two equal sequences have equal bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trits {
+    len: usize,
+    bytes: Vec<u8>,
+}
+
+const POW3: [u8; 5] = [1, 3, 9, 27, 81];
+
+impl Trits {
+    pub fn from_slice(v: &[i8]) -> Self {
+        let mut bytes = vec![0u8; v.len().div_ceil(5)];
+        for (i, t) in v.iter().enumerate() {
+            bytes[i / 5] += (*t + 1) as u8 * POW3[i % 5];
+        }
+        Trits { len: v.len(), bytes }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn get(&self, i: usize) -> i8 {
+        ((self.bytes[i / 5] / POW3[i % 5]) % 3) as i8 - 1
+    }
+
+    pub fn set(&mut self, i: usize, t: i8) {
+        let (b, p) = (self.bytes[i / 5], POW3[i % 5]);
+        self.bytes[i / 5] = b - ((b / p) % 3) * p + (t + 1) as u8 * p;
+    }
+
+    pub fn to_vec(&self) -> Vec<i8> {
+        (0..self.len).map(|i| self.get(i)).collect()
+    }
+
+    /// the bytes it takes (for the tests)
+    pub fn packed_len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,12 +85,16 @@ pub enum Op<'a> {
     T(&'a TensorVal),
     F(f64),
     B(bool),
+    /// a `t3` (M18)
+    Trit(i8),
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Elem {
     F(f64),
     B(bool),
+    /// a `t3` (M18)
+    T(i8),
 }
 
 /// Selector along one axis: a single index (removes the axis) or a half-open range `[lo, hi)`.
@@ -75,6 +127,10 @@ impl TensorVal {
         TensorVal { axes, shape, data: TData::B(data) }
     }
 
+    pub fn new_t(axes: Vec<u32>, shape: Vec<usize>, data: &[i8]) -> Self {
+        TensorVal { axes, shape, data: TData::T(Trits::from_slice(data)) }
+    }
+
     pub fn len(&self) -> usize {
         self.shape.iter().product()
     }
@@ -103,7 +159,7 @@ impl TensorVal {
     pub fn f(&self) -> &[f64] {
         match &self.data {
             TData::F(v) => v,
-            TData::B(_) => panic!("expected a f64 tensor"),
+            TData::B(_) | TData::T(_) => panic!("expected a f64 tensor"),
         }
     }
 
@@ -111,6 +167,7 @@ impl TensorVal {
         match &self.data {
             TData::F(v) => Elem::F(v[off]),
             TData::B(v) => Elem::B(v[off]),
+            TData::T(v) => Elem::T(v.get(off)),
         }
     }
 
@@ -125,6 +182,7 @@ impl TensorVal {
                     0.0
                 }
             }
+            TData::T(v) => f64::from(v.get(off)),
         }
     }
 }
@@ -191,6 +249,20 @@ fn frame(ops: &[Op]) -> TResult<(Vec<u32>, Vec<usize>)> {
 
 /// Element-wise map over any number of operands, repeating smaller ones by axis name.
 pub fn map_n(ops: &[Op], out_bool: bool, f: impl Fn(&[Elem]) -> Elem) -> TResult<TensorVal> {
+    map_into(ops, if out_bool { Out::B } else { Out::F }, f)
+}
+
+/// The element type a map gives.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Out {
+    F,
+    B,
+    T,
+}
+
+/// The same, giving elements of the type `out`.
+pub fn map_into(ops: &[Op], out: Out, f: impl Fn(&[Elem]) -> Elem) -> TResult<TensorVal> {
+    let out_bool = out == Out::B;
     let (axes, shape) = frame(ops)?;
     let strides: Vec<Vec<usize>> = ops
         .iter()
@@ -200,10 +272,10 @@ pub fn map_n(ops: &[Op], out_bool: bool, f: impl Fn(&[Elem]) -> Elem) -> TResult
         })
         .collect();
     let n: usize = shape.iter().product();
-    let (mut fo, mut bo) = (Vec::new(), Vec::new());
+    let (mut fo, mut bo, mut to) = (Vec::new(), Vec::new(), Vec::new());
     if out_bool {
         bo.reserve(n);
-    } else {
+    } else if out == Out::F {
         fo.reserve(n);
     }
     let mut buf = vec![Elem::F(0.0); ops.len()];
@@ -213,14 +285,21 @@ pub fn map_n(ops: &[Op], out_bool: bool, f: impl Fn(&[Elem]) -> Elem) -> TResult
                 Op::T(t) => t.get(offs[j]),
                 Op::F(x) => Elem::F(*x),
                 Op::B(b) => Elem::B(*b),
+                Op::Trit(t) => Elem::T(*t),
             };
         }
         match f(&buf) {
             Elem::F(x) => fo.push(x),
             Elem::B(b) => bo.push(b),
+            Elem::T(t) => to.push(t),
         }
     });
-    Ok(TensorVal { axes, shape, data: if out_bool { TData::B(bo) } else { TData::F(fo) } })
+    let data = match out {
+        Out::F => TData::F(fo),
+        Out::B => TData::B(bo),
+        Out::T => TData::T(Trits::from_slice(&to)),
+    };
+    Ok(TensorVal { axes, shape, data })
 }
 
 fn fold(kind: Red, it: impl Iterator<Item = f64>) -> f64 {
@@ -308,16 +387,18 @@ pub fn select(t: &TensorVal, sels: &[(u32, Sel)]) -> TResult<TensorVal> {
     let (start, len, keep) = region(t, sels)?;
     let st = t.strides();
     let base: usize = start.iter().zip(&st).map(|(s, k)| s * k).sum();
-    let (mut fo, mut bo) = (Vec::new(), Vec::new());
+    let (mut fo, mut bo, mut to) = (Vec::new(), Vec::new(), Vec::new());
     walk(&len, &[st.clone()], |offs| match &t.data {
         TData::F(v) => fo.push(v[base + offs[0]]),
         TData::B(v) => bo.push(v[base + offs[0]]),
+        TData::T(v) => to.push(v.get(base + offs[0])),
     });
     let axes: Vec<u32> = t.axes.iter().zip(&keep).filter(|(_, k)| **k).map(|(a, _)| *a).collect();
     let shape: Vec<usize> = len.iter().zip(&keep).filter(|(_, k)| **k).map(|(n, _)| *n).collect();
     let data = match t.data {
         TData::F(_) => TData::F(fo),
         TData::B(_) => TData::B(bo),
+        TData::T(_) => TData::T(Trits::from_slice(&to)),
     };
     Ok(TensorVal { axes, shape, data })
 }
@@ -370,6 +451,17 @@ pub fn assign(t: &mut TensorVal, sels: &[(u32, Sel)], v: Op) -> TResult<()> {
         (TData::B(d), Op::B(x)) => {
             for (dst, _) in writes {
                 d[dst] = x;
+            }
+        }
+        (TData::T(d), Op::T(vt)) => {
+            let TData::T(src) = &vt.data else { return Err(TErr::Shape("element type mismatch".into())) };
+            for (dst, s) in writes {
+                d.set(dst, src.get(s));
+            }
+        }
+        (TData::T(d), Op::Trit(x)) => {
+            for (dst, _) in writes {
+                d.set(dst, x);
             }
         }
         _ => return Err(TErr::Shape("element type mismatch".into())),
@@ -472,6 +564,7 @@ pub fn merge_days(t: &TensorVal, month: u32, session: u32, day: u32) -> TensorVa
     let data = match &t.data {
         TData::F(v) => TData::F(offs.iter().map(|&o| v[o]).collect()),
         TData::B(v) => TData::B(offs.iter().map(|&o| v[o]).collect()),
+        TData::T(v) => TData::T(Trits::from_slice(&offs.iter().map(|&o| v.get(o)).collect::<Vec<_>>())),
     };
     TensorVal { axes, shape, data }
 }
@@ -524,15 +617,34 @@ pub fn contract(x: &TensorVal, y: &TensorVal, ax: u32) -> TResult<TensorVal> {
     }
     let (sx, sy) = (mapped(x, &axes), mapped(y, &axes));
     let (kx, ky) = (x.strides()[px], y.strides()[py]);
-    let (xf, yf) = (x.f(), y.f());
     let mut out = Vec::with_capacity(shape.iter().product());
-    walk(&shape, &[sx, sy], |offs| {
+    // M18: with a `t3` side there is no product: the x where w is +1 are added, those where it is
+    // -1 subtracted, in the axis' order
+    let ternary = |xf: &[f64], w: &Trits, ox: usize, ow: usize, kx: usize, kw: usize| {
         let mut acc = 0.0;
         for k in 0..n {
-            acc += xf[offs[0] + k * kx] * yf[offs[1] + k * ky];
+            match w.get(ow + k * kw) {
+                1 => acc += xf[ox + k * kx],
+                -1 => acc -= xf[ox + k * kx],
+                _ => {}
+            }
         }
-        out.push(acc);
-    });
+        acc
+    };
+    match (&x.data, &y.data) {
+        (TData::F(xf), TData::T(w)) => walk(&shape, &[sx, sy], |offs| out.push(ternary(xf, w, offs[0], offs[1], kx, ky))),
+        (TData::T(w), TData::F(yf)) => walk(&shape, &[sx, sy], |offs| out.push(ternary(yf, w, offs[1], offs[0], ky, kx))),
+        _ => {
+            let (xf, yf) = (x.f(), y.f());
+            walk(&shape, &[sx, sy], |offs| {
+                let mut acc = 0.0;
+                for k in 0..n {
+                    acc += xf[offs[0] + k * kx] * yf[offs[1] + k * ky];
+                }
+                out.push(acc);
+            });
+        }
+    }
     Ok(TensorVal::new_f(axes, shape, out))
 }
 
@@ -663,6 +775,64 @@ pub fn randn(seed: u64, axes: Vec<u32>, shape: Vec<usize>) -> TensorVal {
     TensorVal::new_f(axes, shape, v)
 }
 
+/// `ternary(x)` (M18): BitNet b1.58's quantization. With g the mean of |x| over the elements that
+/// are not NaN, each one becomes round(x / g) (the half away from zero) limited to [-1, 1]; NaN
+/// gives 0, and so does everything when g is 0 or NaN. With a threshold th: +1 above th, -1 below
+/// -th, 0 otherwise (NaN included).
+pub fn ternary(t: &TensorVal, threshold: Option<f64>) -> TensorVal {
+    let v = t.f();
+    let out: Vec<i8> = match threshold {
+        Some(th) => v
+            .iter()
+            .map(|&x| {
+                if x > th {
+                    1
+                } else if x < -th {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect(),
+        None => {
+            let (mut s, mut c) = (0.0, 0usize);
+            for &x in v {
+                if !x.is_nan() {
+                    s += x.abs();
+                    c += 1;
+                }
+            }
+            let g = if c == 0 { f64::NAN } else { s / c as f64 };
+            v.iter()
+                .map(|&x| {
+                    let r = libm::round(x / g);
+                    if r >= 1.0 {
+                        1
+                    } else if r <= -1.0 {
+                        -1
+                    } else {
+                        0
+                    }
+                })
+                .collect()
+        }
+    };
+    TensorVal::new_t(t.axes.clone(), t.shape.clone(), &out)
+}
+
+/// `-w` of a `t3` tensor
+pub fn neg_t3(t: &TensorVal) -> TensorVal {
+    let TData::T(v) = &t.data else { unreachable!("neg_t3 of a tensor that is not t3") };
+    let out: Vec<i8> = v.to_vec().iter().map(|x| -x).collect();
+    TensorVal::new_t(t.axes.clone(), t.shape.clone(), &out)
+}
+
+/// `float(w)` of a `t3` tensor: -1.0, 0.0, 1.0
+pub fn t3_to_f(t: &TensorVal) -> TensorVal {
+    let TData::T(v) = &t.data else { unreachable!("float of a tensor that is not t3") };
+    TensorVal::new_f(t.axes.clone(), t.shape.clone(), v.to_vec().iter().map(|x| f64::from(*x)).collect())
+}
+
 pub fn full(axes: Vec<u32>, shape: Vec<usize>, v: f64) -> TensorVal {
     let n = shape.iter().product();
     TensorVal::new_f(axes, shape, vec![v; n])
@@ -674,11 +844,13 @@ pub fn describe(t: &TensorVal, name: impl Fn(u32) -> String) -> String {
     let elem = match t.data {
         TData::F(_) => "f64",
         TData::B(_) => "bool",
+        TData::T(_) => "t3",
     };
     if t.axes.len() == 1 && t.len() <= 20 {
         let vals = match &t.data {
             TData::F(v) => v.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(", "),
             TData::B(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+            TData::T(v) => v.to_vec().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         };
         format!("Tensor[{dims}; {elem}] [{vals}]")
     } else {
@@ -689,4 +861,25 @@ pub fn describe(t: &TensorVal, name: impl Fn(u32) -> String) -> String {
 /// Total order of f64 used for sorting.
 pub fn cmp_f(a: f64, b: f64) -> Ordering {
     a.total_cmp(&b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M18: five trits to a byte, read and written in place; equal trits, equal bytes
+    #[test]
+    fn trits_take_a_fifth_of_a_byte() {
+        let v: Vec<i8> = (0..23).map(|i| (i % 3) as i8 - 1).collect();
+        let mut t = Trits::from_slice(&v);
+        assert_eq!((t.len(), t.packed_len()), (23, 5));
+        assert_eq!(t.to_vec(), v);
+        t.set(7, 1);
+        t.set(22, -1);
+        let mut w = v.clone();
+        w[7] = 1;
+        w[22] = -1;
+        assert_eq!(t.to_vec(), w);
+        assert_eq!(t, Trits::from_slice(&w));
+    }
 }

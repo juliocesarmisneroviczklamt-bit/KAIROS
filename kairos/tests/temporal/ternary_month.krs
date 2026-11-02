@@ -1,0 +1,8 @@
+let ret = b3.monthly_returns()
+var weights = zeros_like(ret)
+// one month at a time: its scale uses only that month, which is past when it trades
+for m in 12..size(ret, month) {
+    let last = fill_nan(ret[month: m - 1], 0.0)
+    weights[month: m] = 0.01 * float(ternary(last)) + 0.01 * float(ternary(last, threshold: 0.05))
+}
+let ev = b3.evaluate(weights, lag: 0)

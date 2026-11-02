@@ -1059,6 +1059,12 @@ impl<'a> An<'a> {
                 let k = self.val(&args[1], f)?;
                 Ok(self.over_time(x, args.get(2).and_then(axis_lit), sp).with_time(k.time))
             }
+            // M18: `ternary(x)` scales by the mean of |x| over all of it, so every row reaches each
+            // element (`ternary(x, threshold: t)` is element-wise)
+            B::Ternary if args.len() == 1 => {
+                let x = self.val(&args[0], f)?;
+                Ok(self.over_time(x, None, sp))
+            }
             B::Contract => {
                 let x = self.val(&args[0], f)?;
                 let y = self.val(&args[1], f)?;

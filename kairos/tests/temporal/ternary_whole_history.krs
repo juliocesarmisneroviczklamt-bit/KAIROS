@@ -1,0 +1,8 @@
+let ret = b3.monthly_returns()
+var weights = zeros_like(ret)
+// the scale of `ternary` is the mean of |x| over the whole history: the future of every month
+let pos = ternary(ret)
+for m in 12..size(ret, month) {
+    weights[month: m] = float(pos[month: m - 1])
+}
+let ev = b3.evaluate(weights, lag: 0)

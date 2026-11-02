@@ -13,6 +13,7 @@ pub(super) fn wrap(t: TensorVal) -> Value {
         match t.data {
             TData::F(v) => Value::Float(v[0]),
             TData::B(v) => Value::Bool(v[0]),
+            TData::T(v) => Value::T3(v.get(0)),
         }
     } else {
         Value::Tensor(Rc::new(t))
@@ -24,6 +25,7 @@ pub(super) fn as_op(v: &Value) -> Op<'_> {
         Value::Tensor(t) => Op::T(t),
         Value::Float(x) => Op::F(*x),
         Value::Bool(b) => Op::B(*b),
+        Value::T3(t) => Op::Trit(*t),
         other => unreachable!("tensor operand {other:?}"),
     }
 }
@@ -196,15 +198,20 @@ impl Interp<'_> {
                 BinOp::Ge => Elem::B(x >= y),
             },
             (Elem::B(x), Elem::B(y)) => Elem::B(if op == BinOp::Eq { x == y } else { x != y }),
+            (Elem::T(x), Elem::T(y)) => Elem::B(if op == BinOp::Eq { x == y } else { x != y }),
             _ => unreachable!("mixed tensor elements"),
         });
         r.map(wrap).map_err(|e| self.terr(e, sp))
     }
 
     pub(super) fn tensor_unary(&self, op: UnOp, t: &TensorVal, sp: Span) -> R<Value> {
+        if matches!(t.data, TData::T(_)) {
+            return Ok(wrap(tensor::neg_t3(t)));
+        }
         map_n(&[Op::T(t)], op == UnOp::Not, |e| match e[0] {
             Elem::F(x) => Elem::F(-x),
             Elem::B(b) => Elem::B(!b),
+            Elem::T(_) => unreachable!("t3 is negated above"),
         })
         .map(wrap)
         .map_err(|e| self.terr(e, sp))
@@ -213,7 +220,7 @@ impl Interp<'_> {
     fn map_f(&self, t: &TensorVal, sp: Span, f: impl Fn(f64) -> f64) -> R<Value> {
         map_n(&[Op::T(t)], false, |e| match e[0] {
             Elem::F(x) => Elem::F(f(x)),
-            Elem::B(_) => unreachable!("f64 map on a bool tensor"),
+            Elem::B(_) | Elem::T(_) => unreachable!("f64 map on a bool or t3 tensor"),
         })
         .map(wrap)
         .map_err(|e| self.terr(e, sp))
@@ -296,7 +303,7 @@ impl Interp<'_> {
                 Value::Tensor(t) => {
                     let r = map_n(&[Op::T(t)], true, |e| match e[0] {
                         Elem::F(x) => Elem::B(x.is_nan()),
-                        Elem::B(_) => unreachable!("is_nan of a bool tensor"),
+                        Elem::B(_) | Elem::T(_) => unreachable!("is_nan of a bool or t3 tensor"),
                     });
                     wrap(r.map_err(|e| te(self, e))?)
                 }
@@ -316,12 +323,17 @@ impl Interp<'_> {
                 if !any_t {
                     if matches!(v[0], Value::Bool(true)) { v[1].clone() } else { v[2].clone() }
                 } else {
-                    let out_bool = match &v[1] {
-                        Value::Bool(_) => true,
-                        Value::Tensor(t) => matches!(t.data, TData::B(_)),
-                        _ => false,
+                    let out = match &v[1] {
+                        Value::Bool(_) => tensor::Out::B,
+                        Value::T3(_) => tensor::Out::T,
+                        Value::Tensor(t) => match t.data {
+                            TData::B(_) => tensor::Out::B,
+                            TData::T(_) => tensor::Out::T,
+                            TData::F(_) => tensor::Out::F,
+                        },
+                        _ => tensor::Out::F,
                     };
-                    let r = map_n(&[as_op(&v[0]), as_op(&v[1]), as_op(&v[2])], out_bool, |e| match e[0] {
+                    let r = tensor::map_into(&[as_op(&v[0]), as_op(&v[1]), as_op(&v[2])], out, |e| match e[0] {
                         Elem::B(c) => {
                             if c {
                                 e[1]
@@ -329,7 +341,7 @@ impl Interp<'_> {
                                 e[2]
                             }
                         }
-                        Elem::F(_) => unreachable!("`where` with a f64 condition"),
+                        Elem::F(_) | Elem::T(_) => unreachable!("`where` with a condition that is not bool"),
                     });
                     wrap(r.map_err(|e| te(self, e))?)
                 }
@@ -380,6 +392,7 @@ impl Interp<'_> {
                 let xs: Vec<Value> = match &tensor_of(&v[0]).data {
                     TData::F(d) => d.iter().map(|x| Value::Float(*x)).collect(),
                     TData::B(d) => d.iter().map(|x| Value::Bool(*x)).collect(),
+                    TData::T(d) => d.to_vec().iter().map(|x| Value::T3(*x)).collect(),
                 };
                 Value::List(Rc::new(xs))
             }
@@ -401,6 +414,9 @@ impl Interp<'_> {
                 let a = axis_arg(&v[2]).expect("axis id");
                 wrap(tensor::contract(tensor_of(&v[0]), tensor_of(&v[1]), a).map_err(|e| te(self, e))?)
             }
+            B::Ternary => wrap(tensor::ternary(tensor_of(&v[0]), v.get(1).map(float_of))),
+            // `float` of a `t3` tensor (of a scalar, it is the plain builtin)
+            B::ToFloat if any_t => wrap(tensor::t3_to_f(tensor_of(&v[0]))),
             // only the temporal check cares: at run time the data is the data
             B::Observed => v[0].clone(),
             B::TAnd | B::TOr => {

@@ -35,6 +35,7 @@ fn ty_sx(ck: Checker, t0: Ty) -> str {
         TNever => "never",
         TBytes => "bytes",
         THoldout => "holdout",
+        TT3 => "t3",
         TList(x) => "(list " + ty_sx(ck, x) + ")",
         TMap(k, x) => "(map " + ty_sx(ck, k) + " " + ty_sx(ck, x) + ")",
         TTuple(xs) => {

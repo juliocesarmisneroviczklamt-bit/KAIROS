@@ -358,6 +358,7 @@ impl<'a> Interp<'a> {
             HExpr::Unary(op, x, sp) => match (op, self.eval(x, f)?) {
                 (UnOp::Neg, Value::Int(i)) => i.checked_neg().map(Value::Int).ok_or_else(|| overflow(*sp)),
                 (UnOp::Neg, Value::Float(x)) => Ok(Value::Float(-x)),
+                (UnOp::Neg, Value::T3(t)) => Ok(Value::T3(-t)),
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                 (op, Value::Tensor(t)) => self.tensor_unary(*op, &t, *sp),
                 // tracked values and structs/tuples of them (the tangent space)
@@ -864,10 +865,12 @@ impl<'a> Interp<'a> {
             Builtin::ToFloat => Ok(Value::Float(match &v[0] {
                 Value::Int(i) => *i as f64,
                 Value::Float(x) => *x,
+                Value::T3(t) => f64::from(*t),
                 other => unreachable!("float of {other:?}"),
             })),
             Builtin::ToInt => match &v[0] {
                 Value::Int(i) => Ok(Value::Int(*i)),
+                Value::T3(t) => Ok(Value::Int(i64::from(*t))),
                 Value::Float(x) => {
                     if !x.is_finite() || x.abs() >= 9.2e18 {
                         return err("R0009", sp, format!("cannot convert {x:?} to i64"));
@@ -1141,6 +1144,7 @@ impl<'a> Interp<'a> {
             Value::Int(i) => i.to_string(),
             Value::Float(x) => format!("{x:?}"),
             Value::Bool(b) => b.to_string(),
+            Value::T3(t) => t.to_string(),
             Value::Str(s) => {
                 if top {
                     s.to_string()

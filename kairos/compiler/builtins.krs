@@ -16,7 +16,7 @@ fn builtin_names() -> List[str] {
     "is_uppercase", "to_bits", "from_bits", "keys", "values", "items", "get", "remove", "nan_quantile", "merge_days", "assert",
     "mean", "prod", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "is_nan", "fill_nan", "where",
     "size", "zeros", "ones", "full", "zeros_like", "full_like", "tensor", "to_list", "rank", "top_k",
-    "bottom_k", "contract", "observed", "grad", "value_and_grad", "tanh", "sigmoid", "relu", "softplus",
+    "bottom_k", "contract", "ternary", "observed", "grad", "value_and_grad", "tanh", "sigmoid", "relu", "softplus",
     "randn", "smooth_max", "smooth_min", "smooth_step", "open_once", "and", "or",
     ]
 }

@@ -1,0 +1,2 @@
+let v = ternary(tensor([1.0], asset))
+print(ternary(v))

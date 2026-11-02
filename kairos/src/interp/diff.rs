@@ -139,6 +139,7 @@ impl Interp<'_> {
             MapFn::Relu => if x > 0.0 { x } else { 0.0 },
             MapFn::Softplus => softplus(x),
             MapFn::FillNan => x,
+            MapFn::Ste => unreachable!("ternary is not mapped"),
         };
         match v {
             Value::Float(x) => Ok(Value::Float(g(*x))),
@@ -163,7 +164,7 @@ impl Interp<'_> {
     fn map_tensor(&self, t: &TensorVal, sp: Span, g: impl Fn(f64) -> f64) -> R<Value> {
         let r = tensor::map_n(&[tensor::Op::T(t)], false, |e| match e[0] {
             tensor::Elem::F(x) => tensor::Elem::F(g(x)),
-            tensor::Elem::B(_) => unreachable!("math on a bool tensor"),
+            tensor::Elem::B(_) | tensor::Elem::T(_) => unreachable!("math on a bool or t3 tensor"),
         });
         r.map(tensors::wrap).map_err(|e| self.terr(e, sp))
     }
@@ -376,7 +377,12 @@ impl Interp<'_> {
                 let (fx, fy) = (self.fwd(&v[0]), self.fwd(&v[1]));
                 let plain = self.tensor_builtin(B::Contract, &[fx, fy, v[2].clone()], sp)?.expect("contract");
                 let ax = Self::axis(&v[2]).expect("axis id");
-                let (ix, iy) = (self.node_of(&v[0]), self.node_of(&v[1]));
+                // M18: a `t3` side takes part in the gradient as its f64 (-1, 0, 1)
+                let as_f = |x: &Value| match x {
+                    Value::Tensor(t) if matches!(t.data, TData::T(_)) => Value::Tensor(Rc::new(tensor::t3_to_f(t))),
+                    other => other.clone(),
+                };
+                let (ix, iy) = (self.node_of(&as_f(&v[0])), self.node_of(&as_f(&v[1])));
                 Some(self.push(plain, GOp::Contract(ix, iy, vec![ax])))
             }
             B::Tensor => {
@@ -393,6 +399,17 @@ impl Interp<'_> {
                 Some(Value::List(Rc::new(d.iter().enumerate().map(|(k, x)| self.push(Value::Float(*x), GOp::Elem(i, k))).collect())))
             }
             B::ToFloat if is_node(&v[0]) => Some(v[0].clone()),
+            // M18: the straight-through estimator: the trits of a tracked tensor, as f64 (-1, 0,
+            // 1), whose gradient is the one that reaches them
+            B::Ternary if is_node(&v[0]) => {
+                let mut plain_args = vec![self.fwd(&v[0])];
+                if v.len() > 1 {
+                    plain_args.push(self.fwd(&v[1]));
+                }
+                let Some(Value::Tensor(q)) = self.tensor_builtin(B::Ternary, &plain_args, sp)? else { unreachable!("ternary") };
+                let Value::Node(i) = v[0] else { unreachable!() };
+                Some(self.push(Value::Tensor(Rc::new(tensor::t3_to_f(&q))), GOp::Map(MapFn::Ste, i)))
+            }
             B::Full | B::FullLike => {
                 // a tracked fill value: zeros + value, so the gradient sums over the tensor
                 let k = if b == B::Full { 0 } else { 1 };

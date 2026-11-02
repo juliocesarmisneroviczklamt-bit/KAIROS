@@ -1,0 +1,5 @@
+let v = ternary(tensor([1.0, 2.0], asset))
+let w: Tensor[asset; t3] = v
+var z = w
+z[asset: 0] = -w[asset: 1]
+z += v
