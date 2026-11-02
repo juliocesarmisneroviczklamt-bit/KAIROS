@@ -911,4 +911,6 @@ kairos run kairos/compiler/ki.krs kairos/std programa.krs [argumentos...]
   - `exit(código)`: termina o programa com esse código de saída.
 - **Conferido:** `cargo test --release -p kairos --test wasm the_interpreter_written` compila o interpretador para WebAssembly e roda cada programa de `tests/wasm`, `tests/programs` e `tests/temporal` pelos dois interpretadores. Exige a mesma saída, os mesmos erros e o mesmo código de saída.
 
-**Ainda não roda** (para com K0001, no ponto exato): tensores, `grad`, a ponte `b3`, os protocolos e holdouts, `Bytes` e os arquivos.
+- **Tensores e `grad`** usam o runtime em Kairós do back-end WebAssembly: `rt_tensor.krs` para as operações (com as checagens e mensagens de `src/tensor.rs`) e a fita de `rt_diff.krs`, gravada nó a nó como a do interpretador Rust, com os mesmos gradientes, bit a bit. O `examples/mlp.krs` treina com as mesmas perdas.
+
+**Ainda não roda** (para com K0001, no ponto exato): a ponte `b3`, os protocolos e holdouts, `Bytes` e os arquivos.

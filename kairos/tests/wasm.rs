@@ -595,7 +595,7 @@ fn the_interpreter_written_in_kairos_runs_like_the_rust_one() {
             assert_eq!(k, r, "{path}: the interpreter written in Kairós and the Rust one differ");
             same += 1;
         }
-        assert!(same >= 80, "{same} programs run the same, {later} not yet");
+        assert!(same >= 100, "{same} programs run the same, {later} not yet");
         println!("{same} programs run the same in the interpreter written in Kairós; {later} use what it does not run yet");
     })
 }

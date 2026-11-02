@@ -59,6 +59,8 @@ struct KSt {
     e0: KE,
     no: List[KV],
     unit: KV,
+    tape: RtDTape,
+    tracking: bool,
 }
 
 fn ki_new(ck: Checker, srcs: List[str], prog_args: List[str]) -> KSt {
@@ -66,7 +68,7 @@ fn ki_new(ck: Checker, srcs: List[str], prog_args: List[str]) -> KSt {
     let no: List[KV] = []
     let unit = KV { k: 0, n: 0, m: 0, x: 0.0, s: "", xs: no, e: e0 }
     KSt { ck: ck, srcs: srcs, args: prog_args, ctl: 0, ret: unit, code: "", msg: "", hint: "", lo: 0, hi: 0, file: 0,
-        depth: 0, uid: 0, e0: e0, no: no, unit: unit }
+        depth: 0, uid: 0, e0: e0, no: no, unit: unit, tape: rt_d_new(), tracking: false }
 }
 
 // ------------------------------------------------------------------ values
@@ -196,6 +198,8 @@ fn ki_show(st: KSt, v: KV, top: bool) -> str {
         return if v.n == 3 { "<value_and_grad>" } else { "<grad>" }
     }
     if k == 11 { return "<" + str(len(v.e.by)) + " bytes>" }
+    if k == 12 { return rt_t_show(v.e.t, ki_axis_names(st)) }
+    if k == 14 { return ki_show(st, ki_fwd(st, v), top) }
     if k == 13 { return "<holdout of protocol " + ki_debug_str(st.ck.protocols[v.n].name) + ">" }
     "<value>"
 }
@@ -232,6 +236,15 @@ fn ki_eq(a: KV, b: KV) -> bool {
         return true
     }
     if k == 11 { return a.e.by == b.e.by }
+    if k == 12 {
+        let x = a.e.t
+        let y = b.e.t
+        if x.boolean != y.boolean or x.axes != y.axes or x.shape != y.shape or len(x.data) != len(y.data) { return false }
+        for i in 0..len(x.data) {
+            if x.data[i] != y.data[i] { return false }
+        }
+        return true
+    }
     false
 }
 
@@ -348,6 +361,9 @@ fn ki_pow(x: i64, e: i64) -> (bool, i64) {
 // ------------------------------------------------------------------ operators
 
 fn ki_bin(inout st: KSt, op: str, a: KV, b: KV, at: H) -> KV {
+    if (a.k == 6 or a.k == 7 or b.k == 6 or b.k == 7) and contains(["+", "-", "*", "/", "^", "%"], op) { return ki_bin_fields(inout st, op, a, b, at) }
+    if a.k == 14 or b.k == 14 { return ki_bin_diff(inout st, op, a, b, at) }
+    if a.k == 12 or b.k == 12 { return ki_tbin(inout st, op, a, b, at) }
     if a.k == 1 and b.k == 1 {
         let x = a.n
         let y = b.n
@@ -596,7 +612,7 @@ fn ki_call_value(inout st: KSt, fv: KV, vs: List[KV], at: H) -> KV {
         for j in 0..len(lb.caps) { fr[lb.caps[j]] = fv.xs[j] }
         return ki_enter(inout st, inout fr, lb.body, at)
     }
-    ki_fail(inout st, at, "K0001", "`grad` is not in the interpreter written in Kairós yet", "")
+    ki_run_grad(inout st, fv, vs, at)
 }
 
 // ------------------------------------------------------------------ the evaluator
@@ -700,7 +716,11 @@ fn ki_ev(inout st: KSt, inout f: List[KV], e: H) -> KV {
     if k == "unary" {
         let x = ki_ev(inout st, inout f, e.kids[0])
         if st.ctl != 0 { return st.unit }
-        if e.text == "not" { return kv_b(st, x.n != 1) }
+        if e.text == "not" {
+            if x.k == 12 { return kv_t(st, rt_t_map1(1, x.e.t)) }
+            return kv_b(st, x.n != 1)
+        }
+        if x.k == 12 or x.k == 6 or x.k == 7 or x.k == 14 { return ki_neg(inout st, x, e) }
         if x.k == 1 {
             if x.n == -9223372036854775807 - 1 { return ki_overflow(inout st, e) }
             return kv_i(st, -x.n)
@@ -827,8 +847,714 @@ fn ki_ev(inout st: KSt, inout f: List[KV], e: H) -> KV {
         }
         return ki_call_value(inout st, fv, vs, e)
     }
+    if k == "tindex" { return ki_tindex(inout st, inout f, e) }
+    if k == "tassign" { return ki_tassign(inout st, inout f, e) }
     if k == "-" { return st.unit }
     ki_fail(inout st, e, "K0001", "`" + k + "` is not in the interpreter written in Kairós yet", "")
+}
+
+// ------------------------------------------------------------------ tensors
+
+// A tensor as a value: one with no axes left is a scalar (the interpreter's `wrap`).
+fn kv_t(st: KSt, t: RtT) -> KV {
+    if len(t.axes) == 0 {
+        return if t.boolean { kv_b(st, t.data[0] != 0.0) } else { kv_f(st, t.data[0]) }
+    }
+    KV { k: 12, n: 0, m: 0, x: 0.0, s: "", xs: st.no, e: KE { mp: st.e0.mp, by: st.e0.by, t: t } }
+}
+
+fn ki_axis_names(st: KSt) -> List[str] {
+    var names: List[str] = []
+    for a in st.ck.axes { names.push(a.name) }
+    names
+}
+
+fn ki_axis(st: KSt, a: i64) -> str {
+    st.ck.axes[a].name
+}
+
+// an operand of an element-wise operation: a tensor, or a scalar repeated everywhere
+fn ki_op_t(v: KV) -> RtT {
+    if v.k == 12 { return v.e.t }
+    if v.k == 3 { return rt_t_scalar(if v.n == 1 { 1.0 } else { 0.0 }, true) }
+    rt_t_scalar(ki_float(v), false)
+}
+
+fn ki_size_mismatch(inout st: KSt, at: H, ax: i64, a: i64, b: i64) -> KV {
+    ki_fail(inout st, at, "R0201", "size mismatch on axis `" + ki_axis(st, ax) + "`: " + str(a) + " vs " + str(b), "")
+}
+
+// The frame of element-wise operands (src/tensor.rs frame): the first one with the most axes;
+// every other tensor's axes are its own with the same sizes (R0201).
+fn ki_frame_ok(inout st: KSt, ops: List[RtT], at: H) -> bool {
+    var bi = -1
+    for i in 0..len(ops) {
+        if len(ops[i].axes) > 0 and (bi < 0 or len(ops[i].axes) > len(ops[bi].axes)) { bi = i }
+    }
+    if bi < 0 { return true }
+    let b = ops[bi]
+    for t in ops {
+        for k in 0..len(t.axes) {
+            let p = rt_t_pos(b, t.axes[k])
+            if p >= 0 and b.shape[p] != t.shape[k] {
+                let _ = ki_size_mismatch(inout st, at, t.axes[k], b.shape[p], t.shape[k])
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn ki_op_code(op: str) -> i64 {
+    let ops = ["+", "-", "*", "/", "%", "^", "==", "!=", "<", ">", "<=", ">="]
+    for i in 0..len(ops) {
+        if ops[i] == op { return i }
+    }
+    -1
+}
+
+fn ki_tbin(inout st: KSt, op: str, a: KV, b: KV, at: H) -> KV {
+    let ta = ki_op_t(a)
+    let tb = ki_op_t(b)
+    if not ki_frame_ok(inout st, [ta, tb], at) { return st.unit }
+    kv_t(st, rt_t_map2(ki_op_code(op), ta, tb))
+}
+
+// a op b with a struct or a tuple: field by field (a value on the other side goes with each)
+fn ki_bin_fields(inout st: KSt, op: str, a: KV, b: KV, at: H) -> KV {
+    let fa = a.k == 6 or a.k == 7
+    let fb = b.k == 6 or b.k == 7
+    let n = if fa { len(a.xs) } else { len(b.xs) }
+    var xs: List[KV] = []
+    for i in 0..n {
+        xs.push(ki_bin(inout st, op, if fa { a.xs[i] } else { a }, if fb { b.xs[i] } else { b }, at))
+        if st.ctl != 0 { return st.unit }
+    }
+    var r = if fa { a } else { b }
+    r.xs = xs
+    r
+}
+
+fn ki_neg(inout st: KSt, v: KV, at: H) -> KV {
+    if v.k == 14 {
+        let r = ki_neg(inout st, ki_fwd(st, v), at)
+        return kv_node(st, rt_d_map(inout st.tape, 0, v.n, ki_op_t(r)))
+    }
+    if v.k == 12 { return kv_t(st, rt_t_map1(0, v.e.t)) }
+    if v.k == 6 or v.k == 7 {
+        var xs: List[KV] = []
+        for x in v.xs {
+            xs.push(ki_neg(inout st, x, at))
+            if st.ctl != 0 { return st.unit }
+        }
+        var r = v
+        r.xs = xs
+        return r
+    }
+    if v.k == 2 { return kv_f(st, -v.x) }
+    if v.n == -9223372036854775807 - 1 { return ki_overflow(inout st, at) }
+    kv_i(st, -v.n)
+}
+
+// f(x) for a float, a tensor, or a struct or tuple of them (rt_t_fn's codes: 2 abs, 3 sqrt,
+// 4 exp, 5 ln, 9 tanh, 10 sigmoid, 11 relu, 12 softplus, 14 the step)
+fn ki_map_any(inout st: KSt, code: i64, v: KV, at: H) -> KV {
+    if v.k == 14 {
+        let r = ki_map_any(inout st, code, ki_fwd(st, v), at)
+        return kv_node(st, rt_d_map(inout st.tape, code, v.n, ki_op_t(r)))
+    }
+    if v.k == 12 { return kv_t(st, rt_t_map1(code, v.e.t)) }
+    if v.k == 6 or v.k == 7 {
+        var xs: List[KV] = []
+        for x in v.xs { xs.push(ki_map_any(inout st, code, x, at)) }
+        var r = v
+        r.xs = xs
+        return r
+    }
+    kv_f(st, rt_t_fn(code, ki_float(v)))
+}
+
+// the zero of the tangent space of v: the same shape, all zeros
+fn ki_zero_of(st: KSt, v: KV) -> KV {
+    if v.k == 14 { return ki_zero_of(st, ki_fwd(st, v)) }
+    if v.k == 2 { return kv_f(st, 0.0) }
+    if v.k == 12 { return kv_t(st, rt_t_full(v.e.t.axes, v.e.t.shape, 0.0, false)) }
+    if v.k == 5 or v.k == 6 or v.k == 7 {
+        var xs: List[KV] = []
+        for x in v.xs { xs.push(ki_zero_of(st, x)) }
+        var r = v
+        r.xs = xs
+        return r
+    }
+    v
+}
+
+// The selectors of x[...] (src/interp/tensors.rs eval_sels), in order: (axis, 0 an index / 1 a
+// range, lo, hi past the end).
+fn ki_sels(inout st: KSt, inout f: List[KV], e: H, first: i64, last: i64) -> List[(i64, i64, i64, i64)] {
+    var out: List[(i64, i64, i64, i64)] = []
+    for j in first..last {
+        let s = e.kids[j]
+        if s.kind == "at" {
+            let i = ki_ev(inout st, inout f, s.kids[0])
+            if st.ctl != 0 { return out }
+            out.push((s.n, 0, i.n, wrapping_add(i.n, 1)))
+        } else {
+            let lo = ki_ev(inout st, inout f, s.kids[0])
+            if st.ctl != 0 { return out }
+            let hi = ki_ev(inout st, inout f, s.kids[1])
+            if st.ctl != 0 { return out }
+            var h = hi.n
+            if s.m == 1 {
+                if h == 9223372036854775807 {
+                    let _ = ki_overflow(inout st, e)
+                    return out
+                }
+                h += 1
+            }
+            out.push((s.n, 1, lo.n, h))
+        }
+    }
+    out
+}
+
+// R0001 when a selector leaves the tensor (src/tensor.rs region), in order.
+fn ki_sels_ok(inout st: KSt, t: RtT, sels: List[(i64, i64, i64, i64)], at: H) -> bool {
+    for s in sels {
+        let p = rt_t_pos(t, s.0)
+        let n = t.shape[p]
+        let name = ki_axis(st, s.0)
+        if s.1 == 0 {
+            if s.2 < 0 or s.2 >= n {
+                let _ = ki_fail(inout st, at, "R0001", "index " + str(s.2) + " out of bounds for axis `" + name + "` of size " + str(n), "")
+                return false
+            }
+        } else {
+            if s.3 < s.2 {
+                let _ = ki_fail(inout st, at, "R0001", "reversed range " + str(s.2) + ".." + str(s.3) + " on axis `" + name + "`", "")
+                return false
+            }
+            if s.2 < 0 or s.3 > n {
+                let bad = if s.2 < 0 { s.2 } else { s.3 - 1 }
+                let _ = ki_fail(inout st, at, "R0001", "index " + str(bad) + " out of bounds for axis `" + name + "` of size " + str(n), "")
+                return false
+            }
+        }
+    }
+    true
+}
+
+// x[sels] = v: the selectors, then the sizes of a tensor value over the axes left (R0201).
+fn ki_assign_ok(inout st: KSt, t: RtT, sels: List[(i64, i64, i64, i64)], v: KV, at: H) -> bool {
+    if not ki_sels_ok(inout st, t, sels, at) { return false }
+    if v.k != 12 { return true }
+    let r = rt_t_region(t, sels)
+    let vt = v.e.t
+    for k in 0..len(t.axes) {
+        if r.2[k] {
+            let p = rt_t_pos(vt, t.axes[k])
+            if p >= 0 and vt.shape[p] != r.1[k] {
+                let _ = ki_size_mismatch(inout st, at, t.axes[k], r.1[k], vt.shape[p])
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn ki_tindex(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    let x = ki_ev(inout st, inout f, e.kids[0])
+    if st.ctl != 0 { return st.unit }
+    let sels = ki_sels(inout st, inout f, e, 1, len(e.kids))
+    if st.ctl != 0 { return st.unit }
+    if x.k == 14 { return ki_select_diff(inout st, x, sels, e) }
+    if not ki_sels_ok(inout st, x.e.t, sels, e) { return st.unit }
+    kv_t(st, rt_t_select(x.e.t, sels))
+}
+
+// x[sels] op= v: the value first, then the selectors, then the place; the tensor changes in place.
+fn ki_tassign(inout st: KSt, inout f: List[KV], e: H) -> KV {
+    let n = len(e.kids)
+    let rhs0 = ki_ev(inout st, inout f, e.kids[n - 1])
+    if st.ctl != 0 { return st.unit }
+    let sels = ki_sels(inout st, inout f, e, 1, n - 1)
+    if st.ctl != 0 { return st.unit }
+    var steps: List[KStep] = []
+    let root = ki_place(inout st, inout f, e.kids[0], inout steps)
+    if st.ctl != 0 { return st.unit }
+    var tv = ki_at(inout st, inout f[root], steps, 0, 2, st.unit, e)
+    if st.ctl != 0 { return st.unit }
+    if tv.k == 14 or rhs0.k == 14 {
+        // inside `grad`: the assignment is a node of the tape
+        var rv = rhs0
+        if e.text != "=" {
+            var cur = st.unit
+            if tv.k == 14 {
+                cur = ki_select_diff(inout st, tv, sels, e)
+            } else if ki_sels_ok(inout st, tv.e.t, sels, e) {
+                cur = kv_t(st, rt_t_select(tv.e.t, sels))
+            }
+            if st.ctl == 0 { rv = ki_bin(inout st, e.text, cur, rhs0, e) }
+        }
+        var nv = tv
+        if st.ctl == 0 { nv = ki_assign_diff(inout st, tv, sels, rv, e) }
+        let _ = ki_at(inout st, inout f[root], steps, 0, 8, if st.ctl == 0 { nv } else { tv }, e)
+        return st.unit
+    }
+    var rhs = rhs0
+    if e.text != "=" {
+        if ki_sels_ok(inout st, tv.e.t, sels, e) {
+            let cur = kv_t(st, rt_t_select(tv.e.t, sels))
+            rhs = ki_bin(inout st, e.text, cur, rhs0, e)
+        }
+    }
+    if st.ctl == 0 and ki_assign_ok(inout st, tv.e.t, sels, rhs, e) {
+        rt_t_assign(inout tv.e.t, sels, ki_op_t(rhs))
+    }
+    let _ = ki_at(inout st, inout f[root], steps, 0, 8, tv, e)
+    st.unit
+}
+
+// the sizes of zeros/ones/full/randn: (axes, shape) from (axis, size) pairs, or an error
+fn ki_dims(inout st: KSt, vs: List[KV], from: i64, randn: bool, at: H) -> (bool, List[i64], List[i64]) {
+    var axes: List[i64] = []
+    var shape: List[i64] = []
+    var i = from
+    while i + 1 < len(vs) {
+        let a = vs[i].n
+        let n = vs[i + 1].n
+        if n < 0 {
+            let msg = if randn { "invalid size " + str(n) + " for axis `" + ki_axis(st, a) + "`" } else { "negative size " + str(n) + " for axis `" + ki_axis(st, a) + "`" }
+            let _ = ki_fail(inout st, at, "R0203", msg, "")
+            return (false, axes, shape)
+        }
+        axes.push(a)
+        shape.push(n)
+        i += 2
+    }
+    if randn {
+        if rt_t_too_large(shape) {
+            let _ = ki_fail(inout st, at, "R0203", "tensor too large", "")
+            return (false, axes, shape)
+        }
+        return (true, axes, shape)
+    }
+    // at most 2^28 values, the first axis that goes past it is named
+    var total = 1
+    for k in 0..len(shape) {
+        let sz = shape[k]
+        if sz != 0 and total > 268435456 / sz {
+            let _ = ki_fail(inout st, at, "R0203", "tensor too large (axis `" + ki_axis(st, axes[k]) + "` of size " + str(sz) + ")", "")
+            return (false, axes, shape)
+        }
+        total = total * sz
+    }
+    (true, axes, shape)
+}
+
+fn ki_red_kind(b: str) -> i64 {
+    let names = ["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count"]
+    for i in 0..len(names) {
+        if names[i] == b { return i }
+    }
+    -1
+}
+
+// The builtins of tensors and of the AI engine (src/interp/tensors.rs, diff.rs): (handled, value).
+fn ki_tensor_builtin(inout st: KSt, b: str, vs: List[KV], at: H) -> (bool, KV) {
+    let n = len(vs)
+    let t0 = n > 0 and vs[0].k == 12
+    var any_t = false
+    for v in vs {
+        if v.k == 12 { any_t = true }
+    }
+    // reductions: [tensor, axis or -1]
+    let rk = ki_red_kind(b)
+    if rk >= 0 and t0 and n == 2 and vs[1].k == 1 { return (true, kv_t(st, rt_t_reduce(vs[0].e.t, vs[1].n, rk))) }
+    if (b == "max" or b == "min") and any_t {
+        let ta = ki_op_t(vs[0])
+        let tb = ki_op_t(vs[1])
+        if not ki_frame_ok(inout st, [ta, tb], at) { return (true, st.unit) }
+        return (true, kv_t(st, rt_t_map2(if b == "max" { 14 } else { 15 }, ta, tb)))
+    }
+    if any_t and n == 1 {
+        let maps = ["abs", "sqrt", "exp", "ln", "floor", "ceil", "round", "is_nan"]
+        let codes_ = [2, 3, 4, 5, 6, 7, 8, 13]
+        for i in 0..len(maps) {
+            if b == maps[i] { return (true, kv_t(st, rt_t_map1(codes_[i], vs[0].e.t))) }
+        }
+    }
+    if b == "fill_nan" {
+        if t0 { return (true, kv_t(st, rt_t_fill_nan(vs[0].e.t, vs[1].x))) }
+        return (true, kv_f(st, if is_nan(vs[0].x) { vs[1].x } else { vs[0].x }))
+    }
+    if b == "where" {
+        if not any_t { return (true, if vs[0].n == 1 { vs[1] } else { vs[2] }) }
+        let tc = ki_op_t(vs[0])
+        let ta = ki_op_t(vs[1])
+        let tb = ki_op_t(vs[2])
+        if not ki_frame_ok(inout st, [tc, ta, tb], at) { return (true, st.unit) }
+        return (true, kv_t(st, rt_t_where(tc, ta, tb)))
+    }
+    if b == "size" { return (true, kv_i(st, rt_t_size(vs[0].e.t, vs[1].n))) }
+    if b == "zeros" or b == "ones" or b == "full" {
+        let fill = if b == "zeros" { kv_f(st, 0.0) } else if b == "ones" { kv_f(st, 1.0) } else { vs[0] }
+        let d = ki_dims(inout st, vs, if b == "full" { 1 } else { 0 }, false, at)
+        if not d.0 { return (true, st.unit) }
+        return (true, kv_t(st, rt_t_full(d.1, d.2, if fill.k == 3 { float(fill.n) } else { ki_float(fill) }, fill.k == 3)))
+    }
+    if (b == "zeros_like" or b == "full_like") and t0 {
+        let fill = if b == "zeros_like" { kv_f(st, 0.0) } else { vs[1] }
+        return (true, kv_t(st, rt_t_full(vs[0].e.t.axes, vs[0].e.t.shape, if fill.k == 3 { float(fill.n) } else { ki_float(fill) }, fill.k == 3)))
+    }
+    if b == "tensor" {
+        var d: List[f64] = []
+        for x in vs[0].xs { d.push(if x.k == 3 { float(x.n) } else { ki_float(x) }) }
+        return (true, kv_t(st, RtT { axes: [vs[1].n], shape: [len(d)], data: d, boolean: vs[2].n == 1 }))
+    }
+    if b == "to_list" {
+        let t = vs[0].e.t
+        var xs: List[KV] = []
+        for x in t.data { xs.push(if t.boolean { kv_b(st, x != 0.0) } else { kv_f(st, x) }) }
+        return (true, kv_l(st, 5, xs))
+    }
+    if b == "nan_quantile" { return (true, kv_t(st, rt_t_nan_quantile(vs[0].e.t, vs[1].x, vs[2].n))) }
+    if b == "merge_days" { return (true, kv_t(st, rt_t_merge_days(vs[0].e.t))) }
+    if b == "rank" { return (true, kv_t(st, rt_t_rank(vs[0].e.t, vs[1].n))) }
+    if b == "top_k" or b == "bottom_k" { return (true, kv_t(st, rt_t_top_k(vs[0].e.t, vs[2].n, vs[1].n, b == "top_k"))) }
+    if b == "contract" {
+        let x = vs[0].e.t
+        let y = vs[1].e.t
+        let ax = vs[2].n
+        let px = rt_t_pos(x, ax)
+        let py = rt_t_pos(y, ax)
+        if y.shape[py] != x.shape[px] {
+            let _ = ki_size_mismatch(inout st, at, ax, x.shape[px], y.shape[py])
+            return (true, st.unit)
+        }
+        for k in 0..len(y.axes) {
+            if y.axes[k] == ax { continue }
+            let p = rt_t_pos(x, y.axes[k])
+            if p >= 0 and x.shape[p] != y.shape[k] {
+                let _ = ki_size_mismatch(inout st, at, y.axes[k], x.shape[p], y.shape[k])
+                return (true, st.unit)
+            }
+        }
+        return (true, kv_t(st, rt_t_contract(x, y, ax)))
+    }
+    if b == "observed" { return (true, vs[0]) }
+    if (b == "and" or b == "or") and any_t {
+        let ta = ki_op_t(vs[0])
+        let tb = ki_op_t(vs[1])
+        if not ki_frame_ok(inout st, [ta, tb], at) { return (true, st.unit) }
+        return (true, kv_t(st, rt_t_map2(if b == "and" { 12 } else { 13 }, ta, tb)))
+    }
+    (false, st.unit)
+}
+
+// ------------------------------------------------------------------ grad (src/interp/diff.rs)
+
+fn kv_node(st: KSt, i: i64) -> KV {
+    KV { k: 14, n: i, m: 0, x: 0.0, s: "", xs: st.no, e: st.e0 }
+}
+
+// the plain value behind a tracked one
+fn ki_fwd(st: KSt, v: KV) -> KV {
+    if v.k == 14 { return kv_t(st, rt_d_val(st.tape, v.n)) }
+    v
+}
+
+// fwd all the way down structs, tuples, lists, enums and maps
+fn ki_deep_fwd(st: KSt, v: KV) -> KV {
+    if v.k == 14 { return ki_fwd(st, v) }
+    if v.k == 5 or v.k == 6 or v.k == 7 or v.k == 8 {
+        if not ki_has_node(v) { return v }
+        var xs: List[KV] = []
+        for x in v.xs { xs.push(ki_deep_fwd(st, x)) }
+        var r = v
+        r.xs = xs
+        return r
+    }
+    if v.k == 10 and ki_has_node(v) {
+        var r = v
+        for key in keys(v.e.mp) { r.e.mp[key] = ki_deep_fwd(st, v.e.mp[key]) }
+        return r
+    }
+    v
+}
+
+// does v hold a tracked value (inside structs, tuples, lists, enums and maps too)?
+fn ki_has_node(v: KV) -> bool {
+    if v.k == 14 { return true }
+    if v.k == 5 or v.k == 6 or v.k == 7 or v.k == 8 {
+        for x in v.xs {
+            if ki_has_node(x) { return true }
+        }
+        return false
+    }
+    if v.k == 10 {
+        for key in keys(v.e.mp) {
+            if ki_has_node(v.e.mp[key]) { return true }
+        }
+    }
+    false
+}
+
+fn ki_any_node(vs: List[KV]) -> bool {
+    for v in vs {
+        if ki_has_node(v) { return true }
+    }
+    false
+}
+
+// the node of a value: a tracked one's own, a plain one recorded as a constant
+fn ki_node_of(inout st: KSt, v: KV) -> i64 {
+    if v.k == 14 { return v.n }
+    rt_d_const(inout st.tape, ki_op_t(v))
+}
+
+// arithmetic with a tracked value: the plain result, recorded with its operands' nodes
+fn ki_bin_diff(inout st: KSt, op: str, a: KV, b: KV, at: H) -> KV {
+    let r = ki_bin(inout st, op, ki_fwd(st, a), ki_fwd(st, b), at)
+    if st.ctl != 0 { return st.unit }
+    // comparisons: plain booleans, no gradient
+    if not contains(["+", "-", "*", "/", "^", "%"], op) { return r }
+    let ia = ki_node_of(inout st, a)
+    let ib = ki_node_of(inout st, b)
+    kv_node(st, rt_d_bin(inout st.tape, ki_op_code(op), ia, ib, ki_op_t(r)))
+}
+
+fn ki_select_diff(inout st: KSt, x: KV, sels: List[(i64, i64, i64, i64)], at: H) -> KV {
+    let t = ki_fwd(st, x).e.t
+    if not ki_sels_ok(inout st, t, sels, at) { return st.unit }
+    kv_node(st, rt_d_select(inout st.tape, x.n, sels, rt_t_select(t, sels)))
+}
+
+// x[sels] = v when x or v is tracked: a new node takes x's place
+fn ki_assign_diff(inout st: KSt, old: KV, sels: List[(i64, i64, i64, i64)], v: KV, at: H) -> KV {
+    var t = ki_fwd(st, old).e.t
+    let fv = ki_fwd(st, v)
+    if not ki_assign_ok(inout st, t, sels, fv, at) { return st.unit }
+    rt_t_assign(inout t, sels, ki_op_t(fv))
+    let io = ki_node_of(inout st, old)
+    let iv = ki_node_of(inout st, v)
+    kv_node(st, rt_d_assign(inout st.tape, io, iv, sels, t))
+}
+
+// the argument differentiated becomes leaves: floats and tensors, inside structs, tuples, lists
+fn ki_leaves(inout st: KSt, v: KV) -> KV {
+    if v.k == 2 or v.k == 12 { return kv_node(st, rt_d_leaf(inout st.tape, ki_op_t(v))) }
+    if v.k == 5 or v.k == 6 or v.k == 7 {
+        var xs: List[KV] = []
+        for x in v.xs { xs.push(ki_leaves(inout st, x)) }
+        var r = v
+        r.xs = xs
+        return r
+    }
+    v
+}
+
+// the gradients of the leaves, in the argument's shape (zeros where the result does not reach)
+fn ki_collect(st: KSt, leaves: KV, gs: RtDGrads) -> KV {
+    if leaves.k == 14 { return kv_t(st, rt_d_grad(st.tape, gs, leaves.n)) }
+    if leaves.k == 5 or leaves.k == 6 or leaves.k == 7 {
+        var xs: List[KV] = []
+        for x in leaves.xs { xs.push(ki_collect(st, x, gs)) }
+        var r = leaves
+        r.xs = xs
+        return r
+    }
+    leaves
+}
+
+// grad(f)(args): f runs with the argument `wrt` tracked, then the tape is walked backwards
+fn ki_run_grad(inout st: KSt, fv: KV, vs: List[KV], at: H) -> KV {
+    if st.tracking { return ki_fail(inout st, at, "R0401", "`grad` inside `grad` is not supported yet", "second derivatives arrive in a later milestone") }
+    st.tape = rt_d_new()
+    st.tracking = true
+    var args = vs
+    let leaves = ki_leaves(inout st, args[fv.m])
+    args[fv.m] = leaves
+    let r = ki_call_value(inout st, fv.xs[0], args, at)
+    st.tracking = false
+    if st.ctl != 0 { return st.unit }
+    var value = r
+    var gs = RtDGrads { has: [], g: [] }
+    if r.k == 14 {
+        gs = rt_d_backward(st.tape, r.n)
+        value = kv_t(st, rt_d_val(st.tape, r.n))
+    }
+    let g = ki_collect(st, leaves, gs)
+    st.tape = rt_d_new()
+    if fv.n == 3 { return kv_l(st, 6, [value, g]) }
+    g
+}
+
+// The builtins of M4 (diff.rs diff_builtin): grad, randn, the activations, the smooth rules (exact
+// outside `grad`, relaxed inside), the math of structs and tracked values, zeros_like.
+fn ki_diff_builtin(inout st: KSt, b: str, vs: List[KV], at: H) -> (bool, KV) {
+    let n = len(vs)
+    if b == "grad" or b == "value_and_grad" {
+        let f: List[KV] = [vs[0]]
+        return (true, kv_fn(inout st, if b == "grad" { 2 } else { 3 }, vs[1].n, f))
+    }
+    if b == "randn" {
+        let d = ki_dims(inout st, vs, 1, true, at)
+        if not d.0 { return (true, st.unit) }
+        return (true, kv_t(st, rt_t_randn(vs[0].n, d.1, d.2)))
+    }
+    if b == "tanh" or b == "sigmoid" or b == "relu" or b == "softplus" {
+        let code = if b == "tanh" { 9 } else if b == "sigmoid" { 10 } else if b == "relu" { 11 } else { 12 }
+        return (true, ki_map_any(inout st, code, vs[0], at))
+    }
+    if b == "smooth_max" or b == "smooth_min" {
+        let sc = ki_fwd(st, vs[2]).x
+        if not st.tracking {
+            // the exact rule outside `grad`
+            let base = if b == "smooth_max" { "max" } else { "min" }
+            if vs[0].k == 12 or vs[1].k == 12 {
+                let ta = ki_op_t(vs[0])
+                let tb = ki_op_t(vs[1])
+                if not ki_frame_ok(inout st, [ta, tb], at) { return (true, st.unit) }
+                return (true, kv_t(st, rt_t_map2(if base == "max" { 14 } else { 15 }, ta, tb)))
+            }
+            return (true, ki_max_plain(st, base, vs[0], vs[1]))
+        }
+        // max(x, y) = y + s * softplus((x - y) / s); min(x, y) = -max(-x, -y)
+        var x = vs[0]
+        var y = vs[1]
+        if b == "smooth_min" {
+            x = ki_neg(inout st, x, at)
+            y = ki_neg(inout st, y, at)
+        }
+        let d = ki_bin(inout st, "-", x, y, at)
+        let ds = ki_bin(inout st, "/", d, kv_f(st, sc), at)
+        let sp = ki_map_any(inout st, 12, ds, at)
+        let m = ki_bin(inout st, "*", sp, kv_f(st, sc), at)
+        let r = ki_bin(inout st, "+", y, m, at)
+        if st.ctl != 0 { return (true, st.unit) }
+        return (true, if b == "smooth_min" { ki_neg(inout st, r, at) } else { r })
+    }
+    if b == "smooth_step" {
+        let sc = ki_fwd(st, vs[1]).x
+        if not st.tracking { return (true, ki_map_any(inout st, 14, vs[0], at)) }
+        let d = ki_bin(inout st, "/", vs[0], kv_f(st, sc), at)
+        if st.ctl != 0 { return (true, st.unit) }
+        return (true, ki_map_any(inout st, 10, d, at))
+    }
+    if (b == "sqrt" or b == "exp" or b == "ln" or b == "abs") and n == 1 and (ki_has_node(vs[0]) or vs[0].k == 6 or vs[0].k == 7) {
+        let code = if b == "sqrt" { 3 } else if b == "exp" { 4 } else if b == "ln" { 5 } else { 2 }
+        return (true, ki_map_any(inout st, code, vs[0], at))
+    }
+    if b == "zeros_like" and n == 1 and (vs[0].k == 2 or vs[0].k == 5 or vs[0].k == 6 or vs[0].k == 7 or vs[0].k == 14) { return (true, ki_zero_of(st, vs[0])) }
+    (false, st.unit)
+}
+
+// Builtins on tracked values (diff.rs, after diff_builtin): (handled, value).
+fn ki_tracked_builtin(inout st: KSt, b: str, vs: List[KV], at: H) -> (bool, KV) {
+    let n = len(vs)
+    let rk = ki_red_kind(b)
+    if rk >= 0 and rk <= 6 and n == 2 and vs[0].k == 14 and vs[1].k == 1 {
+        let r = rt_t_reduce(ki_fwd(st, vs[0]).e.t, vs[1].n, rk)
+        return (true, kv_node(st, rt_d_reduce(inout st.tape, rk, vs[0].n, vs[1].n, r)))
+    }
+    if (b == "sum" or b == "mean" or b == "prod") and vs[0].k == 5 {
+        // a list with tracked elements: folded with the tracked arithmetic
+        let xs = vs[0].xs
+        if len(xs) == 0 and b == "mean" { return (true, ki_fail(inout st, at, "R0004", "`mean` of an empty list", "")) }
+        var acc = kv_f(st, if b == "prod" { 1.0 } else { 0.0 })
+        for x in xs {
+            acc = ki_bin(inout st, if b == "prod" { "*" } else { "+" }, acc, x, at)
+            if st.ctl != 0 { return (true, st.unit) }
+        }
+        if b == "mean" { acc = ki_bin(inout st, "/", acc, kv_f(st, float(len(xs))), at) }
+        return (true, acc)
+    }
+    if b == "minimum" or b == "maximum" {
+        // picked by the plain values, the tracked element kept
+        let xs = vs[0].xs
+        if len(xs) == 0 { return (true, ki_fail(inout st, at, "R0004", "`" + b + "` of an empty list", "")) }
+        var best = xs[0]
+        for i in 1..len(xs) {
+            let fx = ki_fwd(st, xs[i]).x
+            let fb = ki_fwd(st, best).x
+            if (b == "minimum" and fx < fb) or (b == "maximum" and fb < fx) { best = xs[i] }
+        }
+        return (true, best)
+    }
+    if (b == "max" or b == "min") and n == 2 {
+        // element by element: a where on the plain values
+        let fa = ki_fwd(st, vs[0])
+        let fb = ki_fwd(st, vs[1])
+        let cond = ki_bin(inout st, if b == "max" { ">=" } else { "<=" }, fa, fb, at)
+        if st.ctl != 0 { return (true, st.unit) }
+        var plain = st.unit
+        if fa.k == 12 or fb.k == 12 {
+            let ta = ki_op_t(fa)
+            let tb = ki_op_t(fb)
+            if not ki_frame_ok(inout st, [ta, tb], at) { return (true, st.unit) }
+            plain = kv_t(st, rt_t_map2(if b == "max" { 14 } else { 15 }, ta, tb))
+        } else {
+            plain = ki_max_plain(st, b, fa, fb)
+        }
+        let ia = ki_node_of(inout st, vs[0])
+        let ib = ki_node_of(inout st, vs[1])
+        return (true, kv_node(st, rt_d_where(inout st.tape, ki_op_t(cond), ia, ib, ki_op_t(plain))))
+    }
+    if b == "where" {
+        let cond = ki_fwd(st, vs[0])
+        let pr = ki_tensor_builtin(inout st, "where", [cond, ki_fwd(st, vs[1]), ki_fwd(st, vs[2])], at)
+        if st.ctl != 0 { return (true, st.unit) }
+        let ia = ki_node_of(inout st, vs[1])
+        let ib = ki_node_of(inout st, vs[2])
+        return (true, kv_node(st, rt_d_where(inout st.tape, ki_op_t(cond), ia, ib, ki_op_t(pr.1))))
+    }
+    if b == "fill_nan" and vs[0].k == 14 {
+        let pr = ki_tensor_builtin(inout st, "fill_nan", [ki_fwd(st, vs[0]), ki_fwd(st, vs[1])], at)
+        return (true, kv_node(st, rt_d_map(inout st.tape, 100, vs[0].n, ki_op_t(pr.1))))
+    }
+    if b == "contract" {
+        let pr = ki_tensor_builtin(inout st, "contract", [ki_fwd(st, vs[0]), ki_fwd(st, vs[1]), vs[2]], at)
+        if st.ctl != 0 { return (true, st.unit) }
+        let ix = ki_node_of(inout st, vs[0])
+        let iy = ki_node_of(inout st, vs[1])
+        return (true, kv_node(st, rt_d_contract(inout st.tape, ix, iy, vs[2].n, ki_op_t(pr.1))))
+    }
+    if b == "tensor" {
+        var plain: List[KV] = []
+        for x in vs[0].xs { plain.push(ki_fwd(st, x)) }
+        let pr = ki_tensor_builtin(inout st, "tensor", [kv_l(st, 5, plain), vs[1], vs[2]], at)
+        var parts: List[i64] = []
+        for x in vs[0].xs { parts.push(ki_node_of(inout st, x)) }
+        return (true, kv_node(st, rt_d_stack(inout st.tape, parts, ki_op_t(pr.1))))
+    }
+    if b == "to_list" and vs[0].k == 14 {
+        let t = ki_fwd(st, vs[0]).e.t
+        var xs: List[KV] = []
+        for k in 0..len(t.data) { xs.push(kv_node(st, rt_d_elem(inout st.tape, vs[0].n, k, rt_t_scalar(t.data[k], false)))) }
+        return (true, kv_l(st, 5, xs))
+    }
+    if b == "float" and vs[0].k == 14 { return (true, vs[0]) }
+    if b == "full" or b == "full_like" {
+        // a tracked fill: zeros + the value, so the gradient sums over the tensor
+        let k = if b == "full" { 0 } else { 1 }
+        var plain_args = vs
+        plain_args[k] = kv_f(st, 0.0)
+        let zeros = ki_tensor_builtin(inout st, b, plain_args, at)
+        if st.ctl != 0 { return (true, st.unit) }
+        return (true, ki_bin(inout st, "+", zeros.1, vs[k], at))
+    }
+    (false, st.unit)
+}
+
+// max/min of two plain values (diff.rs max_plain): a NaN wins
+fn ki_max_plain(st: KSt, b: str, x: KV, y: KV) -> KV {
+    if x.k == 2 {
+        if is_nan(x.x) or is_nan(y.x) { return kv_f(st, nan) }
+        if b == "max" { return kv_f(st, if y.x > x.x { y.x } else { x.x }) }
+        return kv_f(st, if y.x < x.x { y.x } else { x.x })
+    }
+    if b == "max" { kv_i(st, max(x.n, y.n)) } else { kv_i(st, min(x.n, y.n)) }
 }
 
 // ------------------------------------------------------------------ builtins
@@ -903,6 +1629,21 @@ fn ki_builtin(inout st: KSt, inout f: List[KV], e: H) -> KV {
         vs.push(ki_ev(inout st, inout f, a.kids[0]))
         if st.ctl != 0 { return st.unit }
     }
+    let dr = ki_diff_builtin(inout st, b, vs, e)
+    if st.ctl != 0 { return st.unit }
+    if dr.0 { return dr.1 }
+    if st.tracking and ki_any_node(vs) {
+        let tb = ki_tracked_builtin(inout st, b, vs, e)
+        if st.ctl != 0 { return st.unit }
+        if tb.0 { return tb.1 }
+        // not differentiable (counts, ranks, rounding, printing...): plain values from here on
+        var plain: List[KV] = []
+        for v in vs { plain.push(ki_deep_fwd(st, v)) }
+        vs = plain
+    }
+    let tr = ki_tensor_builtin(inout st, b, vs, e)
+    if st.ctl != 0 { return st.unit }
+    if tr.0 { return tr.1 }
     if b == "print" or b == "eprint" {
         var parts: List[str] = []
         for v in vs { parts.push(ki_show(st, v, true)) }
