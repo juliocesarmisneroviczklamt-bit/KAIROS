@@ -59,8 +59,11 @@ struct Wasi {
 
 /// Runs a module's `_start` with the two WASI calls it imports: (stdout, stderr, exit code).
 fn run_wasm(bytes: &[u8]) -> (String, String, i32) {
-    use wasmi::{Caller, Engine, Linker, Module, Store};
-    let engine = Engine::default();
+    use wasmi::{Caller, Config, Engine, Linker, Module, Store};
+    // deep recursion, as in wasmtime or a browser (wasmi stops at 1000 nested calls by default)
+    let mut config = Config::default();
+    config.set_max_recursion_depth(100_000);
+    let engine = Engine::new(&config);
     let module = Module::new(&engine, bytes).expect("a valid WebAssembly module");
     let mut store = Store::new(&engine, Wasi::default());
     let mut linker = <Linker<Wasi>>::new(&engine);

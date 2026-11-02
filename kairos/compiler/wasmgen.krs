@@ -31,12 +31,14 @@ struct WGen {
     glue_idx: Map[str, i64],        // "what type" -> its function
     strs: Map[str, (i64, i64)],     // a constant text -> (address, byte length)
     objs: Map[str, i64],            // a constant text -> the address of its object
+    vobjs: Map[str, i64],           // "enum variant" -> the constant of a variant without fields
     // the function being generated
     code: List[i64],
     ltypes: List[i64],              // the type of each local (the parameters first)
     nparams: i64,
     slot_local: List[i64],          // Kairós slot -> local (-1: no value)
     slot_ty: List[Ty],              // the type of each slot
+    inout_slots: List[i64],         // the slots of the `inout` parameters (given back at the end)
     depth: i64,                     // blocks, loops and ifs open
     loops: List[(i64, i64)],        // the levels of a loop's exit and continue blocks
     unchecked: bool,                // the runtime's own arithmetic is not checked
@@ -339,6 +341,7 @@ fn vt(t: Ty) -> i64 {
         TTuple(_) => wt_i32(),
         TStruct(_) => wt_i32(),
         TList(_) => wt_i32(),
+        TEnum(_) => wt_i32(),
         TUnit => 0,
         TNever => 0,
         _ => -1,
@@ -352,6 +355,7 @@ fn heap(t: Ty) -> bool {
         TTuple(_) => true,
         TStruct(_) => true,
         TList(_) => true,
+        TEnum(_) => true,
         _ => false,
     }
 }
@@ -555,6 +559,7 @@ fn bind_from(inout g: WGen, p: H, s: i64, t: Ty) {
         }
         return
     }
+    if p.kind == "pvariant" { return bind_variant(inout g, p, s) }
     if p.kind == "ptuple" {
         let fts = field_tys(g, t)
         for i in 0..len(p.kids) {
@@ -677,6 +682,7 @@ fn gen(inout g: WGen, e: H) {
         return
     }
     if k == "list" { return list_lit(inout g, e) }
+    if k == "variant" { return variant_lit(inout g, e) }
     if k == "index" {
         if is_list(e.kids[0].t) { return index_list(inout g, e) }
         return wg_fail(inout g, e, "maps")
@@ -780,11 +786,15 @@ fn gen(inout g: WGen, e: H) {
     if k == "return" {
         if e.kids[0].kind != "-" { gen(inout g, e.kids[0]) }
         epilogue(inout g)
+        exit_values(inout g)
         op(inout g, 15)
         return
     }
     if k == "match" { return match_w(inout g, e) }
     if k == "call" {
+        for a in e.kids {
+            if a.kind == "inout" { return call_inout(inout g, e) }
+        }
         // the arguments are borrowed: what the call made for them is dropped after it
         var tmps: List[(i64, Ty)] = []
         for i in 0..len(e.kids) {
@@ -1099,6 +1109,7 @@ fn for_range_w(inout g: WGen, e: H) {
 // matches.
 fn pat_test(inout g: WGen, p: H, s: i64, t: Ty) -> bool {
     if p.kind == "pwild" or p.kind == "pbind" { return false }
+    if p.kind == "pvariant" { return variant_test(inout g, p, s) }
     if p.kind == "ptuple" {
         // each field that is tested, in a local of its own; the tests joined by `and`
         let fts = field_tys(g, t)
@@ -1798,6 +1809,280 @@ fn pop_w(inout g: WGen, e: H) {
     }
 }
 
+// ------------------------------------------------------------------ enums
+//
+// An enum value: the count, the index of its variant, then the variant's fields from offset 8.
+// A variant without fields is a constant in the data (one per variant, never freed).
+
+fn is_enum(t: Ty) -> bool {
+    match t {
+        TEnum(_) => true,
+        _ => false,
+    }
+}
+
+fn enum_id(t: Ty) -> i64 {
+    match t {
+        TEnum(id) => id,
+        _ => -1,
+    }
+}
+
+// The types of the fields of variant vi of enum eid.
+fn variant_tys(g: WGen, eid: i64, vi: i64) -> List[Ty] {
+    var out: List[Ty] = []
+    for x in g.ck.enums[eid].variants[vi].1 { out.push(fin_ty(g.ck, x)) }
+    out
+}
+
+// The constant of a variant without fields: its address.
+fn variant_const(inout g: WGen, eid: i64, vi: i64) -> i64 {
+    let key = str(eid) + " " + str(vi)
+    if contains(g.vobjs, key) { return g.vobjs[key] }
+    while len(g.m.data) % 8 != 0 { g.m.data.push(0) }
+    let at = g.m.data_at + len(g.m.data)
+    for i in 0..4 { g.m.data.push(0) }
+    g.m.data.push(bit_and(vi, 255))
+    g.m.data.push(bit_and(shr(vi, 8), 255))
+    g.m.data.push(0)
+    g.m.data.push(0)
+    g.vobjs[key] = at
+    at
+}
+
+fn variant_lit(inout g: WGen, e: H) {
+    let n = len(e.kids)
+    if n == 0 { return i32c(inout g, variant_const(inout g, e.n, e.m)) }
+    let fts = variant_tys(g, e.n, e.m)
+    i64c(inout g, 8 + 8 * n)
+    call_f(inout g, rt_fn(inout g, "rt_alloc"))
+    op(inout g, 167)
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    lget(inout g, o)
+    i32c(inout g, 1)
+    store_at(inout g, wt_i32(), 0)
+    lget(inout g, o)
+    i32c(inout g, e.m)
+    store_at(inout g, wt_i32(), 4)
+    for i in 0..n {
+        let w = vt(fts[i])
+        if w > 0 { lget(inout g, o) }
+        gen(inout g, e.kids[i])
+        if w > 0 { store_at(inout g, w, 8 + 8 * i) }
+    }
+    lget(inout g, o)
+}
+
+// Is the value in local `s` of variant vi? (an i32 on the stack)
+fn tag_is(inout g: WGen, s: i64, vi: i64) {
+    lget(inout g, s)
+    load_at(inout g, wt_i32(), 4)
+    i32c(inout g, vi)
+    op(inout g, 70)
+}
+
+// The test of a variant pattern: its variant, then (only then) its fields.
+fn variant_test(inout g: WGen, p: H, s: i64) -> bool {
+    tag_is(inout g, s, p.m)
+    let fts = variant_tys(g, p.n, p.m)
+    var needs = false
+    for i in 0..len(p.kids) {
+        let k = p.kids[i].kind
+        if k != "pwild" and k != "pbind" and vt(fts[i]) > 0 { needs = true }
+    }
+    if not needs { return true }
+    open(inout g, 4, wt_i32())
+    var n = 0
+    for i in 0..len(p.kids) {
+        let sub = p.kids[i]
+        let w = vt(fts[i])
+        if sub.kind == "pwild" or sub.kind == "pbind" or w <= 0 { continue }
+        let f = new_local(inout g, w)
+        lget(inout g, s)
+        load_at(inout g, w, 8 + 8 * i)
+        lset(inout g, f)
+        if pat_test(inout g, sub, f, fts[i]) {
+            if n > 0 { op(inout g, 113) }
+            n += 1
+        }
+    }
+    if n == 0 { i32c(inout g, 1) }
+    else_(inout g)
+    i32c(inout g, 0)
+    close(inout g)
+    true
+}
+
+fn bind_variant(inout g: WGen, p: H, s: i64) {
+    let fts = variant_tys(g, p.n, p.m)
+    for i in 0..len(p.kids) {
+        let sub = p.kids[i]
+        let w = vt(fts[i])
+        if sub.kind == "pwild" or sub.kind == "plit" or w <= 0 { continue }
+        let f = new_local(inout g, w)
+        lget(inout g, s)
+        load_at(inout g, w, 8 + 8 * i)
+        lset(inout g, f)
+        bind_from(inout g, sub, f, fts[i])
+    }
+}
+
+// The glue of enums: for each variant, what its fields need.
+fn glue_drop_enum(inout g: WGen, t: Ty) {
+    let eid = enum_id(t)
+    for vi in 0..len(g.ck.enums[eid].variants) {
+        let fts = variant_tys(g, eid, vi)
+        tag_is(inout g, 0, vi)
+        open(inout g, 4, 0)
+        for i in 0..len(fts) {
+            if heap(fts[i]) {
+                lget(inout g, 0)
+                load_at(inout g, wt_i32(), 8 + 8 * i)
+                drop_v(inout g, fts[i])
+            }
+        }
+        lget(inout g, 0)
+        op(inout g, 173)
+        i64c(inout g, 8 + 8 * len(fts))
+        call_f(inout g, rt_fn(inout g, "rt_free"))
+        op(inout g, 15)
+        close(inout g)
+    }
+}
+
+fn glue_show_enum(inout g: WGen, t: Ty) {
+    let eid = enum_id(t)
+    let acc = new_local(inout g, wt_i32())
+    for vi in 0..len(g.ck.enums[eid].variants) {
+        let name = g.ck.enums[eid].variants[vi].0
+        let fts = variant_tys(g, eid, vi)
+        tag_is(inout g, 0, vi)
+        open(inout g, 4, 0)
+        if len(fts) == 0 {
+            i32c(inout g, intern_obj(inout g, name))
+        } else {
+            i32c(inout g, intern_obj(inout g, name + "("))
+            lset(inout g, acc)
+            for i in 0..len(fts) {
+                if i > 0 { acc_text(inout g, acc, ", ") }
+                show_inner(inout g, 0, 8 + 8 * i, fts[i])
+                acc_owned(inout g, acc)
+            }
+            acc_text(inout g, acc, ")")
+            lget(inout g, acc)
+        }
+        op(inout g, 15)
+        close(inout g)
+    }
+    op(inout g, 0)
+}
+
+fn glue_eq_enum(inout g: WGen, t: Ty) {
+    let eid = enum_id(t)
+    // the same variant
+    lget(inout g, 0)
+    load_at(inout g, wt_i32(), 4)
+    lget(inout g, 1)
+    load_at(inout g, wt_i32(), 4)
+    op(inout g, 71)
+    open(inout g, 4, 0)
+    i32c(inout g, 0)
+    op(inout g, 15)
+    close(inout g)
+    // and the same fields
+    for vi in 0..len(g.ck.enums[eid].variants) {
+        let fts = variant_tys(g, eid, vi)
+        if len(fts) == 0 { continue }
+        tag_is(inout g, 0, vi)
+        open(inout g, 4, 0)
+        for i in 0..len(fts) {
+            let w = vt(fts[i])
+            if w <= 0 { continue }
+            lget(inout g, 0)
+            load_at(inout g, w, 8 + 8 * i)
+            lget(inout g, 1)
+            load_at(inout g, w, 8 + 8 * i)
+            eq_values(inout g, fts[i])
+            op(inout g, 69)
+            open(inout g, 4, 0)
+            i32c(inout g, 0)
+            op(inout g, 15)
+            close(inout g)
+        }
+        close(inout g)
+    }
+    i32c(inout g, 1)
+}
+
+// ------------------------------------------------------------------ inout
+
+// A call with `inout` arguments, as the interpreter makes it: the values first (owned, since a
+// variable passed as `inout` can change in the call), then the places move into the call; their
+// values come back after the call's result (WebAssembly functions return several values).
+fn call_inout(inout g: WGen, e: H) {
+    var locs: List[i64] = []
+    var tys: List[Ty] = []
+    for a in e.kids {
+        if a.kind == "val" {
+            let x = a.kids[0]
+            let w = vt_of(inout g, x)
+            gen(inout g, x)
+            if w > 0 {
+                let l = new_local(inout g, w)
+                lset(inout g, l)
+                locs.push(l)
+            } else {
+                locs.push(-1)
+            }
+            tys.push(x.t)
+        } else {
+            locs.push(-1)
+            tys.push(Ty.TUnit)
+        }
+    }
+    var cells: List[Cell] = []
+    for i in 0..len(e.kids) {
+        let a = e.kids[i]
+        if a.kind == "inout" {
+            let c = place_cell(inout g, a.kids[0])
+            if g.failed { return }
+            cells.push(c)
+            let w = vt(c.ty)
+            if w > 0 {
+                let l = new_local(inout g, w)
+                cell_load(inout g, c)
+                lset(inout g, l)
+                locs[i] = l
+            }
+        }
+    }
+    for l in locs {
+        if l >= 0 { lget(inout g, l) }
+    }
+    call_f(inout g, fn_index(inout g, e.n))
+    // the places get their values back: the last one is on top
+    var k = len(cells) - 1
+    while k >= 0 {
+        cell_store(inout g, cells[k])
+        k -= 1
+    }
+    for i in 0..len(e.kids) {
+        if e.kids[i].kind == "val" and heap(tys[i]) {
+            lget(inout g, locs[i])
+            drop_v(inout g, tys[i])
+        }
+    }
+}
+
+// What a function gives back besides its result: the values of its `inout` parameters.
+fn exit_values(inout g: WGen) {
+    for n in g.inout_slots {
+        let l = g.slot_local[n]
+        if l >= 0 { lget(inout g, l) }
+    }
+}
+
 // ------------------------------------------------------------------ glue
 //
 // The functions each type of value in the heap gets: `drop` (a reference less; at the last one,
@@ -1811,6 +2096,7 @@ fn gen_glue(inout g: WGen, j: i64) {
     g.ltypes = []
     g.slot_local = []
     g.slot_ty = []
+    g.inout_slots = []
     g.nparams = 0
     g.depth = 0
     g.loops = []
@@ -1824,7 +2110,13 @@ fn gen_glue(inout g: WGen, j: i64) {
         glue_unique(inout g, t)
         g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
     } else if what == "show" {
-        if is_list(t) { glue_show_list(inout g, t) } else { glue_show(inout g, t) }
+        if is_list(t) {
+            glue_show_list(inout g, t)
+        } else if is_enum(t) {
+            glue_show_enum(inout g, t)
+        } else {
+            glue_show(inout g, t)
+        }
         g.m.funcs.push(finish(inout g, 1, wtype(inout g.m, [i32t], [i32t])))
     } else if what == "has" {
         // the element compared, of its own type
@@ -1834,7 +2126,13 @@ fn gen_glue(inout g: WGen, j: i64) {
         g.m.funcs.push(finish(inout g, 2, wtype(inout g.m, [i32t, if w > 0 { w } else { i32t }], [i32t])))
     } else {
         let q = new_local(inout g, i32t)
-        if is_list(t) { glue_eq_list(inout g, t) } else { glue_eq(inout g, t) }
+        if is_list(t) {
+            glue_eq_list(inout g, t)
+        } else if is_enum(t) {
+            glue_eq_enum(inout g, t)
+        } else {
+            glue_eq(inout g, t)
+        }
         g.m.funcs.push(finish(inout g, 2, wtype(inout g.m, [i32t, i32t], [i32t])))
     }
 }
@@ -2028,6 +2326,10 @@ fn glue_drop(inout g: WGen, t: Ty) {
     close(inout g)
     // the last reference: the children, then the block
     if is_list(t) { return glue_drop_list(inout g, t) }
+    if is_enum(t) {
+        glue_drop_enum(inout g, t)
+        return op(inout g, 0)
+    }
     let fts = field_tys(g, t)
     for i in 0..len(fts) {
         if heap(fts[i]) {
@@ -2204,6 +2506,7 @@ fn frame(inout g: WGen, tys: List[Ty], np: i64, at: H) -> List[i64] {
     g.ltypes = []
     g.slot_local = []
     g.slot_ty = []
+    g.inout_slots = []
     g.nparams = np
     g.depth = 0
     g.loops = []
@@ -2237,13 +2540,19 @@ fn finish(inout g: WGen, np: i64, tidx: i64) -> WFunc {
 fn gen_fn(inout g: WGen, id: i64) {
     let sig = g.ck.sigs[id]
     let body = g.ck.fn_hir[id]
-    for p in sig.params {
-        if p.2 { return wg_fail(inout g, body, "`inout` parameters") }
-    }
     g.unchecked = starts_with(sig.name, "rt_")
     let np = len(sig.params)
     let params = frame(inout g, g.ck.bodies[id], np, body)
     if g.failed { return }
+    // the `inout` parameters come back after the result
+    var outs: List[i64] = []
+    for i in 0..np {
+        if sig.params[i].2 {
+            g.inout_slots.push(i)
+            let w = vt(g.slot_ty[i])
+            if w > 0 { outs.push(w) }
+        }
+    }
     // parameters of no value take no local: the others keep their order
     var wparams = 0
     for i in 0..np {
@@ -2251,9 +2560,12 @@ fn gen_fn(inout g: WGen, id: i64) {
     }
     let r = vt(sig.ret)
     if r < 0 { return wg_fail(inout g, body, "functions returning `" + show(g.ck, sig.ret) + "`") }
-    let tidx = wtype(inout g.m, params, if r > 0 { [r] } else { [] })
+    var results: List[i64] = if r > 0 { [r] } else { [] }
+    for w in outs { results.push(w) }
+    let tidx = wtype(inout g.m, params, results)
     gen(inout g, body)
     epilogue(inout g)
+    exit_values(inout g)
     let f = finish(inout g, wparams, tidx)
     g.m.funcs.push(f)
 }
@@ -2411,8 +2723,8 @@ fn runtime_fns(inout g: WGen) {
 // The module of a checked program: (it compiled, the module, the error: file lo hi message).
 fn wasm_module(ck: Checker, srcs: List[str]) -> (bool, Bytes, str) {
     var g = WGen {
-        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], code: [],
-        ltypes: [], nparams: 0, slot_local: [], slot_ty: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
+        m: wmod_new(1024), ck: ck, srcs: srcs, fidx: [:], order: [], glue: [], glue_idx: [:], strs: [:], objs: [:], vobjs: [:],
+        code: [], ltypes: [], nparams: 0, slot_local: [], slot_ty: [], inout_slots: [], depth: 0, loops: [], unchecked: false, failed: false, msg: "",
         efile: 0, elo: 0, ehi: 0,
     }
     let i32t = wt_i32()

@@ -1,0 +1,65 @@
+// `inout` in WebAssembly: the place moves into the call and its new value comes back.
+struct Acc {
+    n: i64,
+    names: List[str],
+    last: str,
+}
+
+fn add(inout a: Acc, name: str) -> i64 {
+    a.n += 1
+    a.names.push(name)
+    a.last = name
+    a.n
+}
+
+fn bump(inout x: i64, by: i64) {
+    x += by
+}
+
+fn swap_ends(inout xs: List[i64]) {
+    let t = xs[0]
+    xs[0] = xs[len(xs) - 1]
+    xs[len(xs) - 1] = t
+}
+
+fn grow(inout a: Acc, k: i64) {
+    if k == 0 { return }
+    let _ = add(inout a, "n" + str(k))
+    grow(inout a, k - 1)
+}
+
+fn twice(inout x: i64, inout y: i64) -> i64 {
+    x *= 2
+    y *= 2
+    x + y
+}
+
+var a = Acc { n: 0, names: [], last: "" }
+let before = a
+print(add(inout a, "PETR4"), add(inout a, "VALE3"), a, before)
+var k = 5
+bump(inout k, 10)
+bump(inout k, k)
+print(k)
+var xs = [1, 2, 3, 4]
+let ys = xs
+swap_ends(inout xs)
+print(xs, ys)
+var pair = (Acc { n: 0, names: [], last: "" }, 7)
+grow(inout pair.0, 3)
+bump(inout pair.1, 1)
+print(pair)
+var p = 3
+var q = 4
+print(twice(inout p, inout q), p, q)
+var grid = [[1, 2], [3, 4]]
+swap_ends(inout grid[1])
+print(grid)
+
+// the output, line by line:
+// out: 1 2 Acc { n: 2, names: ["PETR4", "VALE3"], last: "VALE3" } Acc { n: 0, names: [], last: "" }
+// out: 30
+// out: [4, 2, 3, 1] [1, 2, 3, 4]
+// out: (Acc { n: 3, names: ["n3", "n2", "n1"], last: "n1" }, 8)
+// out: 14 6 8
+// out: [[1, 2], [4, 3]]
