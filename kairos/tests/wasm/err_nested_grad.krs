@@ -1,0 +1,3 @@
+// grad inside grad stops the program as in the interpreter (R0401), where the inner grad is called
+fn f(x: f64) -> f64 { grad(|y: f64| y * y)(x) }
+print(grad(f)(2.0))   // error: R0401

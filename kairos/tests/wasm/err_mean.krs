@@ -1,0 +1,6 @@
+// the mean of an empty list stops the program (R0004)
+// error: R0004
+let empty: List[f64] = []
+print(mean([1.0, 2.0]))
+print(mean(empty))
+// out: 1.5

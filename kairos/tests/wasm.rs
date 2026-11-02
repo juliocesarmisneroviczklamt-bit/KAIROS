@@ -383,6 +383,8 @@ fn programs_compiled_to_webassembly_run_like_the_interpreter() {
             .filter(|p| p.extension().is_some_and(|x| x == "krs"))
             .collect();
         files.sort();
+        // where the programs write their files (ignored by git, so not in a fresh checkout)
+        std::fs::create_dir_all(dir.join("tmp")).unwrap();
         let out = std::env::temp_dir().join(format!("kairos-wasm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         let mut args = vec![root.join("std").to_string_lossy().into_owned(), out.to_string_lossy().into_owned()];

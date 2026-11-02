@@ -1,0 +1,13 @@
+// sum, mean and prod of lists, as the interpreter: in order, from the start; integers that overflow
+// stop the program (R0006)
+// error: R0006
+let xs = [3, 4, 9]
+let fs = [0.5, 1.25, -2.0]
+let empty: List[f64] = []
+print(sum(xs), sum(fs), mean(fs), prod(fs), sum(empty), prod(empty))
+print(std_dev(fs), sum([9223372036854775800, 7]), sum([-5, -9223372036854775800]))
+let big = [9223372036854775800, 8]
+print(sum(big))
+
+// out: 16 -0.25 -0.08333333333333333 -1.25 0.0 1.0
+// out: 1.7017148213885114 9223372036854775807 -9223372036854775805

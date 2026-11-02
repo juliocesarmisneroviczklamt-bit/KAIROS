@@ -1,0 +1,74 @@
+// grad compiled, more: grad of lambdas (their captured values constants of the tape), + - * / and
+// the math builtins on structs inside the differentiated function (the tangent space, field by
+// field), and enums matched there (what a variant holds comes in as a constant)
+struct P {
+    a: f64,
+    b: f64,
+}
+
+fn f(x: f64) -> f64 {
+    grad(|y: f64| y * y * x)(x)
+}
+
+let c = 3.0
+let w = tensor([1.0, 2.0], asset)
+let p = P { a: 1.0, b: 2.0 }
+let ws = [0.5, 1.5]
+print(grad(|x: f64| exp(x) * x)(0.0))
+print(grad(|x: f64| x * c + sum(w) * x * x)(2.0), value_and_grad(|x: f64, y: f64| x * y + c, wrt: 2)(2.0, 5.0))
+print(grad(|t: Tensor[asset; f64]| sum(t * w) * c)(w))
+print(f(2.0))
+print(grad(|q: P| q.a * p.b + q.b * q.b * p.a + ws[1] * q.a)(p))
+let gf = grad(|x: f64| smooth_max(x, 0.0, scale: 1.0))
+print(gf(0.0), gf(2.0), grad(|x: f64| smooth_step(x, scale: 2.0))(0.0))
+
+struct Q {
+    w: Tensor[feature; f64],
+    b: f64,
+    pair: (f64, f64),
+}
+
+fn tloss(p: Q) -> f64 {
+    let q = p * 2.0 - p / 4.0
+    let r = -q + p
+    let s = sqrt(p * p + 1.0) * zeros_like(p) + exp(q / 10.0)
+    sum(r.w * r.w) + r.b * q.b + r.pair.0 * r.pair.1 + s.b + sum(s.w)
+}
+
+let p2 = Q { w: tensor([1.0, -2.0], feature), b: 0.5, pair: (1.5, -0.5) }
+print(tloss(p2))
+print(grad(tloss)(p2))
+
+enum Shape {
+    Circle(f64),
+    Rect(f64, Tensor[asset; f64]),
+    Pair((f64, f64)),
+    Empty,
+}
+
+fn area(k: f64, s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.0 * r * r * k,
+        Rect(a, t) => a * sum(t * k) * k,
+        Pair((x, y)) => x * k + y,
+        Empty => k,
+    }
+}
+
+let shapes = [Shape.Circle(2.0), Shape.Rect(1.5, tensor([1.0, 2.0], asset)), Shape.Pair((0.5, 2.5)), Shape.Empty]
+for s in shapes {
+    print(grad(area)(1.5, s), value_and_grad(area)(-0.5, s))
+}
+
+// out: 1.0
+// out: 15.0 (13.0, 2.0)
+// out: Tensor[asset: 2; f64] [3.0, 6.0]
+// out: 8.0
+// out: P { a: 3.5, b: 4.0 }
+// out: 0.5 0.8807970779778823 0.125
+// out: 5.049876570774023
+// out: Q { w: Tensor[feature: 2; f64] [1.3334680879071628, -2.126679584299225], b: -1.1214976037224833, pair: (-0.28125, 0.84375) }
+// out: 12.0 (-6.0, 12.0)
+// out: 13.5 (1.125, -4.5)
+// out: 0.5 (2.25, 0.5)
+// out: 1.0 (-0.5, 1.0)

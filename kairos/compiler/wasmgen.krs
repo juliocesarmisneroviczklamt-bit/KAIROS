@@ -685,6 +685,10 @@ fn gen(inout g: WGen, e: H) {
         }
         return
     }
+    if k == "rtfail" {
+        if e.text == "R0401" { return fail_at_rt(inout g, e, "R0401", "`grad` inside `grad` is not supported yet", "second derivatives arrive in a later milestone") }
+        return wg_fail(inout g, e, "the runtime error " + e.text)
+    }
     if k == "block" {
         let n = len(e.kids)
         for i in 0..n - 1 { gen_stmt(inout g, e.kids[i]) }
@@ -1442,6 +1446,7 @@ fn builtin_w(inout g: WGen, e: H) {
         op(inout g, 26)
         return f64c(inout g, 0.0)
     }
+    if (b == "sum" or b == "mean" or b == "prod") and is_list(fin_ty(g.ck, args[0].kids[0].t)) { return list_red_w(inout g, e, b) }
     if tensor_builtin_w(inout g, e) { return }
     if b == "format_fixed" { return call_rt_borrowing(inout g, "rt_format_fixed", args) }
     if len(args) > 0 and vt(args[0].kids[0].t) == wt_f64() { return float_builtin(inout g, b, args, e) }
@@ -2517,11 +2522,25 @@ fn tr_e(inout g: WGen, e: H) -> H {
         return e
     }
     if k == "binary" { return tr_binary(inout g, e) }
+    if k == "unary" and e.text == "-" and is_tr_tan(g, e.kids[0].t) { return tr_tan_map(inout g, "-", e.kids[0], e) }
     if k == "unary" and e.text == "-" and is_fl(g, e.kids[0].t) {
         let s = tr_temp(inout g, Ty.TInt)
         let x = e.kids[0]
         let plain = hre(e, [tr_val(g, hl(s, Ty.TInt, x), x.t)], e.t)
         return hblock([hlet(s, tr_e(inout g, x), x)], hrt(g, tr_rec(g, "map", e.t), [hi64(0, e), hl(s, Ty.TInt, e), plain], Ty.TInt, e), Ty.TInt, e)
+    }
+    if k == "builtin" and (e.text == "grad" or e.text == "value_and_grad") { return e }
+    if k == "callv" and e.kids[0].kind == "builtin" and (e.kids[0].text == "grad" or e.kids[0].text == "value_and_grad") {
+        // grad(f)(...) under the tape: the arguments, then R0401 (the interpreter stops when the
+        // function grad gives is called while a tape is recording)
+        var stmts: List[H] = []
+        for i in 1..len(e.kids) {
+            let a = e.kids[i]
+            let s = tr_temp(inout g, tr_ty(g, a.t))
+            stmts.push(hlet(s, tr_e(inout g, a), a))
+        }
+        let rt = tr_ty(g, e.t)
+        return hblock(stmts, hx("rtfail", "R0401", -1, [], rt, e), rt, e)
     }
     if k == "builtin" { return tr_builtin(inout g, e) }
     if k == "call" {
@@ -2559,6 +2578,7 @@ fn tr_e(inout g: WGen, e: H) -> H {
         let sum = hx("binary", op, -1, [hl(p.n, pt, p), e.kids[1]], pt, e)
         return tr_as_assign(hre(e, [hre(p, [], Ty.TInt), tr_binary(inout g, sum)], Ty.TUnit))
     }
+    if k == "match" { return tr_match(inout g, e) }
     if k == "lambda" or k == "host" { return tr_fail(inout g, e, "this inside `grad`") }
     if k == "variant" {
         for x in e.kids {
@@ -2589,6 +2609,9 @@ fn tr_fail(inout g: WGen, e: H, what: str) -> H {
 fn tr_binary(inout g: WGen, e: H) -> H {
     let a = e.kids[0]
     let b = e.kids[1]
+    if is_tr_tan(g, a.t) or is_tr_tan(g, b.t) {
+        if contains(["+", "-", "*", "/"], e.text) { return tr_tan_binary(inout g, e) }
+    }
     let fa = is_fl(g, a.t)
     let fb = is_fl(g, b.t)
     if not fa and not fb {
@@ -2606,6 +2629,102 @@ fn tr_binary(inout g: WGen, e: H) -> H {
     let code = tensor_op_code(e.text)
     if code < 0 or code > 5 { return hblock([la, lb], plain, e.t, e) }
     hblock([la, lb], hrt(g, tr_rec(g, "bin", e.t), [hi64(code, e), hl(sa, Ty.TInt, e), hl(sb, Ty.TInt, e), plain], Ty.TInt, e), Ty.TInt, e)
+}
+
+// match under the tape. An enum stays a plain value, so what a pattern takes out of a variant (a
+// float, a float tensor, a struct of them) is bound to a variable of its own, then comes in as a
+// constant of the tape, as the interpreter's plain values do.
+fn tr_match(inout g: WGen, e: H) -> H {
+    var kids = [tr_e(inout g, e.kids[0])]
+    for i in 1..len(e.kids) {
+        let arm = e.kids[i]
+        var fixes: List[(i64, i64, Ty)] = []
+        let pat = tr_pat(inout g, arm.kids[0], false, inout fixes)
+        var body = tr_e(inout g, arm.kids[1])
+        if len(fixes) > 0 {
+            var stmts: List[H] = []
+            for f in fixes { stmts.push(hlet(f.1, tr_in(inout g, hl(f.0, f.2, arm.kids[1]), f.2, false), arm.kids[1])) }
+            body = hblock(stmts, body, body.t, arm.kids[1])
+        }
+        kids.push(hre(arm, [pat, body], arm.t))
+    }
+    hre(e, kids, tr_ty(g, e.t))
+}
+
+// a pattern under the tape: inside a variant (plain), a binding of floats takes a variable of the
+// plain type, and (that variable, the binding's own, the type) goes to `fixes`
+fn tr_pat(inout g: WGen, p: H, plain: bool, inout fixes: List[(i64, i64, Ty)]) -> H {
+    if p.kind == "pbind" and plain and p.n >= 0 and p.n < len(g.tr_orig) {
+        let t = fin_ty(g.ck, g.tr_orig[p.n])
+        if tr_ty(g, t) != t {
+            let s = tr_temp(inout g, t)
+            fixes.push((s, p.n, t))
+            var q = p
+            q.n = s
+            return q
+        }
+    }
+    let under = plain or p.kind == "pvariant"
+    var ks: List[H] = []
+    for k in p.kids { ks.push(tr_pat(inout g, k, under, inout fixes)) }
+    hre(p, ks, if plain { p.t } else { tr_ty(g, p.t) })
+}
+
+// a struct or tuple with floats (a value of the tangent space the tape changes)
+fn is_tr_tan(g: WGen, t0: Ty) -> bool {
+    let t = fin_ty(g.ck, t0)
+    is_tan_t(t) and tr_ty(g, t) != t
+}
+
+// a op b in the tangent space under the tape: field by field, in order, as the interpreter does it
+// (an f64 on one side goes with every field)
+fn tr_tan_binary(inout g: WGen, e: H) -> H {
+    let a = e.kids[0]
+    let b = e.kids[1]
+    let sa = tr_temp(inout g, tr_ty(g, a.t))
+    let sb = tr_temp(inout g, tr_ty(g, b.t))
+    let la = hlet(sa, tr_e(inout g, a), a)
+    let lb = hlet(sb, tr_e(inout g, b), b)
+    let r = tr_tan_op(inout g, e.text, hl(sa, fin_ty(g.ck, a.t), a), hl(sb, fin_ty(g.ck, b.t), b), e)
+    hblock([la, lb], r, tr_ty(g, e.t), e)
+}
+
+// x op y, x and y reads of traced values with their plain types (a field of one, or the whole)
+fn tr_tan_op(inout g: WGen, o: str, x: H, y: H, e: H) -> H {
+    let tx = fin_ty(g.ck, x.t)
+    let ty = fin_ty(g.ck, y.t)
+    if is_tan_t(tx) or is_tan_t(ty) {
+        let ts = if is_tan_t(tx) { tx } else { ty }
+        let fts = field_tys(g, ts)
+        var kids: List[H] = []
+        for i in 0..len(fts) {
+            let fx = if is_tan_t(tx) { hx("field", "", i, [x], fts[i], e) } else { x }
+            let fy = if is_tan_t(ty) { hx("field", "", i, [y], fts[i], e) } else { y }
+            kids.push(tr_tan_op(inout g, o, fx, fy, e))
+        }
+        return hx("tuple", "", -1, kids, tr_ty(g, ts), e)
+    }
+    let rt = if is_tensor_t(tx) { tx } else { ty }
+    tr_binary(inout g, hx("binary", o, -1, [x, y], rt, e))
+}
+
+// f(x) in the tangent space under the tape (f a math builtin, zeros_like, or "-"): field by field
+fn tr_tan_map(inout g: WGen, f: str, x: H, e: H) -> H {
+    let s = tr_temp(inout g, tr_ty(g, x.t))
+    let l = hlet(s, tr_e(inout g, x), x)
+    hblock([l], tr_tan_map_go(inout g, f, hl(s, fin_ty(g.ck, x.t), x), e), tr_ty(g, e.t), e)
+}
+
+fn tr_tan_map_go(inout g: WGen, f: str, x: H, e: H) -> H {
+    let t = fin_ty(g.ck, x.t)
+    if is_tan_t(t) {
+        let fts = field_tys(g, t)
+        var kids: List[H] = []
+        for i in 0..len(fts) { kids.push(tr_tan_map_go(inout g, f, hx("field", "", i, [x], fts[i], e), e)) }
+        return hx("tuple", "", -1, kids, tr_ty(g, t), e)
+    }
+    if f == "-" { return tr_e(inout g, hx("unary", "-", -1, [x], t, e)) }
+    tr_builtin(inout g, hbi(f, [x], t, e))
 }
 
 // the selectors of t[...] read into new variables (in order), as a list for the tape, and as the
@@ -2694,6 +2813,9 @@ fn tr_builtin(inout g: WGen, e: H) -> H {
     for a in e.kids {
         if a.kind != "val" { plain_args = false }
         xs.push(a.kids[0])
+    }
+    if len(xs) == 1 and plain_args and is_tr_tan(g, xs[0].t) {
+        if contains(["abs", "sqrt", "exp", "ln", "tanh", "sigmoid", "relu", "softplus", "zeros_like"], b) { return tr_tan_map(inout g, b, xs[0], e) }
     }
     var anyfl = false
     for x in xs {
@@ -2851,7 +2973,12 @@ fn tr_in(inout g: WGen, x: H, t0: Ty, leaf: bool) -> H {
             wg_fail(inout g, x, "differentiating a list of this type")
             return x
         },
-        _ => {},
+        TStruct(_) => {},
+        TTuple(_) => {},
+        _ => {
+            wg_fail(inout g, x, "a value of type `" + show(g.ck, t) + "` with floats, inside `grad`")
+            return x
+        },
     }
     var kids: List[H] = []
     for i in 0..len(fts) { kids.push(tr_in(inout g, hx("field", "", i, [x], fts[i], x), fts[i], leaf)) }
@@ -2928,12 +3055,72 @@ fn grad_fn(inout g: WGen, fid: i64, wrt: i64, vg: bool, at: H) -> i64 {
     nid
 }
 
+// grad(|...| ...) / value_and_grad: a lambda that records the tape between the leaves and the walk
+// back, running the traced copy of the lambda (a closure of its own, with the same captured values
+// as constants of the tape). The lambda it gives captures what the lambda captures.
+fn grad_lambda(inout g: WGen, f: H, wrt: i64, vg: bool, e: H) -> H {
+    let lam = g.ck.lambdas[f.n]
+    let p = fin_ty(g.ck, lam.slot_tys[wrt])
+    let ret = if vg { Ty.TTuple([Ty.TFloat, p]) } else { p }
+    let saved = g.tr_slots
+    let saved_orig = g.tr_orig
+    // the traced copy
+    g.tr_slots = []
+    g.tr_orig = lam.slot_tys
+    for t in lam.slot_tys { g.tr_slots.push(tr_ty(g, t)) }
+    let body = tr_e(inout g, lam.body)
+    let tdef = len(g.ck.lambdas)
+    g.ck.lambdas.push(LambdaH { caps: lam.caps, n_params: lam.n_params, n_slots: len(g.tr_slots), body: body, slot_tys: g.tr_slots })
+    // the lambda grad gives: its parameters and captured values are the lambda's
+    g.tr_slots = []
+    g.tr_orig = []
+    for t in lam.slot_tys { g.tr_slots.push(fin_ty(g.ck, t)) }
+    var stmts: List[H] = [hx("let", "", -1, [hx("pwild", "", -1, [], Ty.TBool, e), hrt(g, "rt_d_begin", [], Ty.TBool, e)], Ty.TUnit, e)]
+    var ins: List[i64] = []
+    var tps: List[Ty] = []
+    for i in 0..lam.n_params {
+        let pt = fin_ty(g.ck, lam.slot_tys[i])
+        let s = tr_temp(inout g, tr_ty(g, pt))
+        stmts.push(hlet(s, tr_in(inout g, hl(i, pt, e), pt, i == wrt), e))
+        ins.push(s)
+        tps.push(tr_ty(g, pt))
+    }
+    var outer: List[str] = []
+    for k in lam.caps {
+        let ct = fin_ty(g.ck, lam.slot_tys[k])
+        let s = tr_temp(inout g, tr_ty(g, ct))
+        stmts.push(hlet(s, tr_in(inout g, hl(k, ct, e), ct, false), e))
+        outer.push(str(s))
+    }
+    var call = [hx("lambda", join(outer, " "), tdef, [], Ty.TFn(tps, Ty.TInt), e)]
+    for i in 0..lam.n_params { call.push(hl(ins[i], tps[i], e)) }
+    let out = tr_temp(inout g, Ty.TInt)
+    stmts.push(hlet(out, hx("callv", "", -1, call, Ty.TInt, e), e))
+    stmts.push(hrt(g, "rt_d_back", [hl(out, Ty.TInt, e)], Ty.TUnit, e))
+    let gr = tr_temp(inout g, p)
+    stmts.push(hlet(gr, tr_out(inout g, hl(ins[wrt], tr_ty(g, p), e), p), e))
+    let val = tr_temp(inout g, Ty.TFloat)
+    stmts.push(hlet(val, hrt(g, "rt_d_vf", [hl(out, Ty.TInt, e)], Ty.TFloat, e), e))
+    stmts.push(hrt(g, "rt_d_end", [], Ty.TUnit, e))
+    let last = if vg { hx("tuple", "", -1, [hl(val, Ty.TFloat, e), hl(gr, p, e)], ret, e) } else { hl(gr, p, e) }
+    let wdef = len(g.ck.lambdas)
+    g.ck.lambdas.push(LambdaH { caps: lam.caps, n_params: lam.n_params, n_slots: len(g.tr_slots), body: hblock(stmts, last, ret, e), slot_tys: g.tr_slots })
+    g.tr_slots = saved
+    g.tr_orig = saved_orig
+    hx("lambda", f.text, wdef, [], e.t, e)
+}
+
 // grad(f) / value_and_grad(f): the function above, as a value
 fn grad_w(inout g: WGen, e: H) {
     let f = e.kids[0].kids[0]
-    if f.kind != "fnref" { return wg_fail(inout g, e, "`" + e.text + "` of a function that is not named") }
     let wrt = parse_int(substr(e.kids[1].kids[0].text, 4, len(e.kids[1].kids[0].text) - 4))
     let vg = e.kids[2].kids[0].text == "bool true"
+    if f.kind == "lambda" {
+        let l = grad_lambda(inout g, f, wrt, vg, e)
+        if g.failed { return }
+        return lambda_w(inout g, l)
+    }
+    if f.kind != "fnref" { return wg_fail(inout g, e, "`" + e.text + "` of a function value") }
     let nid = grad_fn(inout g, f.n, wrt, vg, e)
     if g.failed { return }
     var r = f
@@ -2943,6 +3130,49 @@ fn grad_w(inout g: WGen, e: H) {
 }
 
 // ------------------------------------------------------------------ lists
+
+// sum(xs, start), mean(xs) and prod(xs) of a list, as the interpreter does them: in order, from the
+// start (0.0 for mean, 1.0 for prod); a list of integers that overflows stops the program (R0006),
+// and so does the mean of an empty list (R0004).
+fn list_red_w(inout g: WGen, e: H, b: str) {
+    let xs = e.kids[0].kids[0]
+    let et = elem_ty(g, fin_ty(g.ck, xs.t))
+    if et != Ty.TFloat and not (b == "sum" and et == Ty.TInt) { return wg_fail(inout g, e, "`" + b + "` of a list of `" + show(g.ck, et) + "`") }
+    let st = if b == "sum" { e.kids[1].kids[0] } else { xs }
+    let t0 = gen_borrow(inout g, xs, b != "sum" or not changes(st))
+    let o = new_local(inout g, wt_i32())
+    lset(inout g, o)
+    if b == "sum" and et == Ty.TInt {
+        gen(inout g, st)
+        let v = new_local(inout g, wt_i64())
+        lset(inout g, v)
+        lget(inout g, o)
+        lget(inout g, v)
+        call_f(inout g, rt_fn(inout g, "rt_list_sum_i_ok"))
+        op(inout g, 69)
+        open(inout g, 4, 0)
+        overflow_at(inout g, e)
+        close(inout g)
+        lget(inout g, o)
+        lget(inout g, v)
+        call_f(inout g, rt_fn(inout g, "rt_list_sum_i"))
+    } else if b == "sum" {
+        lget(inout g, o)
+        gen(inout g, st)
+        call_f(inout g, rt_fn(inout g, "rt_list_sum_f"))
+    } else {
+        if b == "mean" {
+            list_len(inout g, o)
+            op(inout g, 80)
+            open(inout g, 4, 0)
+            fail_at_rt(inout g, e, "R0004", "`mean` of an empty list", "")
+            close(inout g)
+        }
+        lget(inout g, o)
+        call_f(inout g, rt_fn(inout g, if b == "mean" { "rt_list_mean" } else { "rt_list_prod" }))
+    }
+    drop_tmp(inout g, t0, xs.t)
+}
 
 // The type of a list's elements.
 fn elem_ty(g: WGen, t: Ty) -> Ty {

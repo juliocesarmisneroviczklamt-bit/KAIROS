@@ -278,6 +278,43 @@ fn wasm_load64(addr: i64) -> i64 {
 fn wasm_store64(addr: i64, v: i64) {
 }
 
+// sum(xs, start) of a list of floats, in order (the interpreter's adds)
+fn rt_list_sum_f(xs: List[f64], start: f64) -> f64 {
+    var acc = start
+    for x in xs { acc = acc + x }
+    acc
+}
+
+// whether the sum of a list of integers from start stays an i64 (the interpreter's checked adds)
+fn rt_list_sum_i_ok(xs: List[i64], start: i64) -> bool {
+    var acc = start
+    for x in xs {
+        let s = acc + x
+        if (x > 0 and s < acc) or (x < 0 and s > acc) { return false }
+        acc = s
+    }
+    true
+}
+
+fn rt_list_sum_i(xs: List[i64], start: i64) -> i64 {
+    var acc = start
+    for x in xs { acc = acc + x }
+    acc
+}
+
+// mean(xs) of a list of floats that is not empty: the sum from 0.0, over the length
+fn rt_list_mean(xs: List[f64]) -> f64 {
+    var acc = 0.0
+    for x in xs { acc = acc + x }
+    acc / float(len(xs))
+}
+
+fn rt_list_prod(xs: List[f64]) -> f64 {
+    var acc = 1.0
+    for x in xs { acc = acc * x }
+    acc
+}
+
 fn rt_list_new(n: i64) -> i64 {
     let p = rt_alloc(16 + 8 * n)
     wasm_store32(p, 1)

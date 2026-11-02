@@ -848,6 +848,7 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
   - `lines`;
   - `today`, pelo relógio do WASI;
   - `minimum` e `maximum`; `append_text`, `list_dir` e `file_date`, pelo WASI;
+  - `sum`, `mean` e `prod` de listas (o `std_dev` e o `sharpe` do prelúdio usam), na ordem do interpretador, com R0004 para a média de uma lista vazia e R0006 para uma soma de inteiros que estoura;
   - os tensores `nan_quantile`, `merge_days` e `contract`;
   - `randn`: o xoshiro256** e o Box-Muller do interpretador, com o `sin` e o `cos` da `libm` portados para Kairós (os mesmos bits, conferidos em `tests/rt/randn.krs`);
   - `upper` e `lower`, como o `to_uppercase` e o `to_lowercase` do Rust (um caractere pode virar dois ou três; Σ no fim de uma palavra vira ς). As tabelas ([`rt_case.krs`](../compiler/rt_case.krs)) são geradas por [`gen_case.krs`](../compiler/gen_case.krs), que pergunta ao interpretador sobre cada ponto de código;
@@ -872,19 +873,21 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
     - cada operação calcula o valor comum com o código de sempre (os mesmos erros, os mesmos bits) e grava um nó.
   - **A mesma fita.** Um valor que não depende do que se deriva é constante, como os valores comuns do interpretador, então a fita gravada é a do interpretador.
   - **O que compila:**
-    - `grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)` de funções com nome;
+    - `grad(f)`, `grad(f, wrt: k)` e `value_and_grad(f)`, de funções com nome e de lambdas. Os valores capturados por uma lambda entram na fita como constantes;
     - o controle de fluxo, as chamadas e as atribuições, inclusive `x op= v` e as atribuições em fatias;
-    - as regras suaves, relaxadas dentro do `grad` e exatas fora.
+    - o espaço tangente dentro da função derivada (`p * 2.0 - q`, `sqrt(p)`, `zeros_like(p)`), campo a campo e na ordem do interpretador;
+    - `match` sobre enums: o que uma variante guarda (um float, um tensor, uma struct deles) entra como constante;
+    - as regras suaves, relaxadas dentro do `grad` e exatas fora;
+    - `grad` dentro de `grad` para o programa com R0401, como no interpretador.
   - **Conferido:**
     - `examples/mlp.krs` treina 1500 passos de Adam com as mesmas perdas, bit a bit;
-    - `tests/wasm/grad.krs` cobre floats, tensores, structs, tuplas e listas;
+    - `tests/wasm/grad.krs` e `grad_more.krs` cobrem floats, tensores, structs, tuplas, listas, lambdas e enums. O `tests/programs/grad.krs` do interpretador também dá a mesma saída;
     - o modelo do M6 (`research/tax_portfolio.krs`) também compila.
 
 **Ainda não compila:**
-- **No `grad`:**
-  - `grad` de uma lambda;
-  - a aritmética do espaço tangente dentro da função derivada;
-  - enums com floats;
+- **Dentro da função derivada:**
+  - lambdas, e chamadas de funções-valor com floats;
+  - criar um enum que guarda floats;
   - `x op= v` numa parte de um valor;
   - a atribuição a uma fatia de um tensor que está dentro de um valor;
 - **a internet** (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
