@@ -1,0 +1,12 @@
+// M19: the CVM's fundamentals, as known at the end of each month (lab/cvm.krs declares the panel
+// with `observed(x, lag: 0)`): last month's equity may decide this month's weights
+import "../../lab/cvm.krs"
+
+let ret = b3.monthly_returns()
+let n = size(ret, month)
+let f = cvm_fundamentals("data", n)
+var weights = zeros_like(ret)
+for m in 12..n {
+    weights[month: m] = where(f.equity[month: m - 1] > 1e9, 0.01, 0.0)
+}
+let ev = b3.evaluate(weights, lag: 0)

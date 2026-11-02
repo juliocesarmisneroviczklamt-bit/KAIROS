@@ -1,0 +1,22 @@
+// The table of the CVM's filings (M19): every DFP and ITR file of data/raw/cvm (fetch_cvm.krs),
+// read by cvm.krs, into data/processed/cvm_filings.csv.
+//
+//   kairos run kairos/lab/build_cvm.krs [data]
+import "cvm.krs"
+import "std/dates.krs"
+
+let root = if len(args()) > 0 { args()[0] } else { "data" }
+let dir = root + "/raw/cvm"
+var all: List[CvmFiling] = []
+for src in ["DFP", "ITR"] {
+    for y in (if src == "DFP" { 2010 } else { 2011 })..=date_year(today()) {
+        let zip = dir + "/" + lower(src) + "_cia_aberta_" + str(y) + ".zip"
+        if not file_exists(zip) { continue }
+        let fs = cvm_year(zip, src, y)
+        print(src + " " + str(y) + ": " + str(len(fs)) + " filings")
+        for f in fs { all.push(f) }
+    }
+}
+make_dir(root + "/processed")
+cvm_save(root + "/processed/cvm_filings.csv", all)
+print(str(len(all)) + " filings -> " + root + "/processed/cvm_filings.csv")

@@ -1,0 +1,365 @@
+// The companies' financial statements (M19), from the CVM's open data: the yearly files of the
+// DFP (annual statements) and of the ITR (quarterly), kept in data/raw/cvm (fetch_cvm.krs).
+//
+// Each filing gives its total assets, equity, revenue and net income (from the start of its fiscal
+// year) and its shares, dated by the day the CVM received the version whose numbers the files
+// hold: the files keep only the last version of a filing, so a restatement is known only from
+// the day it was received (a company that refiled its 2023 statements six times is known by its
+// sixth version, from that version's day). build_cvm.krs keeps them in
+// data/processed/cvm_filings.csv, and cvm_panel turns them into what was known about each asset
+// at the end of each month, declared so (`observed(x, lag: 0)`): a decision of month m may use
+// row m - 1.
+//
+//   let f = cvm_fundamentals("data", size(b3.monthly_returns(), month))
+//   ... f.equity[month: m - 1] ...
+import "data.krs"
+
+struct CvmFiling {
+    cvm: i64,           // the company (CD_CVM)
+    src: str,           // DFP or ITR
+    refer: i64,         // the date it refers to, YYYYMMDD
+    receb: i64,         // the day the CVM received the version it has, YYYYMMDD
+    versao: i64,        // that version
+    con: bool,          // consolidated statements (else the company's own)
+    assets: f64,        // total assets, R$ (NaN when the filing does not have it)
+    equity: f64,        // equity
+    revenue: f64,       // revenue, from the start of the fiscal year to `refer`
+    income: f64,        // net income, the same span
+    months: i64,        // the months of that span (0: none)
+    shares: f64,        // shares, without those in treasury
+}
+
+// ------------------------------------------------------------------ the files
+
+// "2023-12-31" -> 20231231 (0 when it is not a date)
+fn cvm_date(s: str) -> i64 {
+    if len(s) < 10 { return 0 }
+    parse_int(substr(s, 0, 4)) * 10000 + parse_int(substr(s, 5, 2)) * 100 + parse_int(substr(s, 8, 2))
+}
+
+// the column of each name of a header
+fn cvm_cols(header: str) -> Map[str, i64] {
+    var m: Map[str, i64] = [:]
+    let fs = split(header, ";")
+    for i in 0..len(fs) { m[fs[i]] = i }
+    m
+}
+
+// the months from ini to fim, both YYYYMMDD (a span from the 1st of a month to the end of another)
+fn cvm_span(ini: i64, fim: i64) -> i64 {
+    (fim / 10000 - ini / 10000) * 12 + (fim / 100 % 100) - (ini / 100 % 100) + 1
+}
+
+// a value of the statements, in R$ (ESCALA_MOEDA: MIL is thousands)
+fn cvm_value(s: str, escala: str) -> f64 {
+    if s == "" { return nan }
+    let x = parse_float(s)
+    if escala == "MIL" { x * 1000.0 } else { x }
+}
+
+fn cvm_new(cvm: i64, src: str, refer: i64, receb: i64, versao: i64, con: bool) -> CvmFiling {
+    CvmFiling { cvm: cvm, src: src, refer: refer, receb: receb, versao: versao, con: con, assets: nan, equity: nan, revenue: nan, income: nan, months: 0, shares: nan }
+}
+
+// the name of the account of net income (3.11 in both layouts the CVM uses)
+fn cvm_is_income(code: str, name: str) -> bool {
+    len(code) == 4 and starts_with(code, "3.") and (starts_with(name, "Lucro/Prejuízo") or starts_with(name, "Lucro ou Prejuízo Líquido")) and ends_with(name, "do Período")
+}
+
+// The filings of one yearly file, a DFP or ITR zip of year y, in the order the file gives them.
+// The consolidated statements first; a company without them, by its own.
+fn cvm_year(zip: str, src: str, y: i64) -> List[CvmFiling] {
+    let pre = (if src == "DFP" { "dfp" } else { "itr" }) + "_cia_aberta_"
+    let names = zip_entries(zip)
+    // the day each version was received, and each company by its CNPJ
+    var receb: Map[str, i64] = [:]
+    var cvm_of: Map[str, i64] = [:]
+    let idx = read_zip_lines(zip, pre + str(y) + ".csv", [])
+    let ic = cvm_cols(idx[0])
+    for k in 1..len(idx) {
+        let f = split(idx[k], ";")
+        let cvm = parse_int(f[ic["CD_CVM"]])
+        receb[str(cvm) + "/" + f[ic["DT_REFER"]] + "/" + f[ic["VERSAO"]]] = cvm_date(f[ic["DT_RECEB"]])
+        cvm_of[f[ic["CNPJ_CIA"]]] = cvm
+    }
+    var out: List[CvmFiling] = []
+    var at: Map[str, i64] = [:]         // company/date -> its filing in `out`
+    var ini: Map[str, i64] = [:]        // the start of the span taken for revenue and income
+    for con in [true, false] {
+        for st in ["BPA", "BPP", "DRE"] {
+            let entry = pre + st + (if con { "_con_" } else { "_ind_" }) + str(y) + ".csv"
+            if not contains(names, entry) { continue }
+            let ls = read_zip_lines(zip, entry, [])
+            if len(ls) == 0 { continue }
+            let c = cvm_cols(ls[0])
+            let c_cvm = c["CD_CVM"]
+            let c_ref = c["DT_REFER"]
+            let c_ver = c["VERSAO"]
+            let c_esc = c["ESCALA_MOEDA"]
+            let c_code = c["CD_CONTA"]
+            let c_name = c["DS_CONTA"]
+            let c_val = c["VL_CONTA"]
+            let c_ini = if contains(c, "DT_INI_EXERC") { c["DT_INI_EXERC"] } else { -1 }
+            let c_fim = if contains(c, "DT_FIM_EXERC") { c["DT_FIM_EXERC"] } else { -1 }
+            // the lines that can have an account taken (a test on the text, before its fields)
+            let marks = if st == "BPA" { [";1;Ativo Total;"] } else if st == "BPP" { [";Patrimônio Líquido"] } else { [";3.01;", ";Lucro"] }
+            for k in 1..len(ls) {
+                let l = ls[k]
+                // the current period only (PENÚLTIMO is the one before, for comparison)
+                if not contains(l, ";ÚLTIMO;") { continue }
+                var hit = false
+                for mk in marks {
+                    if contains(l, mk) { hit = true }
+                }
+                if not hit { continue }
+                let f = split(l, ";")
+                let code = f[c_code]
+                let take_assets = st == "BPA" and code == "1"
+                let take_equity = st == "BPP" and len(code) == 4 and starts_with(code, "2.") and starts_with(f[c_name], "Patrimônio Líquido")
+                let take_revenue = st == "DRE" and code == "3.01"
+                let take_income = st == "DRE" and cvm_is_income(code, f[c_name])
+                if not (take_assets or take_equity or take_revenue or take_income) { continue }
+                let cvm = parse_int(f[c_cvm])
+                let key = str(cvm) + "/" + f[c_ref]
+                if not contains(at, key) {
+                    // the individual statements only for a company without consolidated ones
+                    let rk = key + "/" + f[c_ver]
+                    if not contains(receb, rk) { continue }
+                    at[key] = len(out)
+                    out.push(cvm_new(cvm, src, cvm_date(f[c_ref]), receb[rk], parse_int(f[c_ver]), con))
+                }
+                let i = at[key]
+                if out[i].con != con { continue }
+                let v = cvm_value(f[c_val], f[c_esc])
+                if take_assets { out[i].assets = v }
+                if take_equity { out[i].equity = v }
+                if take_revenue or take_income {
+                    // a quarter has its own months and those from the start of the year: the
+                    // span that starts first
+                    let a = cvm_date(f[c_ini])
+                    let b = cvm_date(f[c_fim])
+                    let ik = key + (if take_revenue { "/r" } else { "/i" })
+                    if contains(ini, ik) and ini[ik] <= a { continue }
+                    ini[ik] = a
+                    if take_revenue { out[i].revenue = v } else { out[i].income = v }
+                    // a DFP is the whole fiscal year (some filings give wrong dates there)
+                    out[i].months = if src == "DFP" { 12 } else { cvm_span(a, b) }
+                }
+            }
+        }
+    }
+    // the shares (issued, less those in treasury), by CNPJ
+    let ce = pre + "composicao_capital_" + str(y) + ".csv"
+    if contains(names, ce) {
+        let ls = read_zip_lines(zip, ce, [])
+        let c = cvm_cols(ls[0])
+        for k in 1..len(ls) {
+            let f = split(ls[k], ";")
+            let cnpj = f[c["CNPJ_CIA"]]
+            if not contains(cvm_of, cnpj) { continue }
+            let key = str(cvm_of[cnpj]) + "/" + f[c["DT_REFER"]]
+            if not contains(at, key) { continue }
+            let total = cvm_value(f[c["QT_ACAO_TOTAL_CAP_INTEGR"]], "")
+            let held = cvm_value(f[c["QT_ACAO_TOTAL_TESOURO"]], "")
+            out[at[key]].shares = total - (if is_nan(held) { 0.0 } else { held })
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------ the table
+
+fn cvm_num_text(x: f64) -> str {
+    if is_nan(x) { "" } else { str(x) }
+}
+
+fn cvm_num_of(s: str) -> f64 {
+    if s == "" { nan } else { parse_float(s) }
+}
+
+fn cvm_header() -> str {
+    "cvm;src;refer;receb;versao;con;assets;equity;revenue;income;months;shares"
+}
+
+// The filings, one per line, in order of company, date and source.
+fn cvm_save(path: str, fs: List[CvmFiling]) {
+    var keys: List[(i64, i64, str, i64)] = []
+    for i in 0..len(fs) { keys.push((fs[i].cvm, fs[i].refer, fs[i].src, i)) }
+    keys.sort()
+    var out = [cvm_header()]
+    for k in keys {
+        let f = fs[k.3]
+        out.push(join([str(f.cvm), f.src, str(f.refer), str(f.receb), str(f.versao), if f.con { "1" } else { "0" },
+            cvm_num_text(f.assets), cvm_num_text(f.equity), cvm_num_text(f.revenue), cvm_num_text(f.income), str(f.months), cvm_num_text(f.shares)], ";"))
+    }
+    write_text(path, join(out, from_codes([10])) + from_codes([10]))
+}
+
+fn cvm_load(path: str) -> List[CvmFiling] {
+    var out: List[CvmFiling] = []
+    let ls = lines(read_text(path))
+    for k in 1..len(ls) {
+        let f = split(ls[k], ";")
+        if len(f) < 12 { continue }
+        out.push(CvmFiling { cvm: parse_int(f[0]), src: f[1], refer: parse_int(f[2]), receb: parse_int(f[3]), versao: parse_int(f[4]), con: f[5] == "1",
+            assets: cvm_num_of(f[6]), equity: cvm_num_of(f[7]), revenue: cvm_num_of(f[8]), income: cvm_num_of(f[9]), months: parse_int(f[10]), shares: cvm_num_of(f[11]) })
+    }
+    out
+}
+
+// ------------------------------------------------------------------ the assets' companies
+
+// the text of the first "key":"text" of a JSON text ("" when there is none)
+fn cvm_json_text(t: str, key: str) -> str {
+    let parts = split(t, from_codes([34]) + key + from_codes([34, 58, 34]))
+    if len(parts) < 2 { return "" }
+    split(parts[1], from_codes([34]))[0]
+}
+
+// Each issuer's CVM code, from B3's cached answers (data/raw/b3/supp_*.json, compact JSON: its
+// `code`, the first four letters of its tickers, and `codeCVM`), read as text: the parser of
+// std/json.krs is recursive, and the temporal analysis assumes the worst of recursion.
+fn cvm_codes(b3_dir: str) -> Map[str, i64] {
+    var m: Map[str, i64] = [:]
+    for n in list_dir(b3_dir) {
+        if not starts_with(n, "supp_") { continue }
+        let t = read_text(b3_dir + "/" + n)
+        let code = cvm_json_text(t, "code")
+        let cv = cvm_json_text(t, "codeCVM")
+        if code != "" and cv != "" and is_digits(cv) { m[code] = parse_int(cv) }
+    }
+    m
+}
+
+fn is_digits(s: str) -> bool {
+    if len(s) == 0 { return false }
+    for c in codes(s) {
+        if c < 48 or c > 57 { return false }
+    }
+    true
+}
+
+// The company (CVM code, or -1) of each asset of the panel: its ticker's first four letters.
+fn cvm_assets(d: LabData, codes: Map[str, i64]) -> List[i64] {
+    var out: List[i64] = []
+    for tk in d.tks {
+        let code = substr(tk.ticker, 0, 4)
+        out.push(if contains(codes, code) { codes[code] } else { -1 })
+    }
+    out
+}
+
+// ------------------------------------------------------------------ what was known each month
+
+// a filing's value of `field`
+fn cvm_field(f: CvmFiling, field: str) -> f64 {
+    if field == "assets" { return f.assets }
+    if field == "equity" { return f.equity }
+    if field == "shares" { return f.shares }
+    if field == "revenue" { return f.revenue }
+    f.income
+}
+
+// The value of `field` the company had told the CVM by the end of month `ym` (YYYYMM): from its
+// last filing received by then. Revenue and income are those of the last twelve months: the
+// fiscal year, or the months since its start plus the year before less its same months.
+fn cvm_known(fs: List[CvmFiling], ym: i64, field: str) -> f64 {
+    // the last date with a filing known by then (`fs`: one company's filings)
+    var last = -1
+    for i in 0..len(fs) {
+        if fs[i].receb / 100 <= ym and (last < 0 or fs[i].refer > fs[last].refer) { last = i }
+    }
+    if last < 0 { return nan }
+    let f = fs[last]
+    if field != "revenue" and field != "income" { return cvm_field(f, field) }
+    if f.months == 12 { return cvm_field(f, field) }
+    if f.months <= 0 { return nan }
+    // the same months a year before, and that whole year: both known by then
+    var same = -1
+    var year = -1
+    for i in 0..len(fs) {
+        if fs[i].receb / 100 > ym { continue }
+        if fs[i].refer == f.refer - 10000 and fs[i].months == f.months { same = i }
+        if fs[i].refer / 10000 == f.refer / 10000 - 1 and fs[i].months == 12 { year = i }
+    }
+    if same < 0 or year < 0 { return nan }
+    cvm_field(f, field) + cvm_field(fs[year], field) - cvm_field(fs[same], field)
+}
+
+// What a program needs: the panel (its months and assets), the filings, each asset's company.
+struct Cvm {
+    d: LabData,
+    fs: List[CvmFiling],
+    companies: List[i64],
+}
+
+// The lab's data folder: panel.bin, cvm_filings.csv and B3's cached answers.
+fn cvm_open(root: str) -> Cvm {
+    let d = load_lab_data(root)
+    Cvm { d: d, fs: cvm_load(root + "/processed/cvm_filings.csv"), companies: cvm_assets(d, cvm_codes(root + "/raw/b3")) }
+}
+
+// The fundamentals of each asset's company as known at the end of each of the first n months (the
+// months `b3` shows, size(b3.monthly_returns(), month): never past the fence of a pending
+// holdout), Tensor[month, asset] each; NaN where nothing was known yet, or the asset has no
+// company. Revenue and income are those of the last twelve months.
+struct CvmPanels {
+    assets: Tensor[month, asset; f64],
+    equity: Tensor[month, asset; f64],
+    shares: Tensor[month, asset; f64],
+    revenue: Tensor[month, asset; f64],
+    income: Tensor[month, asset; f64],
+}
+
+// The panels of the data folder `root`. They are built only from filings received by the end of
+// each month, and declared so (row m known at end(m)): a decision of month m may use row m - 1.
+// (What comes from the files is read here, so that the declaration covers it: a program that
+// passed loaded data in would have the time of those files at the call.)
+fn cvm_fundamentals(root: str, n: i64) -> CvmPanels {
+    let cv = cvm_open(root)
+    CvmPanels {
+        assets: observed(cvm_rows(cv.d, cv.fs, cv.companies, "assets", n), lag: 0),
+        equity: observed(cvm_rows(cv.d, cv.fs, cv.companies, "equity", n), lag: 0),
+        shares: observed(cvm_rows(cv.d, cv.fs, cv.companies, "shares", n), lag: 0),
+        revenue: observed(cvm_rows(cv.d, cv.fs, cv.companies, "revenue", n), lag: 0),
+        income: observed(cvm_rows(cv.d, cv.fs, cv.companies, "income", n), lag: 0),
+    }
+}
+
+fn cvm_rows(d: LabData, fs: List[CvmFiling], companies: List[i64], field: str, n: i64) -> Tensor[month, asset; f64] {
+    // each company's filings
+    var by: Map[i64, List[CvmFiling]] = [:]
+    for f in fs {
+        if not contains(by, f.cvm) {
+            let none: List[CvmFiling] = []
+            by[f.cvm] = none
+        }
+        by[f.cvm].push(f)
+    }
+    let nm = min(n, len(d.cal.months))
+    let nt = len(d.tks)
+    var cache: Map[i64, List[f64]] = [:]
+    var out = zeros(month: nm, asset: nt)
+    var cols: List[List[f64]] = []
+    for t in 0..nt {
+        let c = companies[t]
+        if c < 0 or not contains(by, c) {
+            var empty: List[f64] = []
+            for m in 0..nm { empty.push(nan) }
+            cols.push(empty)
+            continue
+        }
+        if not contains(cache, c) {
+            var col: List[f64] = []
+            for m in 0..nm { col.push(cvm_known(by[c], d.cal.months[m], field)) }
+            cache[c] = col
+        }
+        cols.push(cache[c])
+    }
+    for m in 0..nm {
+        var row: List[f64] = []
+        for t in 0..nt { row.push(cols[t][m]) }
+        out[month: m] = tensor(row, asset)
+    }
+    out
+}

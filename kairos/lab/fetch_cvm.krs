@@ -1,0 +1,43 @@
+// The CVM's yearly files of financial statements (M19): the DFP (annual statements, from 2010)
+// and the ITR (quarterly, from 2011), kept in data/raw/cvm. The files of the last five years
+// are fetched again when they are more than 30 days old: the CVM adds the refiled versions to
+// them; older ones are final.
+//
+//   kairos run kairos/lab/fetch_cvm.krs [data/raw]
+import "std/dates.krs"
+
+let root = if len(args()) > 0 { args()[0] } else { "data/raw" }
+let dir = root + "/cvm"
+make_dir(dir)
+let now = today()
+let y_now = date_year(now)
+print("CVM DFP 2010.." + str(y_now) + ", ITR 2011.." + str(y_now) + " -> " + dir)
+var fails = 0
+for src in ["dfp", "itr"] {
+    let first = if src == "dfp" { 2010 } else { 2011 }
+    for y in first..=y_now {
+        let name = src + "_cia_aberta_" + str(y) + ".zip"
+        let dest = dir + "/" + name
+        if file_exists(dest) and file_size(dest) > 1000 {
+            if y < y_now - 4 or days_between(file_date(dest), now) <= 30 { continue }
+        }
+        let r = try_download("https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/" + upper(src) + "/DADOS/" + name, dest)
+        if r.1 != "" {
+            print("  ERRO " + name + ": " + r.1)
+            fails += 1
+            continue
+        }
+        // a ZIP starts with PK
+        let head = read_bytes(dest)
+        if len(head) < 2 or get_u8(head, 0) != 80 or get_u8(head, 1) != 75 {
+            print("  ERRO " + name + ": não é ZIP")
+            fails += 1
+            continue
+        }
+        print("  " + name + ": " + format_fixed(float(r.0) / 1000000.0, 1) + " MB")
+    }
+}
+if fails > 0 {
+    print(str(fails) + " arquivo(s) com erro")
+    exit(1)
+}

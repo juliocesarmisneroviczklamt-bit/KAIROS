@@ -166,19 +166,26 @@ fn known_by(a: At, b: At) -> i64 {
 }
 
 fn time_always() -> Time {
-    Time { at: At.AAlways, lo: -1, hi: -1 }
+    Time { at: At.AAlways, lo: -1, hi: -1, elo: -1, ehi: -1 }
 }
 
 fn time_at(at: At, lo: i64, hi: i64) -> Time {
-    Time { at: at, lo: lo, hi: hi }
+    Time { at: at, lo: lo, hi: hi, elo: -1, ehi: -1 }
+}
+
+// what comes from outside, read at lo..hi (M19)
+fn time_ext(lo: i64, hi: i64) -> Time {
+    Time { at: At.AAlways, lo: -1, hi: -1, elo: lo, ehi: hi }
 }
 
 fn time_join(bounds: Map[i64, (i64, i64)], a: Time, b: Time) -> Time {
     let at = join_at(bounds, a.at, b.at)
-    if at == a.at and a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi } }
-    if at == b.at and b.lo >= 0 { return Time { at: at, lo: b.lo, hi: b.hi } }
-    if a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi } }
-    Time { at: at, lo: b.lo, hi: b.hi }
+    let elo = if a.elo >= 0 { a.elo } else { b.elo }
+    let ehi = if a.elo >= 0 { a.ehi } else { b.ehi }
+    if at == a.at and a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi, elo: elo, ehi: ehi } }
+    if at == b.at and b.lo >= 0 { return Time { at: at, lo: b.lo, hi: b.hi, elo: elo, ehi: ehi } }
+    if a.lo >= 0 { return Time { at: at, lo: a.lo, hi: a.hi, elo: elo, ehi: ehi } }
+    Time { at: at, lo: b.lo, hi: b.hi, elo: elo, ehi: ehi }
 }
 
 // Rewrites the symbol `sym` in an index: mode 0 shifts it by `k`, 1 forgets it, 2 replaces it
@@ -197,7 +204,7 @@ fn map_lin(l: Lin, mode: i64, sym: i64, k: i64, last: Lin) -> Lin {
 
 fn time_map(t: Time, mode: i64, sym: i64, k: i64, last: Lin) -> Time {
     match t.at {
-        AEnd(l) => Time { at: At.AEnd(map_lin(l, mode, sym, k, last)), lo: t.lo, hi: t.hi },
+        AEnd(l) => Time { at: At.AEnd(map_lin(l, mode, sym, k, last)), lo: t.lo, hi: t.hi, elo: t.elo, ehi: t.ehi },
         _ => t,
     }
 }
@@ -212,7 +219,7 @@ fn time_horizon(t: Time, sym: i64, to: At) -> Time {
                     AEnd(m) => At.AEnd(lin_addk(m, c)),
                     _ => to,
                 }
-                Time { at: at, lo: t.lo, hi: t.hi }
+                Time { at: at, lo: t.lo, hi: t.hi, elo: t.elo, ehi: t.ehi }
             },
             _ => t,
         },
@@ -435,7 +442,7 @@ fn show_at(an: An, a: At) -> str {
     match a {
         AAlways => "known in advance",
         AEnd(l) => if l == Lin.LUnknown { "at the end of a month the compiler cannot determine" } else { "at end(" + show_lin(an, l) + ")" },
-        ALate => "only at the end of the data (it uses the whole history, or a file)",
+        ALate => "only at the end of the data (it uses the whole history)",
     }
 }
 
@@ -593,6 +600,10 @@ fn check_bound(inout an: An, result: TV, bound: Lin, fname: str, lo: i64, hi: i6
         an_fail(inout an, "E0302", lo, hi, "cannot use this time in a temporal annotation", "write a parameter plus a constant, e.g. `@ end(m - 1)`")
         return
     }
+    if result.time.elo >= 0 {
+        unknown_time(inout an, result.time.elo, result.time.ehi, "`" + fname + "` promises (`@ end(" + show_lin(an, bound) + ")`) to use only what is known by then")
+        return
+    }
     let at = if result.has_rows { At.ALate } else { result.time.at }
     let k = known_by(at, At.AEnd(bound))
     if k == 1 { return }
@@ -670,7 +681,7 @@ fn call_fn(inout an: An, ck: Checker, id: i64, call_args: List[H], inout f: List
             LSym(sym, c) => {
                 for i in 0..len(s.param_syms) {
                     if s.param_syms[i] == sym {
-                        res.time = Time { at: At.AEnd(lin_addk(vals[i].int, c)), lo: res.time.lo, hi: res.time.hi }
+                        res.time = Time { at: At.AEnd(lin_addk(vals[i].int, c)), lo: res.time.lo, hi: res.time.hi, elo: res.time.elo, ehi: res.time.ehi }
                         break
                     }
                 }
@@ -690,7 +701,7 @@ fn call_fn(inout an: An, ck: Checker, id: i64, call_args: List[H], inout f: List
                     },
                     _ => {},
                 }
-                if not keep { res.time = Time { at: At.AEnd(lin_addk(l, shift)), lo: res.time.lo, hi: res.time.hi } }
+                if not keep { res.time = Time { at: At.AEnd(lin_addk(l, shift)), lo: res.time.lo, hi: res.time.hi, elo: res.time.elo, ehi: res.time.ehi } }
             },
             _ => {},
         }
@@ -929,6 +940,11 @@ fn tensor_assign(inout an: An, ck: Checker, e: H, inout f: List[TV]) {
             target.has_rows = j.0
             target.rows = j.1
         }
+        // what came from outside stays marked, whatever row it went to
+        if target.time.elo < 0 and v.time.elo >= 0 {
+            target.time.elo = v.time.elo
+            target.time.ehi = v.time.ehi
+        }
         // a stored tensor that still has a temporal axis brings its rows along
         let j2 = rows_join(target.has_rows, target.rows, v.has_rows, v.rows)
         target.has_rows = j2.0
@@ -1038,17 +1054,22 @@ fn builtin(inout an: An, ck: Checker, e: H, inout f: List[TV]) -> TV {
         "try_read_text", "try_read_bytes", "try_list_dir", "try_read_lines", "try_http_get", "try_download", "read_line",
         "zip_entries", "read_zip_lines", "try_zip_entries", "try_read_zip_lines"], b) {
         // what is in a file has no known time: it cannot reach a decision unless declared
+        var t = time_ext(e.lo, e.hi)
         for a in args {
-            let _ = val(inout an, ck, a, inout f)
+            let v = val(inout an, ck, a, inout f)
             if an.failed { return tv_always() }
+            t = time_join(an.bounds, t, v.time)
         }
-        return tv_time(time_at(At.ALate, e.lo, e.hi))
+        return tv_time(t)
     }
     if b == "observed" {
         let x = val(inout an, ck, args[0], inout f)
         let ax = arg_axis(args, 1)
         let lg = arg_axis(args, 2)
+        // (what it declares is the time of what came from outside: the rest stays)
         var v = tv_time(x.time)
+        v.time.elo = -1
+        v.time.ehi = -1
         v.has_rows = true
         v.rows = rows_new(if ax.0 { ax.1 } else { 0 }, if lg.0 { lg.1 } else { 0 }, e.lo, e.hi)
         return v
@@ -1095,8 +1116,18 @@ fn b3_data(lag: i64, e: H) -> TV {
 }
 
 // `b3.evaluate(w)`: the weights of month t are traded at the close of month t - 1.
+// M19: a decision on a value from outside, whose time is not known (`why`: what decides)
+fn unknown_time(inout an: An, lo: i64, hi: i64, why: str) {
+    an_fail_l(inout an, "E0301", lo, hi, "use of information whose time is not known", "this comes from a file, the network or the input, and " + why,
+        "declare when each row is known with `observed(x, lag: k)` (row t at end(t + k)): what you declare is up to you, so check it")
+}
+
 fn check_weights(inout an: An, w: TV, lo: i64, hi: i64) {
     let hint = "`b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)"
+    if w.time.elo >= 0 {
+        unknown_time(inout an, w.time.elo, w.time.ehi, "the weights of each month are decided at the end of the previous one")
+        return
+    }
     let index_hint = "index months with the loop variable plus a constant: `ret[month: m - 1]`, `weights[month: m] = ...`"
     let wlo = if w.time.lo >= 0 { w.time.lo } else { lo }
     let whi = if w.time.lo >= 0 { w.time.hi } else { hi }

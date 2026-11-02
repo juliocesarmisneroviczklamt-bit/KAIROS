@@ -117,18 +117,26 @@ fn known_by(a: At, b: At) -> Option<bool> {
     }
 }
 
-/// A time and the code that made it that late (for messages).
+/// A time and the code that made it that late (for messages). `ext` (M19): the value comes from
+/// outside (a file, the network, the input), whose time the compiler cannot know, at that code;
+/// `observed` declares it, and until then no decision may use the value.
 #[derive(Clone, Copy, Debug)]
 pub struct Time {
     pub at: At,
     pub span: Option<Span>,
+    pub ext: Option<Span>,
 }
 
 impl Time {
-    const ALWAYS: Time = Time { at: At::Always, span: None };
+    const ALWAYS: Time = Time { at: At::Always, span: None, ext: None };
 
     fn new(at: At, span: Span) -> Time {
-        Time { at, span: Some(span) }
+        Time { at, span: Some(span), ext: None }
+    }
+
+    /// what comes from outside, read at `span`
+    fn external(span: Span) -> Time {
+        Time { at: At::Always, span: None, ext: Some(span) }
     }
 
     fn join(self, o: Time) -> Time {
@@ -140,12 +148,12 @@ impl Time {
         } else {
             self.span.or(o.span)
         };
-        Time { at, span }
+        Time { at, span, ext: self.ext.or(o.ext) }
     }
 
     fn map(self, f: impl Fn(Lin) -> Lin) -> Time {
         match self.at {
-            At::End(l) => Time { at: At::End(f(l)), span: self.span },
+            At::End(l) => Time { at: At::End(f(l)), span: self.span, ext: self.ext },
             _ => self,
         }
     }
@@ -158,7 +166,7 @@ impl Time {
                     At::End(l) => At::End(l.add(c)),
                     other => other,
                 };
-                Time { at, span: self.span }
+                Time { at, span: self.span, ext: self.ext }
             }
             _ => self,
         }
@@ -350,7 +358,8 @@ pub fn tv_text(v: &TV) -> String {
             r.store.map_or("-".to_string(), |(l, a)| format!("{}/{}", lin_text(l), at_text(a)))
         ),
     };
-    format!("{}{} {rows} {}", at_text(v.time.at), span_text(v.time.span), lin_text(v.int))
+    let ext = v.time.ext.map_or(String::new(), |s| format!("+ext@{}:{}", s.lo, s.hi));
+    format!("{}{}{ext} {rows} {}", at_text(v.time.at), span_text(v.time.span), lin_text(v.int))
 }
 
 #[derive(Clone)]
@@ -561,7 +570,7 @@ impl<'a> An<'a> {
             At::Always => "known in advance".into(),
             At::End(Lin::Unknown) => "at the end of a month the compiler cannot determine".into(),
             At::End(l) => format!("at end({})", self.show_lin(l)),
-            At::Late => "only at the end of the data (it uses the whole history, or a file)".into(),
+            At::Late => "only at the end of the data (it uses the whole history)".into(),
         }
     }
 
@@ -592,7 +601,7 @@ impl<'a> An<'a> {
             Some(Some(s)) => return Ok(s.clone()),
             // recursion: assume the worst
             Some(None) => {
-                return Ok(Summary { result: TV { time: Time { at: At::Late, span: None }, ..TV::ALWAYS }, param_syms: Vec::new(), horizon: None });
+                return Ok(Summary { result: TV { time: Time { at: At::Late, span: None, ext: None }, ..TV::ALWAYS }, param_syms: Vec::new(), horizon: None });
             }
             None => {}
         }
@@ -644,6 +653,9 @@ impl<'a> An<'a> {
         if matches!(bound, Lin::Unknown) {
             return Err(Diag::new("E0302", asp, "cannot use this time in a temporal annotation")
                 .hint("write a parameter plus a constant, e.g. `@ end(m - 1)`"));
+        }
+        if let Some(es) = result.time.ext {
+            return Err(Self::unknown_time(es, &format!("`{fname}` promises (`@ end({})`) to use only what is known by then", self.show_lin(bound))));
         }
         let at = if result.rows.is_some() { At::Late } else { result.time.at };
         let b = At::End(bound);
@@ -762,7 +774,7 @@ impl<'a> An<'a> {
             }
         }
         if lost {
-            res.time = res.time.join(Time { at: At::Late, span: None });
+            res.time = res.time.join(Time { at: At::Late, span: None, ext: None });
         }
         for v in &vals {
             res.time = res.time.join(v.time);
@@ -939,6 +951,8 @@ impl<'a> An<'a> {
                     let rows = Rows { axis, lag, end: None, span: val.time.span.or(Some(sp)), store: Some((idx, val.time.at)) };
                     target.rows = join_rows(target.rows, Some(rows));
                 }
+                // what came from outside stays marked, whatever row it went to
+                target.time.ext = target.time.ext.or(val.time.ext);
                 // a stored tensor that still has a temporal axis brings its rows along
                 target.rows = join_rows(target.rows, val.rows);
             }
@@ -1077,16 +1091,18 @@ impl<'a> An<'a> {
             B::ReadText | B::FileExists | B::ListDir | B::HttpGet | B::Download | B::ReadLines | B::ReadBytes | B::FileSize | B::FileDate | B::HttpGetAll
             | B::TryReadText | B::TryReadBytes | B::TryListDir | B::TryReadLines | B::TryHttpGet | B::TryDownload | B::ReadLine
             | B::ZipEntries | B::ReadZipLines | B::TryZipEntries | B::TryReadZipLines => {
+                let mut t = Time::external(sp);
                 for a in args {
-                    self.val(a, f)?;
+                    t = t.join(self.val(a, f)?.time);
                 }
-                Ok(TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown })
+                Ok(TV { time: t, rows: None, int: Lin::Unknown })
             }
             B::Observed => {
                 let x = self.val(&args[0], f)?;
                 let axis = args.get(1).and_then(axis_lit).unwrap_or(i64::from(AX_MONTH)) as u32;
                 let lag = args.get(2).and_then(axis_lit).unwrap_or(0);
-                Ok(TV { time: x.time, rows: Some(Rows { axis, lag: Some(lag), end: None, span: Some(sp), store: None }), int: Lin::Unknown })
+                // (what it declares is the time of what came from outside: the rest stays)
+                Ok(TV { time: Time { ext: None, ..x.time }, rows: Some(Rows { axis, lag: Some(lag), end: None, span: Some(sp), store: None }), int: Lin::Unknown })
             }
             _ => {
                 // element-wise and list functions: the latest of the inputs
@@ -1141,9 +1157,19 @@ impl<'a> An<'a> {
         })
     }
 
+    /// M19: a decision on a value from outside, whose time is not known (`why`: what decides).
+    fn unknown_time(es: Span, why: &str) -> Diag {
+        Diag::new("E0301", es, "use of information whose time is not known")
+            .label(format!("this comes from a file, the network or the input, and {why}"))
+            .hint("declare when each row is known with `observed(x, lag: k)` (row t at end(t + k)): what you declare is up to you, so check it")
+    }
+
     /// `b3.evaluate(w)`: the weights of month t are traded at the close of month t - 1.
     fn check_weights(&self, w: &TV, sp: Span) -> KResult<()> {
         let hint = "`b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)";
+        if let Some(es) = w.time.ext {
+            return Err(Self::unknown_time(es, "the weights of each month are decided at the end of the previous one"));
+        }
         match w.time.at {
             At::Always => {}
             At::End(Lin::Unknown) => {

@@ -1,0 +1,78 @@
+// The CVM's filings against the B3 panel (M19): how many assets have a company, how much of the
+// liquid universe has its fundamentals each year, one company month by month, and the rule of
+// time: no value of a month comes from a filing received after its end.
+//
+//   kairos run kairos/lab/check_cvm.krs data
+import "cvm.krs"
+import "std/dates.krs"
+
+let root = args()[0]
+let d = load_lab_data(root)
+let fs = cvm_load(root + "/processed/cvm_filings.csv")
+let codes = cvm_codes(root + "/raw/b3")
+let comp = cvm_assets(d, codes)
+var with_code = 0
+for c in comp {
+    if c >= 0 { with_code += 1 }
+}
+print("filings", len(fs), "| issuers with a CVM code", len(codes), "| assets of the panel", len(d.tks), "with a company", with_code)
+
+let equity = cvm_rows(d, fs, comp, "equity", len(d.cal.months))
+let income = cvm_rows(d, fs, comp, "income", len(d.cal.months))
+let elig = data_eligible(d)
+// of the liquid universe each December: how many have equity and twelve months of income known
+for y in 2011..=2025 {
+    let m = cal_idx_from(d.cal, y * 100 + 12)
+    if m >= len(d.cal.months) { continue }
+    let e = elig[month: m]
+    let n = count(e)
+    let has_eq = count(e and not is_nan(equity[month: m]))
+    let has_inc = count(e and not is_nan(income[month: m]))
+    print(str(y) + "-12: liquid " + str(int(n)) + ", with equity " + str(int(has_eq)) + ", with income (12 months) " + str(int(has_inc)))
+}
+
+// one company, month by month: the values change in the month a filing is received
+var petr = -1
+for t in 0..len(d.tks) {
+    if d.tks[t].ticker == "PETR4" { petr = t }
+}
+let assets = cvm_rows(d, fs, comp, "assets", len(d.cal.months))
+let shares = cvm_rows(d, fs, comp, "shares", len(d.cal.months))
+for ym in [202301, 202302, 202303, 202304, 202305, 202306, 202307, 202308, 202309, 202310, 202311, 202312, 202401, 202402, 202403, 202404] {
+    let m = cal_idx_from(d.cal, ym)
+    print("PETR4 " + str(ym) + ": equity " + format_fixed(equity[month: m, asset: petr] / 1e9, 1) + " bi, income 12m " + format_fixed(income[month: m, asset: petr] / 1e9, 1) + " bi, assets " + format_fixed(assets[month: m, asset: petr] / 1e9, 1) + " bi, shares " + format_fixed(shares[month: m, asset: petr] / 1e9, 3) + " bi")
+}
+
+// the rule of time, checked apart: each value of the panel is the value of a filing received by
+// the end of that month, and of no filing received later
+var by: Map[i64, List[CvmFiling]] = [:]
+for f in fs {
+    if not contains(by, f.cvm) {
+        let none: List[CvmFiling] = []
+        by[f.cvm] = none
+    }
+    by[f.cvm].push(f)
+}
+var checked = 0
+var bad = 0
+for t in 0..len(d.tks) {
+    let c = comp[t]
+    if c < 0 or not contains(by, c) { continue }
+    for m in 0..len(d.cal.months) {
+        let v = equity[month: m, asset: t]
+        if is_nan(v) { continue }
+        let ym = d.cal.months[m]
+        // the filing it came from: the latest date received by then, with that value
+        var ok = false
+        var latest = -1
+        for f in by[c] {
+            if f.receb / 100 <= ym and f.refer > latest { latest = f.refer }
+        }
+        for f in by[c] {
+            if f.refer == latest and f.receb / 100 <= ym and to_bits(f.equity) == to_bits(v) { ok = true }
+        }
+        checked += 1
+        if not ok { bad += 1 }
+    }
+}
+print("rule of time: " + str(checked) + " values checked, " + str(bad) + " from a filing not received by the end of their month")

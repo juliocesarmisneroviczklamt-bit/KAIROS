@@ -336,8 +336,33 @@ fn what_is_read_from_a_file_cannot_decide_the_weights() {
     fails(
         &strategy("    let k = parse_float(read_text(\"limits.txt\"))\n    weights[month: m] = where(elig[month: m], k, 0.0)"),
         "E0301",
-        "only at the end of the data",
+        "whose time is not known",
     );
     // the program's arguments and today's date are known in advance
     ok(&strategy("    let k = if len(args()) > 0 and today() > 0 { 0.01 } else { 0.02 }\n    weights[month: m] = where(elig[month: m], k, 0.0)"));
+}
+
+/// M19: `observed(x, lag: k)` declares when the rows of what came from outside are known (here a
+/// series from a file, row t known at its end): then its past may decide the weights and its
+/// present may not. The declaration covers only what the compiler could not know: it cannot hide
+/// a use of the future the compiler sees.
+#[test]
+fn observed_declares_the_time_of_what_comes_from_outside() {
+    let series = "fn series(n: i64) -> Tensor[month, asset; f64] {\n    let x = parse_float(read_text(\"series.txt\"))\n    observed(full(x, month: n, asset: 3), lag: 0)\n}\n";
+    let with = |body: &str| format!("{series}{}", strategy(&format!("    let s = series(size(ret, month))\n{body}")));
+    ok(&with("    weights[month: m] = where(s[month: m - 1] > 0.0, 0.01, 0.0)"));
+    fails(&with("    weights[month: m] = where(s[month: m] > 0.0, 0.01, 0.0)"), "E0301", "known at end(m)");
+    // undeclared, the same series cannot decide anything
+    fails(
+        &strategy("    let s = full(parse_float(read_text(\"series.txt\")), month: size(ret, month), asset: 3)\n    weights[month: m] = where(s[month: m - 1] > 0.0, 0.01, 0.0)"),
+        "E0301",
+        "whose time is not known",
+    );
+    // the whole history, declared or not, is still known only at its end
+    fails(&strategy("    let s = observed(ternary(ret), lag: 0)\n    weights[month: m] = float(s[month: m - 1])"), "E0301", "only at the end of the data");
+    fails(
+        &strategy("    let x = parse_float(read_text(\"x.txt\"))\n    let s = observed(full(x, month: size(ret, month), asset: 3) + ret[month: m], lag: 0)\n    weights[month: m] = where(s[month: m - 1] > 0.0, 0.01, 0.0)"),
+        "E0301",
+        "known at end(m)",
+    );
 }

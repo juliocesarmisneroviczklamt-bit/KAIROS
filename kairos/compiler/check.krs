@@ -171,11 +171,14 @@ enum At {
     ALate,
 }
 
-// A time and the code that made it that late (lo -1: none).
+// A time and the code that made it that late (lo -1: none). elo, ehi (M19): the value comes from
+// outside (a file, the network, the input) at that code, so its time is not known (elo -1: no).
 struct Time {
     at: At,
     lo: i64,
     hi: i64,
+    elo: i64,
+    ehi: i64,
 }
 
 // Rows of a tensor over a temporal axis: row `t` is known at `end(t + lag)`; `end` is the index
@@ -229,7 +232,8 @@ fn tv_text(v: TV) -> str {
         let store = if r.has_store { lin_text(r.store_row) + "/" + at_text(r.store_at) } else { "-" }
         rows = "rows(" + str(r.ax) + " " + lag + " " + end + " " + span + " " + store + ")"
     }
-    at_text(v.time.at) + (if v.time.lo >= 0 { "@" + str(v.time.lo) + ":" + str(v.time.hi) } else { "" }) + " " + rows + " " + lin_text(v.int)
+    let ext = if v.time.elo >= 0 { "+ext@" + str(v.time.elo) + ":" + str(v.time.ehi) } else { "" }
+    at_text(v.time.at) + (if v.time.lo >= 0 { "@" + str(v.time.lo) + ":" + str(v.time.hi) } else { "" }) + ext + " " + rows + " " + lin_text(v.int)
 }
 
 struct Checker {
