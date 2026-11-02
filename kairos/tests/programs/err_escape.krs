@@ -1,0 +1,2 @@
+// A Unicode escape needs 1 to 6 hex digits in braces.
+let s = "caf\u{zz}"   // error: E0001

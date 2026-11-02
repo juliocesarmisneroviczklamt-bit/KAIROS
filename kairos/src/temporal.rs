@@ -516,7 +516,7 @@ impl<'a> An<'a> {
             At::Always => "known in advance".into(),
             At::End(Lin::Unknown) => "at the end of a month the compiler cannot determine".into(),
             At::End(l) => format!("at end({})", self.show_lin(l)),
-            At::Late => "only at the end of the data (it uses the whole history)".into(),
+            At::Late => "only at the end of the data (it uses the whole history, or a file)".into(),
         }
     }
 
@@ -1019,6 +1019,14 @@ impl<'a> An<'a> {
                 let ax = args.get(2).and_then(axis_lit);
                 let (x, y) = (self.over_time(x, ax, sp), self.over_time(y, ax, sp));
                 Ok(x.join(&y).no_int())
+            }
+            // what is in a file has no known time: it cannot reach a decision unless declared
+            // with `observed` (configuration and market data look the same to the compiler)
+            B::ReadText | B::FileExists | B::ListDir => {
+                for a in args {
+                    self.val(a, f)?;
+                }
+                Ok(TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown })
             }
             B::Observed => {
                 let x = self.val(&args[0], f)?;

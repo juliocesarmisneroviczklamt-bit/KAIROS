@@ -41,6 +41,45 @@ pub enum Builtin {
     FormatFixed,
     /// `substr(s, start, count)`: characters `start .. start + count` of `s` (clamped)
     Substr,
+    // ---- M9: text
+    /// `split(s, sep)`: the pieces of `s` between the separators
+    Split,
+    /// `lines(s)`: the lines of `s` (without `\n` or `\r\n`)
+    Lines,
+    Trim,
+    StartsWith,
+    EndsWith,
+    /// `find(s, sub)`: the character index of the first `sub` in `s`, or -1
+    Find,
+    Replace,
+    Upper,
+    Lower,
+    /// `parse_int(s)`: the integer written in `s` (spaces around are allowed); R0010 if it is not one
+    ParseInt,
+    /// `parse_float(s)`: the number written in `s`; NaN if it is not one (missing data)
+    ParseFloat,
+    /// `join(xs, sep)`: the strings of `xs` with `sep` between them
+    Join,
+    /// `codes(s)`: the Unicode code points of `s`; `from_codes(xs)`: back to a string
+    Codes,
+    FromCodes,
+    // ---- M9: files and the environment
+    /// `read_text(path)`: the whole file (UTF-8; a file that is not UTF-8 is read as Latin-1,
+    /// as B3's files are)
+    ReadText,
+    WriteText,
+    AppendText,
+    FileExists,
+    /// `list_dir(path)`: the names in a folder, sorted
+    ListDir,
+    /// `make_dir(path)`: creates the folder and its parents
+    MakeDir,
+    /// `env(name)`: an environment variable ("" if unset)
+    Env,
+    /// `args()`: the program's arguments (`kairos run file.krs a b` gives ["a", "b"])
+    Args,
+    /// `today()`: today's date (UTC) as YYYYMMDD
+    Today,
     Assert,
     // ---- M2: reductions (lists and tensors)
     Mean,
@@ -114,6 +153,29 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("str", Builtin::ToStr),
     ("format_fixed", Builtin::FormatFixed),
     ("substr", Builtin::Substr),
+    ("split", Builtin::Split),
+    ("lines", Builtin::Lines),
+    ("trim", Builtin::Trim),
+    ("starts_with", Builtin::StartsWith),
+    ("ends_with", Builtin::EndsWith),
+    ("find", Builtin::Find),
+    ("replace", Builtin::Replace),
+    ("upper", Builtin::Upper),
+    ("lower", Builtin::Lower),
+    ("parse_int", Builtin::ParseInt),
+    ("parse_float", Builtin::ParseFloat),
+    ("join", Builtin::Join),
+    ("codes", Builtin::Codes),
+    ("from_codes", Builtin::FromCodes),
+    ("read_text", Builtin::ReadText),
+    ("write_text", Builtin::WriteText),
+    ("append_text", Builtin::AppendText),
+    ("file_exists", Builtin::FileExists),
+    ("list_dir", Builtin::ListDir),
+    ("make_dir", Builtin::MakeDir),
+    ("env", Builtin::Env),
+    ("args", Builtin::Args),
+    ("today", Builtin::Today),
     ("nan_quantile", Builtin::NanQuantile),
     ("merge_days", Builtin::MergeDays),
     ("assert", Builtin::Assert),

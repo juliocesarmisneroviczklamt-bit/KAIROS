@@ -290,9 +290,36 @@ pub fn lex(src: &str, file: u16) -> KResult<Vec<Token>> {
                 }
                 if ch == '\\' && i + 1 < n {
                     let e = chars[i + 1].1;
+                    // `\u{e9}`: a Unicode code point, 1 to 6 hex digits
+                    if e == 'u' {
+                        let bad = |j: usize| {
+                            Diag::new("E0001", Span::new(file, chars[i].0, pos(j)), "invalid escape")
+                                .hint("write a Unicode code point as `\\u{...}` with 1 to 6 hex digits, e.g. `\\u{e9}`")
+                        };
+                        if i + 2 >= n || chars[i + 2].1 != '{' {
+                            return Err(bad(i + 2));
+                        }
+                        let mut j = i + 3;
+                        let mut hex = String::new();
+                        while j < n && chars[j].1 != '}' && hex.len() < 7 {
+                            hex.push(chars[j].1);
+                            j += 1;
+                        }
+                        let c = if j < n && chars[j].1 == '}' && (1..=6).contains(&hex.len()) {
+                            u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                        } else {
+                            None
+                        };
+                        let Some(c) = c else { return Err(bad((j + 1).min(n))) };
+                        s.push(c);
+                        i = j + 1;
+                        continue;
+                    }
                     s.push(match e {
                         'n' => '\n',
                         't' => '\t',
+                        'r' => '\r',
+                        '0' => '\0',
                         '"' => '"',
                         '\\' => '\\',
                         _ => {

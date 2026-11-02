@@ -328,3 +328,16 @@ fn a_two_pass_statistic_over_a_window_is_proven_causal() {
         "known at end(m)",
     );
 }
+
+/// What is read from a file has no known time (configuration and market data look the same to
+/// the compiler): it cannot decide the weights.
+#[test]
+fn what_is_read_from_a_file_cannot_decide_the_weights() {
+    fails(
+        &strategy("    let k = parse_float(read_text(\"limits.txt\"))\n    weights[month: m] = where(elig[month: m], k, 0.0)"),
+        "E0301",
+        "only at the end of the data",
+    );
+    // the program's arguments and today's date are known in advance
+    ok(&strategy("    let k = if len(args()) > 0 and today() > 0 { 0.01 } else { 0.02 }\n    weights[month: m] = where(elig[month: m], k, 0.0)"));
+}

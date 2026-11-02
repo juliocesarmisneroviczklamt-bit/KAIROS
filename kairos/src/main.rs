@@ -8,7 +8,8 @@ use std::sync::atomic::Ordering;
 const USAGE: &str = "Kairós — a language for financial research and AI
 
 usage:
-  kairos run <file.krs>     check and run a program
+  kairos run <file.krs> [args...]
+                            check and run a program (`args()` gives the arguments)
   kairos check <file.krs>   type-check only
   kairos repl               interactive session (also: just `kairos`)
   kairos ledger             the holdout ledger: months seen, protocols, holdouts opened
@@ -41,8 +42,8 @@ fn main() {
 
 fn real_main(args: Vec<String>) -> i32 {
     match args.get(1).map(String::as_str) {
-        Some("run") => file_cmd(args.get(2), true),
-        Some("check") => file_cmd(args.get(2), false),
+        Some("run") => file_cmd(args.get(2), args.get(3..).unwrap_or_default(), true),
+        Some("check") => file_cmd(args.get(2), &[], false),
         Some("repl") | None => repl(),
         Some("ledger") => ledger_cmd(&args[2..]),
         Some("--version") | Some("-V") => {
@@ -51,7 +52,7 @@ fn real_main(args: Vec<String>) -> i32 {
         }
         // `kairos programa.krs`, and scripts with `#!/usr/bin/env kairos` (any file name)
         Some(path) if path.ends_with(".krs") || std::path::Path::new(path).is_file() => {
-            file_cmd(Some(&path.to_string()), true)
+            file_cmd(Some(&path.to_string()), &args[2..], true)
         }
         _ => {
             eprintln!("{USAGE}");
@@ -60,7 +61,7 @@ fn real_main(args: Vec<String>) -> i32 {
     }
 }
 
-fn file_cmd(path: Option<&String>, run: bool) -> i32 {
+fn file_cmd(path: Option<&String>, prog_args: &[String], run: bool) -> i32 {
     let Some(path) = path else {
         eprintln!("{USAGE}");
         return 2;
@@ -76,6 +77,7 @@ fn file_cmd(path: Option<&String>, run: bool) -> i32 {
     // the program's name in the registry of trials
     let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
     s.host().set_program(&stem);
+    s.host().set_args(prog_args.to_vec());
     s.mark_imported(path);
     let res = if run { s.run(path, &src).map(|_| ()) } else { s.check(path, &src) };
     match res {

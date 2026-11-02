@@ -165,6 +165,26 @@ print(compound(returns))                 // função da biblioteca padrão, escr
 print(returns.map(|r| r * 100.0))        // lambdas capturam por valor
 ```
 
+### 4.6 Texto, arquivos e ambiente (M9)
+
+Para coletar dados e escrever relatórios em Kairós, sem passar por outra linguagem.
+
+| função | o que faz |
+|---|---|
+| `split(s, sep)`, `lines(s)`, `join(xs, sep)` | corta por separador, por linha (`\n` ou `\r\n`) e junta |
+| `trim(s)`, `upper(s)`, `lower(s)`, `replace(s, de, para)` | transformações |
+| `starts_with(s, p)`, `ends_with(s, p)`, `contains(s, sub)`, `find(s, sub)` | buscas (`find` dá o índice do caractere, ou −1) |
+| `substr(s, início, n)`, `len(s)`, `codes(s)`, `from_codes(xs)` | caracteres e pontos de código Unicode |
+| `parse_int(s)`, `parse_float(s)` | número escrito no texto; `parse_int` inválido é R0010, `parse_float` inválido dá NaN (dado faltando) |
+| `read_text(p)`, `write_text(p, s)`, `append_text(p, s)` | arquivo inteiro: UTF-8, ou Latin-1 quando não é UTF-8 (os arquivos da B3) |
+| `file_exists(p)`, `list_dir(p)`, `make_dir(p)` | pastas (`list_dir` vem em ordem alfabética) |
+| `args()`, `env(nome)`, `today()` | argumentos (`kairos run prog.krs a b`), variáveis de ambiente, a data de hoje (UTC, AAAAMMDD) |
+
+- **Escapes de texto:** `\n`, `\t`, `\r`, `\0`, `\"`, `\\` e `\u{e9}`, este com 1 a 6 dígitos hexadecimais.
+- **Erros de arquivo** (não existe, sem permissão…) param o programa com R0011 e a mensagem do sistema.
+- **Tempo:** o que vem de um arquivo não tem hora conhecida. Para o compilador, configuração e dado de mercado são iguais, então um valor lido de arquivo não decide pesos (E0301), a menos que se declare quando cada linha fica conhecida, com `observed`. `args()`, `env()` e `today()` são conhecidos antes de tudo.
+- **A cerca do holdout** (§7) vale para o módulo `b3`. Ler os arquivos de mercado diretamente fica fora dela, mas aparece no código.
+
 ## 5. Eixos nomeados (M2)
 
 ```krs

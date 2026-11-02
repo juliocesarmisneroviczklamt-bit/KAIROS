@@ -1,0 +1,32 @@
+// M9: text, files and the environment.
+let line = "  PETR4;38,50;1200  "
+let parts = split(trim(line), ";")
+print(parts)                                                    // out: ["PETR4", "38,50", "1200"]
+print(parse_float(replace(parts[1], ",", ".")) * 2.0)           // out: 77.0
+print(parse_int(parts[2]) + 1, parse_int(" -7 "))               // out: 1201 -7
+print(parse_float("n/d"), parse_float(" 1e-3 "))                // out: NaN 0.001
+print(join(["a", "b", "c"], ", "), upper("ação"), lower("PETR4"))   // out: a, b, c AÇÃO petr4
+print(starts_with("COTAHIST_A2024.ZIP", "COTAHIST"), ends_with("x.csv", ".zip"))   // out: true false
+print(find("PETR4 VALE3", "VALE"), find("abc", "z"), find("ação ok", "ok"))        // out: 6 -1 5
+print(contains("PETR4", "TR"), contains([1, 2], 3))             // out: true false
+print(codes("Aé"), from_codes([75, 97, 105, 114, 243, 115]))    // out: [65, 233] Kairós
+print(lines("a\r\nb\n\nc"), "tab\there", "\u{e9}\u{1F4C8}" == "é📈")   // out: ["a", "b", "", "c"] tab	here true
+print(len(args()), today() > 20260101, env("KAIROS_SURELY_UNSET_VAR") == "")    // out: 0 true true
+
+// a small CSV, written, appended and read back
+var tmp = env("TMPDIR")
+if tmp == "" { tmp = env("TEMP") }
+if tmp == "" { tmp = "/tmp" }
+let dir = tmp + "/kairos_golden_m9"
+make_dir(dir)
+let path = dir + "/prices.csv"
+write_text(path, "ticker,price\n")
+append_text(path, "PETR4,38.5\n")
+append_text(path, "VALE3,61.25\n")
+print(file_exists(path), file_exists(dir + "/missing.txt"))     // out: true false
+var total = 0.0
+for l in lines(read_text(path)) {
+    if starts_with(l, "ticker") { continue }
+    total += parse_float(split(l, ",")[1])
+}
+print(total, contains(list_dir(dir), "prices.csv"))             // out: 99.75 true

@@ -1614,6 +1614,20 @@ impl Checker {
         Ok((HExpr::CallFn(fid, hargs, sp), sig.ret.clone()))
     }
 
+    /// The arguments of a builtin whose parameters have fixed types.
+    fn fixed_args(&mut self, all: &[(&Expr, bool)], want: &[Ty], sp: Span, name: &str) -> KResult<Vec<HArg>> {
+        if all.len() != want.len() {
+            return Err(Diag::new("E0103", sp, format!("`{name}` takes {} argument(s), but {} were given", want.len(), all.len())));
+        }
+        let mut hs = Vec::with_capacity(want.len());
+        for ((e, _), w) in all.iter().zip(want) {
+            let (h, t) = self.expr(e, Some(w))?;
+            self.expect_ty(&t, w, e.span)?;
+            hs.push(HArg::Val(h));
+        }
+        Ok(hs)
+    }
+
     fn call_builtin(&mut self, b: Builtin, recv: Option<&Expr>, args: &[Arg], sp: Span) -> KResult<(HExpr, Ty)> {
         let name = builtin_name(b);
         let mut all: Vec<(&Expr, bool)> = Vec::new();
@@ -1708,7 +1722,8 @@ impl Checker {
             Builtin::Contains => {
                 arity(2)?;
                 let (hl, tl) = self.expr(all[0].0, None)?;
-                let elem = self.list_elem(&tl, all[0].0.span)?;
+                // `contains(s, sub)`: a string inside another
+                let elem = if self.resolve(&tl) == Ty::Str { Ty::Str } else { self.list_elem(&tl, all[0].0.span)? };
                 let (hx, tx) = self.expr(all[1].0, Some(&elem))?;
                 self.expect_ty(&tx, &elem, all[1].0.span)?;
                 (vec![HArg::Val(hl), HArg::Val(hx)], Ty::Bool)
@@ -1744,6 +1759,24 @@ impl Checker {
                 self.default_nums(&t);
                 (vec![HArg::Val(h)], Ty::Str)
             }
+            Builtin::Split => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::List(Box::new(Ty::Str))),
+            Builtin::Lines => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::List(Box::new(Ty::Str))),
+            Builtin::Trim | Builtin::Upper | Builtin::Lower => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Str),
+            Builtin::StartsWith | Builtin::EndsWith => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Bool),
+            Builtin::Find => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Int),
+            Builtin::Replace => (self.fixed_args(&all, &[Ty::Str, Ty::Str, Ty::Str], sp, name)?, Ty::Str),
+            Builtin::ParseInt => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
+            Builtin::ParseFloat => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Float),
+            Builtin::Join => (self.fixed_args(&all, &[Ty::List(Box::new(Ty::Str)), Ty::Str], sp, name)?, Ty::Str),
+            Builtin::Codes => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::List(Box::new(Ty::Int))),
+            Builtin::FromCodes => (self.fixed_args(&all, &[Ty::List(Box::new(Ty::Int))], sp, name)?, Ty::Str),
+            Builtin::ReadText | Builtin::Env => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Str),
+            Builtin::WriteText | Builtin::AppendText => (self.fixed_args(&all, &[Ty::Str, Ty::Str], sp, name)?, Ty::Unit),
+            Builtin::FileExists => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Bool),
+            Builtin::ListDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::List(Box::new(Ty::Str))),
+            Builtin::MakeDir => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Unit),
+            Builtin::Args => (self.fixed_args(&all, &[], sp, name)?, Ty::List(Box::new(Ty::Str))),
+            Builtin::Today => (self.fixed_args(&all, &[], sp, name)?, Ty::Int),
             Builtin::Substr => {
                 arity(3)?;
                 let (hs, ts) = self.expr(all[0].0, Some(&Ty::Str))?;

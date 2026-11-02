@@ -1,0 +1,2 @@
+// Reading a file that does not exist stops the program.
+let s = read_text("this/file/does/not/exist.txt")   // error: R0011

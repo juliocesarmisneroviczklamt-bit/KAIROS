@@ -45,6 +45,29 @@ fn err<T>(code: &'static str, sp: Span, msg: impl Into<String>) -> R<T> {
     Err(Ctl::Err(Diag::new(code, sp, msg)))
 }
 
+fn str_of(v: &Value) -> &str {
+    match v {
+        Value::Str(s) => s,
+        other => unreachable!("expected a string, got {other:?}"),
+    }
+}
+
+fn str_list<S: AsRef<str>>(xs: impl IntoIterator<Item = S>) -> Value {
+    Value::List(Rc::new(xs.into_iter().map(|s| Value::Str(s.as_ref().into())).collect()))
+}
+
+/// A file's text: UTF-8 (without a byte-order mark), or Latin-1 when it is not UTF-8.
+fn decode_text(bytes: Vec<u8>) -> String {
+    let s = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+    };
+    match s.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => s,
+    }
+}
+
 fn as_bool(v: Value) -> bool {
     matches!(v, Value::Bool(true))
 }
@@ -501,10 +524,11 @@ impl<'a> Interp<'a> {
                 Value::Str(s) => s.chars().count() as i64,
                 other => unreachable!("len of {other:?}"),
             })),
-            Builtin::Contains => {
-                let Value::List(xs) = &v[0] else { unreachable!() };
-                Ok(Value::Bool(xs.contains(&v[1])))
-            }
+            Builtin::Contains => match &v[0] {
+                Value::Str(s) => Ok(Value::Bool(s.contains(str_of(&v[1])))),
+                Value::List(xs) => Ok(Value::Bool(xs.contains(&v[1]))),
+                other => unreachable!("contains on {other:?}"),
+            },
             Builtin::Map | Builtin::Filter => {
                 let Value::List(xs) = &v[0] else { unreachable!() };
                 let mut out = Vec::with_capacity(xs.len());
@@ -581,6 +605,98 @@ impl<'a> Interp<'a> {
                 other => unreachable!("int of {other:?}"),
             },
             Builtin::ToStr => Ok(Value::Str(self.display(&v[0], true).into())),
+            Builtin::Split => {
+                let sep = str_of(&v[1]);
+                if sep.is_empty() {
+                    return err("R0010", sp, "`split` needs a separator that is not empty");
+                }
+                Ok(str_list(str_of(&v[0]).split(sep)))
+            }
+            Builtin::Lines => Ok(str_list(str_of(&v[0]).lines())),
+            Builtin::Trim => Ok(Value::Str(str_of(&v[0]).trim().into())),
+            Builtin::Upper => Ok(Value::Str(str_of(&v[0]).to_uppercase().into())),
+            Builtin::Lower => Ok(Value::Str(str_of(&v[0]).to_lowercase().into())),
+            Builtin::StartsWith => Ok(Value::Bool(str_of(&v[0]).starts_with(str_of(&v[1])))),
+            Builtin::EndsWith => Ok(Value::Bool(str_of(&v[0]).ends_with(str_of(&v[1])))),
+            Builtin::Find => {
+                let s = str_of(&v[0]);
+                Ok(Value::Int(s.find(str_of(&v[1])).map_or(-1, |b| s[..b].chars().count() as i64)))
+            }
+            Builtin::Replace => Ok(Value::Str(str_of(&v[0]).replace(str_of(&v[1]), str_of(&v[2])).into())),
+            Builtin::ParseInt => {
+                let s = str_of(&v[0]);
+                match s.trim().parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => err("R0010", sp, format!("not an integer: {s:?}")),
+                }
+            }
+            Builtin::ParseFloat => Ok(Value::Float(str_of(&v[0]).trim().parse::<f64>().unwrap_or(f64::NAN))),
+            Builtin::Join => {
+                let Value::List(xs) = &v[0] else { unreachable!("join of a non-list") };
+                let sep = str_of(&v[1]);
+                let mut out = String::new();
+                for (i, x) in xs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(sep);
+                    }
+                    out.push_str(str_of(x));
+                }
+                Ok(Value::Str(out.into()))
+            }
+            Builtin::Codes => Ok(Value::List(Rc::new(str_of(&v[0]).chars().map(|c| Value::Int(i64::from(u32::from(c)))).collect()))),
+            Builtin::FromCodes => {
+                let Value::List(xs) = &v[0] else { unreachable!("from_codes of a non-list") };
+                let mut out = String::with_capacity(xs.len());
+                for x in xs.iter() {
+                    let n = as_int(x.clone());
+                    match u32::try_from(n).ok().and_then(char::from_u32) {
+                        Some(c) => out.push(c),
+                        None => return err("R0010", sp, format!("{n} is not a Unicode code point")),
+                    }
+                }
+                Ok(Value::Str(out.into()))
+            }
+            Builtin::ReadText => {
+                let p = str_of(&v[0]);
+                match std::fs::read(p) {
+                    Ok(bytes) => Ok(Value::Str(decode_text(bytes).into())),
+                    Err(e) => err("R0011", sp, format!("cannot read {p}: {e}")),
+                }
+            }
+            Builtin::WriteText | Builtin::AppendText => {
+                let (p, s) = (str_of(&v[0]), str_of(&v[1]));
+                let r = if b == Builtin::WriteText {
+                    std::fs::write(p, s.as_bytes())
+                } else {
+                    std::fs::OpenOptions::new().create(true).append(true).open(p).and_then(|mut fh| fh.write_all(s.as_bytes()))
+                };
+                match r {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(e) => err("R0011", sp, format!("cannot write {p}: {e}")),
+                }
+            }
+            Builtin::FileExists => Ok(Value::Bool(std::path::Path::new(str_of(&v[0])).exists())),
+            Builtin::ListDir => {
+                let p = str_of(&v[0]);
+                match std::fs::read_dir(p) {
+                    Ok(rd) => {
+                        let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+                        names.sort();
+                        Ok(str_list(names))
+                    }
+                    Err(e) => err("R0011", sp, format!("cannot list {p}: {e}")),
+                }
+            }
+            Builtin::MakeDir => {
+                let p = str_of(&v[0]);
+                match std::fs::create_dir_all(p) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(e) => err("R0011", sp, format!("cannot create {p}: {e}")),
+                }
+            }
+            Builtin::Env => Ok(Value::Str(std::env::var(str_of(&v[0])).unwrap_or_default().into())),
+            Builtin::Args => Ok(str_list(self.host.args())),
+            Builtin::Today => Ok(Value::Int(i64::from(self.host.today_date()))),
             Builtin::Substr => {
                 let Value::Str(s) = &v[0] else { unreachable!("substr of a non-string") };
                 let a = as_int(v[1].clone()).max(0) as usize;

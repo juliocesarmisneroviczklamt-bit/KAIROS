@@ -132,6 +132,8 @@ pub struct Host {
     /// a fixed date (YYYYMMDD) instead of today's, for tests
     today: Cell<u32>,
     fence_noted: Cell<bool>,
+    /// the program's arguments (`args()`)
+    args: RefCell<Vec<String>>,
 }
 
 /// The hash that identifies a protocol in the ledger: changing any term makes another protocol.
@@ -209,6 +211,20 @@ impl Host {
     /// Uses a fixed date (YYYYMMDD) in the ledger instead of today's (tests).
     pub fn set_today(&self, date: u32) {
         self.today.set(date);
+    }
+
+    /// The program's arguments, as `args()` gives them.
+    pub fn set_args(&self, args: Vec<String>) {
+        *self.args.borrow_mut() = args;
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        self.args.borrow().clone()
+    }
+
+    /// Today (UTC, YYYYMMDD), or the date fixed by [`Host::set_today`].
+    pub fn today_date(&self) -> u32 {
+        self.today()
     }
 
     fn today(&self) -> u32 {

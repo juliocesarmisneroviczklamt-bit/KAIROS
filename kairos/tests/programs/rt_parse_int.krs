@@ -1,0 +1,3 @@
+// parse_int of something that is not an integer stops the program (parse_float gives NaN).
+print(parse_int("42"))           // out: 42
+print(parse_int("4,2"))          // error: R0010

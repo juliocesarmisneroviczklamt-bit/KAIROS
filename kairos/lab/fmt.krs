@@ -48,12 +48,3 @@ fn date_text(d: i64) -> str {
     let dd = d % 100
     ym_text(d / 100) + "-" + (if dd < 10 { "0" } else { "" }) + str(dd)
 }
-
-fn join(xs: List[str], sep: str) -> str {
-    var out = ""
-    for i in 0..len(xs) {
-        if i > 0 { out = out + sep }
-        out = out + xs[i]
-    }
-    out
-}
