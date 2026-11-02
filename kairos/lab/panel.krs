@@ -1,0 +1,332 @@
+// The lab's panel in Kairós (quant-b3 panel `build`): the total daily return of every stock,
+// from prices, cash dividends, splits and reverse splits, spin-offs and subscription rights.
+// Price jumps without a known event go through a conservative split detector; what stays odd is
+// neutralized or kept, and written to diagnostic CSVs.
+import "std/dates.krs"
+import "bars.krs"
+import "events.krs"
+
+// a session of a stock in the panel
+struct Day {
+    di: i64,        // index in the calendar
+    r: f64,         // total return since the previous session the stock traded
+    vol: f64,       // traded volume (R$)
+    div: f64,       // the part of r from dividends (tax-free for individuals); stored as f32
+    jcp: f64,       // the part of r from JCP (gross; 15% withheld); stored as f32
+    spr: f64,       // relative bid-ask spread at the close (NaN without both); stored as f32
+    px: f64,        // unadjusted close (R$ per share); stored as f32
+}
+
+struct Tk {
+    ticker: str,
+    issuer: str,
+    class: str,
+    first: i64,
+    last: i64,
+    days: List[Day],
+}
+
+struct BuildStats {
+    splits_b3: i64,
+    splits_inferred: i64,
+    cash_applied: i64,
+    spin_applied: i64,
+    spin_unresolved: i64,
+    rights_applied: i64,
+    b3_dropped: i64,
+    b3_corrected: i64,
+    neutralized: i64,
+    event_residuals: i64,
+    big_moves: i64,
+    returns: i64,
+}
+
+fn spread(b: Bar) -> f64 {
+    if b.bid > 0.0 and b.ask >= b.bid { (b.ask - b.bid) / (0.5 * (b.ask + b.bid)) } else { nan }
+}
+
+// "Round" multiples of splits (penny stocks of the 2000s had reverse splits of tens of thousands
+// to one: TLCP4 in 2005).
+fn nice() -> List[f64] {
+    [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 15.0, 16.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0,
+     120.0, 150.0, 200.0, 250.0, 300.0, 400.0, 500.0, 1000.0, 2000.0, 2500.0, 4000.0, 5000.0, 10000.0, 20000.0,
+     25000.0, 50000.0, 100000.0, 200000.0, 250000.0, 500000.0, 1000000.0]
+}
+
+// The round multiplier m with q·m ≈ 1 (relative error in logs < tol): (m, error), or (0, 0).
+fn nearest_nice(q: f64, tol: f64) -> (f64, f64) {
+    let target = 1.0 / q
+    var best_m = 0.0
+    var best_e = 0.0
+    for k in nice() {
+        for m in [k, 1.0 / k] {
+            let e = abs(ln(target / m))
+            if e < tol and (best_m == 0.0 or e < best_e) {
+                best_m = m
+                best_e = e
+            }
+        }
+    }
+    (best_m, best_e)
+}
+
+// A quantity-event marker in ESPECI ("ON  EG  NM": ex reverse split).
+fn stock_marker(especi: str) -> bool {
+    var toks = []
+    for t in split(replace(especi, "*", " "), " ") {
+        if t != "" { toks.push(t) }
+    }
+    for k in 1..len(toks) {
+        let tok = toks[k]
+        let excluded = contains(["ED", "EJ", "EDJ", "ES", "ER", "EJS", "EDS"], tok)
+        if utf8_len(tok) >= 2 and starts_with(tok, "E") and not excluded and (contains(tok, "G") or contains(tok, "X") or contains(tok, "B")) {
+            return true
+        }
+    }
+    false
+}
+
+fn median(v: List[f64]) -> f64 {
+    var xs = []
+    for x in v {
+        if not is_nan(x - x) and x > 0.0 { xs.push(x) }
+    }
+    if len(xs) == 0 { return nan }
+    xs.sort()
+    let n = len(xs)
+    if n % 2 == 1 { xs[n / 2] } else { 0.5 * (xs[n / 2 - 1] + xs[n / 2]) }
+}
+
+// (quantity ratio, volume ratio): 10 sessions after / 10 before
+fn vol_ratios(bars: List[Bar], i: i64) -> (f64, f64) {
+    let lo = max(i - 10, 0)
+    let hi = min(i + 10, len(bars))
+    var qa = []
+    var qb = []
+    var va = []
+    var vb = []
+    for k in lo..i {
+        qb.push(bars[k].qty)
+        vb.push(bars[k].vol)
+    }
+    for k in i..hi {
+        qa.push(bars[k].qty)
+        va.push(bars[k].vol)
+    }
+    (median(qa) / median(qb), median(va) / median(vb))
+}
+
+// A price jump without a B3 event. Volume is NOT proof: after a crash the market keeps trading
+// the same R$ at a lower price, so the quantity rises just like after a split (AMER3,
+// 2023-01-12). Accepted only with a new EB/EG marker in ESPECI on that session and a round ratio
+// (error < 10%), or a huge and exact ratio (>= ~10x, error < 3%), which does not happen in a day.
+// (multiplier, why), or (0, "").
+fn infer_split(bars: List[Bar], i: i64, q: f64) -> (f64, str) {
+    let new_marker = stock_marker(bars[i].especi) and not stock_marker(bars[i - 1].especi)
+    if new_marker {
+        let nn = nearest_nice(q, 0.10)
+        if nn.0 != 0.0 { return (nn.0, "marcador+razao redonda") }
+        // a quantity marker but a broken ratio (GFSA3 13.48:1 in 2017, missing at B3):
+        // neutralize the day instead of inventing a +1250% return
+        return (1.0 / q, "marcador+razao quebrada: neutralizado")
+    }
+    let nn = nearest_nice(q, 0.03)
+    if nn.0 != 0.0 and abs(ln(nn.0)) >= ln(9.5) { return (nn.0, "razao enorme exata") }
+    (0.0, "")
+}
+
+fn f6(x: f64) -> str {
+    format_fixed(x, 6)
+}
+
+fn f4(x: f64) -> str {
+    format_fixed(x, 4)
+}
+
+// (the panel's calendar, its stocks, the statistics, the 3 diagnostic CSVs)
+fn build_panel(series: List[Series], evs: List[List[Event]]) -> (List[i64], List[Tk], BuildStats, List[str]) {
+    // the calendar: every date with a trade
+    var all = []
+    for s in series {
+        for b in s.bars { all.push(b.date) }
+    }
+    all.sort()
+    var dates = []
+    var di: Map[i64, i64] = [:]
+    for d in all {
+        let n = len(dates)
+        if n == 0 or dates[n - 1] != d {
+            di[d] = n
+            dates.push(d)
+        }
+    }
+    var by_isin: Map[str, i64] = [:]
+    for i in 0..len(series) {
+        for isin in series[i].isins { by_isin[isin] = i }
+    }
+    var st = BuildStats { splits_b3: 0, splits_inferred: 0, cash_applied: 0, spin_applied: 0, spin_unresolved: 0, rights_applied: 0, b3_dropped: 0, b3_corrected: 0, neutralized: 0, event_residuals: 0, big_moves: 0, returns: 0 }
+    var inferred = ["ticker,data,preco_ant,preco,mult_inferido,razao_qtd,razao_vol_rs,especi,motivo"]
+    var big = ["ticker,data,preco_ant,preco,mult,proventos,retorno,eventos,especi"]
+    var resid = ["ticker,data,preco_ant,preco,mult,retorno,eventos"]
+    var tks = []
+    for k in 0..len(series) {
+        let s = series[k]
+        let bars = s.bars
+        if len(bars) == 0 { continue }
+        let ev = evs[k]
+        var j = 0
+        var days = [Day { di: di[bars[0].date], r: 0.0, vol: bars[0].vol, div: 0.0, jcp: 0.0, spr: spread(bars[0]), px: bars[0].close }]
+        for i in 1..len(bars) {
+            let b0 = bars[i - 1]
+            let b1 = bars[i]
+            let p0 = b0.close
+            let p1 = b1.close
+            var m = 1.0
+            var y = 0.0
+            var split_ev = false
+            var y_div = 0.0
+            var y_jcp = 0.0
+            var labels = []
+            // events with a record date in [d0, d1): the adjustment falls on session d1
+            while j < len(ev) and ev[j].datacom < b1.date {
+                let e = ev[j]
+                j += 1
+                if e.datacom < b0.date { continue }
+                labels.push(e.label)
+                match e.ev {
+                    Split(mult) => {
+                        m *= mult
+                        split_ev = true
+                        st.splits_b3 += 1
+                    },
+                    Cash(yy, jcp) => {
+                        y += yy
+                        if jcp { y_jcp += yy } else { y_div += yy }
+                        st.cash_applied += 1
+                    },
+                    SpinOff(isin, ratio) => {
+                        // the new asset's first close, within 60 days
+                        var px = nan
+                        if contains(by_isin, isin) {
+                            let a = series[by_isin[isin]]
+                            let ix = idx_after(a, e.datacom)
+                            if ix >= 0 and a.bars[ix].date <= add_days(e.datacom, 60) { px = a.bars[ix].close }
+                        }
+                        if is_nan(px) {
+                            st.spin_unresolved += 1
+                        } else {
+                            y += ratio * px / p0
+                            st.spin_applied += 1
+                        }
+                    },
+                    Rights(isin, sr, price) => {
+                        var pi = nan
+                        var have = false
+                        if contains(s.isins, isin) {
+                            pi = p0
+                            have = true
+                        } else if contains(by_isin, isin) {
+                            let a = series[by_isin[isin]]
+                            let ix = idx_on_or_before(a, e.datacom)
+                            if ix >= 0 {
+                                pi = a.bars[ix].close
+                                have = true
+                            }
+                        }
+                        if have {
+                            let v = sr * max(pi - price, 0.0) / (1.0 + sr)
+                            if v > 0.0 {
+                                y += v / p0
+                                st.rights_applied += 1
+                            }
+                        }
+                    },
+                }
+            }
+            let q_raw = p1 / p0
+            if split_ev and abs(ln(q_raw * m)) > ln(2.0) {
+                let m_b3 = m
+                if abs(ln(q_raw)) < ln(1.25) {
+                    // the price did not move: the event did not happen on this session (a wrong
+                    // date or factor at B3)
+                    m = 1.0
+                    st.b3_dropped += 1
+                } else if abs(ln(q_raw * m)) > ln(3.0) {
+                    // B3's factor does not fit the price jump: the round ratio observed
+                    let nn = nearest_nice(q_raw, 0.15)
+                    if nn.0 != 0.0 and abs(ln(q_raw * nn.0)) < abs(ln(q_raw * m)) {
+                        m = nn.0
+                        st.b3_corrected += 1
+                    }
+                }
+                if m != m_b3 {
+                    resid.push(s.ticker + "," + date_iso(b1.date) + "," + f6(p0) + "," + f6(p1) + "," + f6(m) + "," + f4(p1 * m / p0 - 1.0 + y) + "," + join(labels, "|") + " (fator B3 " + f6(m_b3) + " -> " + f6(m) + ")")
+                }
+            }
+            if not split_ev and (q_raw > 1.8 or q_raw < 0.55) {
+                let inf = infer_split(bars, i, q_raw)
+                if inf.0 != 0.0 {
+                    m = inf.0
+                    split_ev = true
+                    st.splits_inferred += 1
+                    let vr = vol_ratios(bars, i)
+                    inferred.push(s.ticker + "," + date_iso(b1.date) + "," + f6(p0) + "," + f6(p1) + "," + f6(inf.0) + "," + format_fixed(vr.0, 3) + "," + format_fixed(vr.1, 3) + "," + b1.especi + "," + inf.1)
+                }
+            }
+            var r = p1 * m / p0 - 1.0 + y
+            // the last filter: above +200% or below -90% in a day, unexplained, is a data error or
+            // an unregistered event: neutralized (only the cash stays) and written down
+            if 1.0 + r > 3.0 or 1.0 + r < 0.10 {
+                st.neutralized += 1
+                big.push(s.ticker + "," + date_iso(b1.date) + "," + f6(p0) + "," + f6(p1) + "," + f6(m) + "," + f4(y) + "," + f4(r) + ",NEUTRALIZADO" + (if len(labels) == 0 { "" } else { "|" }) + join(labels, "|") + "," + b1.especi)
+                r = min(y, 0.6)
+            }
+            if split_ev and abs(r) > 0.4 {
+                st.event_residuals += 1
+                resid.push(s.ticker + "," + date_iso(b1.date) + "," + f6(p0) + "," + f6(p1) + "," + f6(m) + "," + f4(r) + "," + join(labels, "|"))
+            }
+            if r > 1.5 or r < -0.6 {
+                st.big_moves += 1
+                big.push(s.ticker + "," + date_iso(b1.date) + "," + f6(p0) + "," + f6(p1) + "," + f6(m) + "," + f4(y) + "," + f4(r) + "," + join(labels, "|") + "," + b1.especi)
+            }
+            st.returns += 1
+            days.push(Day { di: di[b1.date], r: r, vol: b1.vol, div: y_div, jcp: y_jcp, spr: spread(b1), px: p1 })
+        }
+        tks.push(Tk { ticker: s.ticker, issuer: issuer_of(s.ticker), class: s.class, first: first_date(s), last: last_date(s), days: days })
+    }
+    let csvs = [join(inferred, "\n") + "\n", join(big, "\n") + "\n", join(resid, "\n") + "\n"]
+    (dates, tks, st, csvs)
+}
+
+fn print_build_stats(st: BuildStats) {
+    print("Ajuste de retornos (" + str(st.returns) + " retornos diários):")
+    print("  desdobr./grupam. B3: " + str(st.splits_b3) + " (descartados por não aparecerem no preço: " + str(st.b3_dropped) + ", fator corrigido: " + str(st.b3_corrected) + ") | inferidos (marcador EB/EG ou razão enorme exata): " + str(st.splits_inferred))
+    print("  proventos: " + str(st.cash_applied) + " | cisões: " + str(st.spin_applied) + " (sem preço: " + str(st.spin_unresolved) + ") | subscrições: " + str(st.rights_applied))
+    print("  dias com evento de ações e |retorno| > 40% (conferir): " + str(st.event_residuals) + " | neutralizados (>+200%/<-90% sem explicação): " + str(st.neutralized) + " | extremos mantidos (>+150%/<-60%): " + str(st.big_moves))
+}
+
+// The lab's Panel in bincode: the calendar, then every stock and its sessions.
+fn encode_panel(dates: List[i64], tks: List[Tk]) -> Bytes {
+    var b = bytes()
+    b.put_u64(len(dates))
+    for d in dates { b.put_u32(d) }
+    b.put_u64(len(tks))
+    for t in tks {
+        put_text(inout b, t.ticker)
+        put_text(inout b, t.issuer)
+        put_text(inout b, t.class)
+        b.put_u32(t.first)
+        b.put_u32(t.last)
+        b.put_u64(len(t.days))
+        for d in t.days {
+            b.put_u32(d.di)
+            b.put_f64(d.r)
+            b.put_f64(d.vol)
+            b.put_f32(d.div)
+            b.put_f32(d.jcp)
+            b.put_f32(d.spr)
+            b.put_f32(d.px)
+        }
+    }
+    b
+}

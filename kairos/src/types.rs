@@ -1740,6 +1740,7 @@ impl Checker {
                 | Builtin::PutU64
                 | Builtin::PutI64
                 | Builtin::PutF64
+                | Builtin::PutF32
                 | Builtin::PutStr
         );
         for (i, (e, flag)) in all.iter().enumerate() {
@@ -1876,12 +1877,12 @@ impl Checker {
                 (self.fixed_args(&all, &[Ty::Str, keep], sp, name)?, Ty::List(Box::new(Ty::Str)))
             }
             Builtin::BytesNew => (self.fixed_args(&all, &[], sp, name)?, Ty::Bytes),
-            Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutStr => {
+            Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutF32 | Builtin::PutStr => {
                 arity(2)?;
                 let (place, t) = self.place(all[0].0)?;
                 self.expect_ty(&t, &Ty::Bytes, all[0].0.span)?;
                 let want = match b {
-                    Builtin::PutF64 => Ty::Float,
+                    Builtin::PutF64 | Builtin::PutF32 => Ty::Float,
                     Builtin::PutStr => Ty::Str,
                     _ => Ty::Int,
                 };
@@ -1891,7 +1892,7 @@ impl Checker {
             }
             Builtin::Utf8Len => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Int),
             Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int], sp, name)?, Ty::Int),
-            Builtin::GetF64 => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int], sp, name)?, Ty::Float),
+            Builtin::GetF64 | Builtin::GetF32 => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int], sp, name)?, Ty::Float),
             Builtin::GetStr => (self.fixed_args(&all, &[Ty::Bytes, Ty::Int, Ty::Int], sp, name)?, Ty::Str),
             Builtin::WriteBytes => (self.fixed_args(&all, &[Ty::Str, Ty::Bytes], sp, name)?, Ty::Unit),
             Builtin::ReadBytes => (self.fixed_args(&all, &[Ty::Str], sp, name)?, Ty::Bytes),

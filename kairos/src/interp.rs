@@ -577,7 +577,7 @@ impl<'a> Interp<'a> {
     }
 
     fn builtin(&mut self, b: Builtin, args: &[HArg], f: &mut Vec<Value>, sp: Span) -> R<Value> {
-        if matches!(b, Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutStr) {
+        if matches!(b, Builtin::PutU8 | Builtin::PutU32 | Builtin::PutU64 | Builtin::PutI64 | Builtin::PutF64 | Builtin::PutF32 | Builtin::PutStr) {
             let HArg::InOut(p) = &args[0] else { unreachable!("put without a place") };
             let x = self.val(&args[1], f)?;
             let (root, path) = self.resolve_place(p, f)?;
@@ -595,6 +595,7 @@ impl<'a> Interp<'a> {
                 (Builtin::PutU64, Value::Int(n)) => bs.extend_from_slice(&range(n, u64::MAX, "u64")?.to_le_bytes()),
                 (Builtin::PutI64, Value::Int(n)) => bs.extend_from_slice(&n.to_le_bytes()),
                 (Builtin::PutF64, Value::Float(x)) => bs.extend_from_slice(&x.to_le_bytes()),
+                (Builtin::PutF32, Value::Float(x)) => bs.extend_from_slice(&(x as f32).to_le_bytes()),
                 (Builtin::PutStr, Value::Str(s)) => bs.extend_from_slice(s.as_bytes()),
                 (b, x) => unreachable!("{b:?} of {x:?}"),
             }
@@ -865,7 +866,7 @@ impl<'a> Interp<'a> {
             }
             Builtin::BytesNew => Ok(Value::Bytes(Rc::new(Vec::new()))),
             Builtin::Utf8Len => Ok(Value::Int(str_of(&v[0]).len() as i64)),
-            Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 | Builtin::GetF64 | Builtin::GetStr => {
+            Builtin::GetU8 | Builtin::GetU32 | Builtin::GetU64 | Builtin::GetI64 | Builtin::GetF64 | Builtin::GetF32 | Builtin::GetStr => {
                 let Value::Bytes(bs) = &v[0] else { unreachable!("get from non-bytes") };
                 let at = as_int(v[1].clone());
                 Ok(match b {
@@ -880,6 +881,7 @@ impl<'a> Interp<'a> {
                     }
                     Builtin::GetI64 => Value::Int(i64::from_le_bytes(bytes_at(bs, at, 8, sp)?.try_into().expect("8 bytes"))),
                     Builtin::GetF64 => Value::Float(f64::from_le_bytes(bytes_at(bs, at, 8, sp)?.try_into().expect("8 bytes"))),
+                    Builtin::GetF32 => Value::Float(f64::from(f32::from_le_bytes(bytes_at(bs, at, 4, sp)?.try_into().expect("4 bytes")))),
                     _ => {
                         let n = as_int(v[2].clone());
                         let Ok(n) = usize::try_from(n) else { return err("R0001", sp, format!("{n} bytes")) };

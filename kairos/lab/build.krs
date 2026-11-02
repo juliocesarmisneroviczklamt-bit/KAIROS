@@ -1,0 +1,23 @@
+// The lab's panel in Kairós (quant-b3 `build`): the bar store and B3's corporate events become
+// the panel of total daily returns that every study reads.
+//
+//   kairos run kairos/lab/build.krs [data] [results]
+//
+// Reads data/processed/bars.bin and data/raw/b3; writes data/processed/panel.bin and, in
+// results/diag, the inferred splits, the extreme moves and the event residuals.
+import "panel.krs"
+
+let data = if len(args()) > 0 { args()[0] } else { "data" }
+let results = if len(args()) > 1 { args()[1] } else { "results" }
+let series = read_bars(data + "/processed/bars.bin")
+let ev = load_events(series, data + "/raw/b3")
+print_ev_stats(ev.1)
+let p = build_panel(series, ev.0)
+print_build_stats(p.2)
+make_dir(results + "/diag")
+write_text(results + "/diag/splits_inferidos.csv", p.3[0])
+write_text(results + "/diag/movimentos_extremos.csv", p.3[1])
+write_text(results + "/diag/residuos_eventos.csv", p.3[2])
+let out = data + "/processed/panel.bin"
+write_bytes(out, encode_panel(p.0, p.1))
+print("Gravado " + out + " (" + str(len(p.1)) + " papéis, " + str(len(p.0)) + " pregões)")

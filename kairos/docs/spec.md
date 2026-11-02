@@ -231,6 +231,8 @@ Para montar a base de dados em Kairós: os arquivos da B3 são texto de largura 
 | `write_bytes(p, b)`, `read_bytes(p)` | o arquivo inteiro |
 
 - **COTAHIST em Kairós:** [`lab/ingest.krs`](../lab/ingest.krs) lê os 32 ZIPs anuais e grava o mesmo `bars.bin` do Rust, byte a byte (220 MB, 2,3 milhões de pregões, 2.241 séries, 381 trocas de código encadeadas por ISIN), em 42 s.
+- **Eventos e painel em Kairós:** [`lab/build.krs`](../lab/build.krs), com [`events.krs`](../lab/events.krs) e [`panel.krs`](../lab/panel.krs), lê os 2.632 arquivos de eventos da B3 e monta o retorno total diário. O `panel.bin` (80 MB) e os três CSVs de diagnóstico saem iguais aos do Rust, byte a byte, em 16 s. Isso inclui proventos, JCP, desdobramentos e grupamentos (os da B3, os inferidos e os descartados), cisões, subscrições e a neutralização de saltos sem explicação. Reproduz até o jeito do `serde` de ignorar um arquivo inteiro quando um campo vem com o tipo errado.
+- **`std/json.krs`** ganhou `json_try(texto) -> (bool, Json)`, que devolve o erro em vez de parar o programa.
 - **`substr` em texto ASCII** corta os bytes direto, sem percorrer os caracteres.
 
 ## 5. Eixos nomeados (M2)

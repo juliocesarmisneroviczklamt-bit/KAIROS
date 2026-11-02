@@ -933,7 +933,7 @@ impl<'a> An<'a> {
         use Builtin as B;
         match b {
             // removing a key: which keys are left depends on it
-            B::Push | B::Remove | B::PutU8 | B::PutU32 | B::PutU64 | B::PutI64 | B::PutF64 | B::PutStr => {
+            B::Push | B::Remove | B::PutU8 | B::PutU32 | B::PutU64 | B::PutI64 | B::PutF64 | B::PutF32 | B::PutStr => {
                 let x = self.val(&args[1], f)?;
                 let HArg::InOut(p) = &args[0] else { unreachable!("push without a place") };
                 self.store_weak(p, x, f)?;

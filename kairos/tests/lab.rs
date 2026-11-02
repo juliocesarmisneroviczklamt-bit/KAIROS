@@ -416,3 +416,199 @@ fn the_cotahist_ingestion_in_kairos_writes_the_rust_bars() {
         assert!(got == want, "bars.bin differs ({} bytes written, {} expected)", got.len(), want.len());
     })
 }
+
+/// The data pipeline written in Kairós (lab/build.krs: bars.bin + B3's events -> panel.bin)
+/// writes exactly the panel and the diagnostics the Rust lab writes, on a small market built to
+/// hit every rule: a B3 split, one B3 lists but the price does not show, a reverse split inferred
+/// from an EG marker, a huge exact ratio, an unexplained crash (neutralized), dividends and JCP,
+/// a spin-off, subscription rights, a dividend two series could own (decided by price), and
+/// files serde cannot read (ignored).
+#[test]
+fn the_panel_build_in_kairos_is_the_rust_one() {
+    on_big_stack_with(|| {
+        use quant_b3::store::{Bar, BarStore, Series};
+        use quant_b3::{b3events, panel, util};
+        let tmp = if cfg!(target_family = "wasm") { std::path::PathBuf::from("/tmp") } else { std::env::temp_dir() };
+        let pid = if cfg!(target_family = "wasm") { 0 } else { std::process::id() };
+        let root = tmp.join(format!("kairos_build_{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, rust_res, krs_res) = (root.join("data"), root.join("rust"), root.join("krs"));
+        let b3 = data.join("raw").join("b3");
+        for d in [data.join("processed"), b3.clone(), rust_res.join("diag"), krs_res.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // business days from 2024-01-02 (1970-01-01 was a Thursday)
+        let mut days: Vec<u32> = Vec::new();
+        let mut d = util::to_days(20240102);
+        while days.len() < 60 {
+            if (d + 3).rem_euclid(7) < 5 {
+                days.push(util::from_days(d));
+            }
+            d += 1;
+        }
+        let bar = |date: u32, close: f64, especi: &str| Bar {
+            date,
+            open: close,
+            high: close * 1.02,
+            low: close * 0.98,
+            close,
+            avg: close,
+            bid: close * 0.995,
+            ask: close * 1.005,
+            vol_brl: 1e6 * (1.0 + (date % 7) as f64),
+            qty: 1e6 / close,
+            trades: 100,
+            fatcot: 1,
+            bdi: 2,
+            especi: especi.to_string(),
+        };
+        let series_of = |ticker: &str, class: &str, isin: &str, name: &str, bars: Vec<Bar>| Series {
+            ticker: ticker.to_string(),
+            aliases: Vec::new(),
+            isins: vec![isin.to_string()],
+            names: vec![(name.to_string(), bars[0].date, bars[bars.len() - 1].date)],
+            class: class.to_string(),
+            bars,
+        };
+        let path = |n: usize, f: &dyn Fn(usize) -> (f64, String)| -> Vec<Bar> {
+            (0..n)
+                .map(|i| {
+                    let (c, e) = f(i);
+                    bar(days[i], c, &e)
+                })
+                .collect()
+        };
+        let series = vec![
+            // a B3 split on day 10 (the price halves); another B3 split on day 40 the price ignores
+            series_of(
+                "AAAA3",
+                "ON",
+                "BRAAAAACNOR6",
+                "AAAA SA",
+                path(60, &|i| (if i < 10 { 20.0 } else { 10.0 + 0.01 * i as f64 }, "ON      NM".to_string())),
+            ),
+            // an EG marker with a round ratio (an inferred reverse split), then an unexplained crash
+            series_of(
+                "BBBB4",
+                "PN",
+                "BRBBBBACNPR1",
+                "BBBB SA",
+                path(60, &|i| match i {
+                    0..=14 => (1.0, "PN      N1".to_string()),
+                    15 => (10.0, "PN  EG  N1".to_string()),
+                    16..=29 => (10.0, "PN      N1".to_string()),
+                    _ => (0.37, "PN      N1".to_string()),
+                }),
+            ),
+            // a huge exact ratio without a marker (100:1), a spin-off and subscription rights
+            series_of("CCCC3", "ON", "BRCCCCACNOR4", "CCCC SA", path(60, &|i| (if i < 20 { 50.0 } else { 0.5 }, "ON".to_string()))),
+            // the spun-off company starts trading after the record date
+            series_of("DDDD3", "ON", "BRDDDDACNOR8", "DDDD SA", path(60, &|_| (8.0, "ON".to_string())).split_off(36)),
+            // two series under one trading name and class: the dividend goes to the one whose
+            // price matches B3's
+            series_of("EEEE3", "ON", "BREEEEACNOR2", "EEEE SA", path(60, &|_| (12.0, "ON".to_string()))),
+            series_of("EEEE5", "ON", "BREEEEACNPA9", "EEEE SA", path(60, &|_| (30.0, "ON".to_string()))),
+        ];
+        let dd = |i: usize| format!("{:02}/{:02}/{}", days[i] % 100, (days[i] / 100) % 100, days[i] / 10000);
+        util::save_bin(&BarStore { series }, &data.join("processed").join("bars.bin")).unwrap();
+        let stock = |asset: &str, factor: &str, isin: &str, label: &str, date: &str| {
+            format!(
+                "{{\"assetIssued\":\"{asset}\",\"factor\":\"{factor}\",\"isinCode\":\"{isin}\",\"label\":\"{label}\",\"lastDatePrior\":\"{date}\"}}"
+            )
+        };
+        let stocks = [
+            stock("BRAAAAACNOR6", "100,00", "BRAAAAACNOR6", "DESDOBRAMENTO", &dd(9)),
+            stock("BRAAAAACNOR6", "100,00", "BRAAAAACNOR6", "Desdobramento", &dd(39)),
+            stock("BRDDDDACNOR8", "50,00", "BRCCCCACNOR4", "CIS RED CAP", &dd(34)),
+            stock("", "1,0", "BRXXXXACNOR0", "GRUPAMENTO", &dd(5)),
+            stock("", "5", "BRAAAAACNOR6", "RESG TOTAL RV", "31/12/9999"),
+        ];
+        let subs = format!(
+            "{{\"assetIssued\":\"\",\"percentage\":\"10,00\",\"priceUnit\":\"0,40\",\"isinCode\":\"BRCCCCACNOR4\",\"label\":\"SUBSCRICAO\",\"lastDatePrior\":\"{}\"}}",
+            dd(44)
+        );
+        let supp = format!("{{\"issuer\":\"X\",\"data\":[{{\"stockDividends\":[{}],\"subscriptions\":[{subs}]}}]}}", stocks.join(","));
+        std::fs::write(b3.join("supp_X_1.json"), supp).unwrap();
+        let cash = |name: &str, rows: &[(&str, &str, usize, &str, &str)]| {
+            let rs: Vec<String> = rows
+                .iter()
+                .map(|(class, kind, i, val, close)| {
+                    format!(
+                        "{{\"typeStock\":\"{class}\",\"valueCash\":\"{val}\",\"corporateAction\":\"{kind}\",\"lastDatePriorEx\":\"{}\",\"closingPricePriorExDate\":\"{close}\",\"quotedPerShares\":\"1\"}}",
+                        dd(*i)
+                    )
+                })
+                .collect();
+            format!("{{\"tradingName\":\"{name}\",\"results\":[{}]}}", rs.join(","))
+        };
+        std::fs::write(b3.join("cash_A_1.json"), cash("AAAA SA", &[("ON", "DIVIDENDO", 20, "0,50", "10,20"), ("ON", "JRS CAP PROPRIO", 30, "0,20", "")])).unwrap();
+        // the same dividend again, in another file: counted once
+        std::fs::write(b3.join("cash_A_2.json"), cash("AAAA SA", &[("ON", "DIVIDENDO", 20, "0,50", "10,20")])).unwrap();
+        std::fs::write(b3.join("cash_E_1.json"), cash("EEEE SA", &[("ON", "DIVIDENDO", 25, "1,50", "30,00"), ("ON", "RENDIMENTO", 50, "40,00", "30,00")])).unwrap();
+        // a number where serde wants text, and a file that is not JSON: both ignored
+        std::fs::write(
+            b3.join("cash_E_2.json"),
+            "{\"tradingName\":\"EEEE SA\",\"results\":[{\"typeStock\":\"ON\",\"valueCash\":0.5,\"corporateAction\":\"DIVIDENDO\",\"lastDatePriorEx\":\"10/01/2024\"}]}",
+        )
+        .unwrap();
+        std::fs::write(b3.join("cash_Z_1.json"), "{ not json").unwrap();
+
+        let store: BarStore = util::load_bin(&data.join("processed").join("bars.bin")).unwrap();
+        let (evs, _) = b3events::load(&store, &b3).unwrap();
+        let (pn, st) = panel::build(&store, &evs, &rust_res.join("diag")).unwrap();
+        assert!(st.splits_b3 >= 2 && st.splits_inferred >= 2 && st.neutralized >= 1 && st.cash_applied >= 3, "the market exercises the rules");
+        assert!(st.spin_applied == 1 && st.rights_applied == 1 && st.b3_dropped == 1, "a spin-off, rights and a dropped split");
+        let want = root.join("rust_panel.bin");
+        util::save_bin(&pn, &want).unwrap();
+
+        let prog = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lab").join("build.krs");
+        let src = std::fs::read_to_string(&prog).unwrap();
+        let mut s = Session::new(Box::new(std::io::sink()));
+        s.host().set_args(vec![data.to_string_lossy().into_owned(), krs_res.to_string_lossy().into_owned()]);
+        if let Err(e) = s.run(&prog.to_string_lossy(), &src) {
+            panic!("{}", s.render(&e));
+        }
+        assert!(std::fs::read(data.join("processed").join("panel.bin")).unwrap() == std::fs::read(&want).unwrap(), "panel.bin differs");
+        for f in ["splits_inferidos.csv", "movimentos_extremos.csv", "residuos_eventos.csv"] {
+            assert_eq!(
+                std::fs::read_to_string(krs_res.join("diag").join(f)).unwrap(),
+                std::fs::read_to_string(rust_res.join("diag").join(f)).unwrap(),
+                "{f}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    })
+}
+
+/// `quant-b3 build` → data/processed/panel.bin: lab/build.krs, run on a copy of the real bar
+/// store and B3's events, writes the same panel byte for byte.
+#[test]
+#[ignore]
+fn the_panel_build_in_kairos_writes_the_rust_panel() {
+    on_big_stack_with(|| {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Ok(want) = std::fs::read(root.join("data").join("processed").join("panel.bin")) else {
+            eprintln!("skipped: no data/processed/panel.bin");
+            return;
+        };
+        let work = std::env::temp_dir().join(format!("kairos_real_build_{}", std::process::id()));
+        let (data, res) = (work.join("data"), work.join("results"));
+        std::fs::create_dir_all(data.join("processed")).unwrap();
+        std::fs::create_dir_all(data.join("raw").join("b3")).unwrap();
+        std::fs::copy(root.join("data").join("processed").join("bars.bin"), data.join("processed").join("bars.bin")).unwrap();
+        for e in std::fs::read_dir(root.join("data").join("raw").join("b3")).unwrap() {
+            let e = e.unwrap();
+            std::fs::copy(e.path(), data.join("raw").join("b3").join(e.file_name())).unwrap();
+        }
+        let prog = root.join("kairos").join("lab").join("build.krs");
+        let src = std::fs::read_to_string(&prog).unwrap();
+        let mut s = Session::new(Box::new(std::io::sink()));
+        s.host().set_args(vec![data.to_string_lossy().into_owned(), res.to_string_lossy().into_owned()]);
+        if let Err(e) = s.run(&prog.to_string_lossy(), &src) {
+            panic!("{}", s.render(&e));
+        }
+        let got = std::fs::read(data.join("processed").join("panel.bin")).unwrap();
+        let _ = std::fs::remove_dir_all(&work);
+        assert!(got == want, "panel.bin differs ({} bytes written, {} expected)", got.len(), want.len());
+    })
+}

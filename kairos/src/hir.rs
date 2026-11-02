@@ -96,6 +96,8 @@ pub enum Builtin {
     PutU64,
     PutI64,
     PutF64,
+    /// `put_f32(inout b, x)`: `x` rounded to the nearest f32 (as Rust's `x as f32`)
+    PutF32,
     PutStr,
     Utf8Len,
     /// `get_u8/u32/u64/i64/f64(b, at)`, `get_str(b, at, n)`: read at a byte offset
@@ -104,6 +106,7 @@ pub enum Builtin {
     GetU64,
     GetI64,
     GetF64,
+    GetF32,
     GetStr,
     WriteBytes,
     ReadBytes,
@@ -221,6 +224,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("put_u64", Builtin::PutU64),
     ("put_i64", Builtin::PutI64),
     ("put_f64", Builtin::PutF64),
+    ("put_f32", Builtin::PutF32),
     ("put_str", Builtin::PutStr),
     ("utf8_len", Builtin::Utf8Len),
     ("get_u8", Builtin::GetU8),
@@ -228,6 +232,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("get_u64", Builtin::GetU64),
     ("get_i64", Builtin::GetI64),
     ("get_f64", Builtin::GetF64),
+    ("get_f32", Builtin::GetF32),
     ("get_str", Builtin::GetStr),
     ("write_bytes", Builtin::WriteBytes),
     ("read_bytes", Builtin::ReadBytes),

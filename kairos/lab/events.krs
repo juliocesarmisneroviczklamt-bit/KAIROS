@@ -1,0 +1,446 @@
+// B3's corporate events in Kairós (quant-b3 b3events `load`): cash dividends and interest on
+// capital (JCP), splits and reverse splits, bonus shares, spin-offs and subscription rights,
+// read from the cached answers of B3's API (data/raw/b3) and mapped to the series of the bar
+// store: stock events by ISIN, cash by trading name and class.
+import "std/json.krs"
+import "std/dates.krs"
+import "bars.krs"
+
+enum Ev {
+    Split(f64),             // multiplier of the number of shares (2: a 1:2 split; 0.1: a 10:1 reverse split)
+    Cash(f64, bool),        // cash as a fraction of the price on the record date; is it JCP?
+    SpinOff(str, f64),      // receives `ratio` shares of the asset `isin` per share
+    Rights(str, f64, f64),  // may subscribe `s` shares of `isin` per share, at `price`
+}
+
+struct Event {
+    datacom: i64,           // the last date with the right; the adjustment falls on the next session
+    ev: Ev,
+    label: str,
+}
+
+struct EvStats {
+    supp_files: i64,
+    cash_files: i64,
+    stock_total: i64,
+    stock_mapped: i64,
+    stock_unmapped: i64,
+    labels: Map[str, i64],
+    ignored: Map[str, i64],
+    subs_total: i64,
+    subs_used: i64,
+    cash_total: i64,
+    cash_mapped: i64,
+    cash_no_candidate: i64,
+    cash_ambiguous: i64,
+    cash_dup_across_files: i64,
+    cash_close_checked: i64,
+    cash_close_ok: i64,
+    cash_bad_yield: i64,
+    cash_kinds: Map[str, i64],
+}
+
+// ------------------------------------------------------------------ B3's formats
+
+// Rust's `parse::<u32>()`: an optional +, then digits; -1 when it is not one
+fn parse_u32(s: str) -> i64 {
+    let c = codes(s)
+    var k = 0
+    if len(c) > 0 and c[0] == 43 { k = 1 }
+    if k >= len(c) { return -1 }
+    var v = 0
+    for j in k..len(c) {
+        if c[j] < 48 or c[j] > 57 { return -1 }
+        v = v * 10 + (c[j] - 48)
+        if v > 4294967295 { return -1 }
+    }
+    v
+}
+
+// "dd/mm/yyyy" -> YYYYMMDD; 0 when it is not a date (sentinels such as 31/12/9999 included)
+fn parse_ddmmyyyy(s: str) -> i64 {
+    let p = split(trim(s), "/")
+    if len(p) < 3 { return 0 }
+    let d = parse_u32(trim(p[0]))
+    let m = parse_u32(trim(p[1]))
+    let y3 = trim(p[2])
+    if utf8_len(y3) < 4 { return 0 }
+    let y = parse_u32(substr(y3, 0, 4))
+    if d < 0 or m < 0 or y < 0 { return 0 }
+    if y < 1900 or y > 2100 or m < 1 or m > 12 or d < 1 or d > 31 { return 0 }
+    y * 10000 + m * 100 + d
+}
+
+// a number as B3 writes it ("1.234,56"; without a comma, the usual way); NaN when it is not one
+fn parse_br_num(s: str) -> f64 {
+    let t = trim(s)
+    if t == "" { return nan }
+    let u = if contains(t, ",") { replace(replace(replace(t, ".", ""), " ", ""), ",", ".") } else { t }
+    let x = parse_float(u)
+    if is_nan(x - x) { nan } else { x }
+}
+
+// ------------------------------------------------------------------ reading as serde does
+
+// serde's Option<String>: missing or null is "", a string is itself, anything else spoils the file
+fn text_or_null(o: Map[str, Json], f: str) -> bool {
+    if not contains(o, f) { return true }
+    match o[f] {
+        Null => true,
+        Str(s) => true,
+        _ => false,
+    }
+}
+
+fn text_of(o: Map[str, Json], f: str) -> str {
+    json_str(get(o, f, Json.Null))
+}
+
+// a field read as Option<Vec<struct of Option<String>>>
+fn valid_records(m: Map[str, Json], key: str, fields: List[str]) -> bool {
+    if not contains(m, key) { return true }
+    match m[key] {
+        Null => true,
+        Arr(xs) => {
+            for x in xs {
+                match x {
+                    Obj(o) => {
+                        for f in fields {
+                            if not text_or_null(o, f) { return false }
+                        }
+                    },
+                    _ => return false,
+                }
+            }
+            true
+        },
+        _ => false,
+    }
+}
+
+fn records(m: Map[str, Json], key: str) -> List[Map[str, Json]] {
+    var out = []
+    for x in json_list(get(m, key, Json.Null)) {
+        match x {
+            Obj(o) => out.push(o),
+            _ => {},
+        }
+    }
+    out
+}
+
+// The companies of a supp_*.json file; none when serde would not read it.
+fn supp_companies(text: str) -> List[Map[str, Json]] {
+    let r = json_try(text)
+    var out = []
+    if not r.0 { return out }
+    let data = match r.1 {
+        Obj(m) => get(m, "data", Json.Null),
+        _ => Json.Null,
+    }
+    for c in json_list(data) {
+        match c {
+            Obj(m) => {
+                if not valid_records(m, "stockDividends", ["assetIssued", "factor", "isinCode", "label", "lastDatePrior"]) { return [] }
+                if not valid_records(m, "subscriptions", ["assetIssued", "percentage", "priceUnit", "isinCode", "label", "lastDatePrior"]) { return [] }
+                out.push(m)
+            },
+            _ => return [],
+        }
+    }
+    // `data` that is not a list is not read either
+    match data {
+        Arr(xs) => out,
+        _ => [],
+    }
+}
+
+// (trading name, the results) of a cash_*.json file; ok = false when serde would not read it
+fn cash_file(text: str) -> (bool, str, List[Map[str, Json]]) {
+    let r = json_try(text)
+    let none: List[Map[str, Json]] = []
+    if not r.0 { return (false, "", none) }
+    let m = match r.1 {
+        Obj(o) => o,
+        _ => return (false, "", none),
+    }
+    var name = ""
+    if contains(m, "tradingName") {
+        match m["tradingName"] {
+            Str(s) => name = s,
+            _ => return (false, "", none),
+        }
+    }
+    var rs = []
+    if contains(m, "results") {
+        match m["results"] {
+            Arr(xs) => {
+                for x in xs {
+                    match x {
+                        Obj(o) => {
+                            for f in ["typeStock", "valueCash", "corporateAction", "lastDatePriorEx", "closingPricePriorExDate", "quotedPerShares"] {
+                                if not text_or_null(o, f) { return (false, "", none) }
+                            }
+                            rs.push(o)
+                        },
+                        _ => return (false, "", none),
+                    }
+                }
+            },
+            _ => return (false, "", none),
+        }
+    }
+    (true, name, rs)
+}
+
+// ------------------------------------------------------------------ the events
+
+fn bump(inout m: Map[str, i64], k: str) {
+    m[k] = get(m, k, 0) + 1
+}
+
+fn stock_events(companies: List[Map[str, Json]], by_isin: Map[str, List[i64]], inout evs: List[List[Event]], inout st: EvStats) {
+    for c in companies {
+        for sd in records(c, "stockDividends") {
+            st.stock_total += 1
+            let label = upper(trim(text_of(sd, "label")))
+            bump(inout st.labels, label)
+            let dc = parse_ddmmyyyy(text_of(sd, "lastDatePrior"))
+            if dc == 0 { continue }
+            let f = parse_br_num(text_of(sd, "factor"))
+            if is_nan(f) { continue }
+            let isin = trim(text_of(sd, "isinCode"))
+            let asset = trim(text_of(sd, "assetIssued"))
+            let other_class = asset != "" and asset != isin
+            var ev = Ev.Split(1.0)
+            if (label == "DESDOBRAMENTO" or label == "BONIFICACAO") and f > 0.0 {
+                ev = if other_class { Ev.SpinOff(asset, f / 100.0) } else { Ev.Split(1.0 + f / 100.0) }
+            } else if label == "GRUPAMENTO" and f > 0.0 and f < 1.0 {
+                ev = Ev.Split(f)
+            } else if (starts_with(label, "CIS") or label == "REST CAP ACOES") and other_class and f > 0.0 {
+                ev = Ev.SpinOff(asset, f / 100.0)
+            } else {
+                bump(inout st.ignored, label)
+                continue
+            }
+            if contains(by_isin, isin) {
+                st.stock_mapped += 1
+                for t in by_isin[isin] { evs[t].push(Event { datacom: dc, ev: ev, label: label }) }
+            } else {
+                st.stock_unmapped += 1
+            }
+        }
+        for sb in records(c, "subscriptions") {
+            st.subs_total += 1
+            let label = upper(trim(text_of(sb, "label")))
+            if label != "SUBSCRICAO" { continue }
+            let dc = parse_ddmmyyyy(text_of(sb, "lastDatePrior"))
+            let pct = parse_br_num(text_of(sb, "percentage"))
+            let price = parse_br_num(text_of(sb, "priceUnit"))
+            if dc == 0 or is_nan(pct) or is_nan(price) { continue }
+            let s = pct / 100.0
+            if not (s > 0.0 and s <= 10.0 and price > 0.0 and price < 100000.0) { continue }
+            let isin = trim(text_of(sb, "isinCode"))
+            let asset = trim(text_of(sb, "assetIssued"))
+            let target = if asset == "" { isin } else { asset }
+            if contains(by_isin, isin) {
+                st.subs_used += 1
+                for t in by_isin[isin] { evs[t].push(Event { datacom: dc, ev: Ev.Rights(target, s, price), label: label }) }
+            }
+        }
+    }
+}
+
+// how far B3's closing price on the record date is from ours (per share or per quoted lot)
+fn close_err(s: Series, dc: i64, b3close: f64, qps: f64) -> f64 {
+    let i = idx_on_or_before(s, dc)
+    if i < 0 or not (b3close > 0.0) { return 1.0 / 0.0 }
+    let c = s.bars[i].close
+    let a = abs(c * qps / b3close - 1.0)
+    let b = abs(c / b3close - 1.0)
+    if a < b { a } else { b }
+}
+
+fn cash_events(name: str, rs: List[Map[str, Json]], file_id: i64, series: List[Series], by_name: Map[str, List[i64]], inout seen: Map[str, i64], inout evs: List[List[Event]], inout st: EvStats) {
+    if not contains(by_name, name) { return }
+    let cands_all = by_name[name]
+    let sep = from_codes([1])
+    for r in rs {
+        st.cash_total += 1
+        let class = upper(trim(text_of(r, "typeStock")))
+        let kind = upper(trim(text_of(r, "corporateAction")))
+        let dc = parse_ddmmyyyy(text_of(r, "lastDatePriorEx"))
+        if dc == 0 { continue }
+        let val = parse_br_num(text_of(r, "valueCash"))
+        if is_nan(val) or val <= 0.0 { continue }
+        let bc = parse_br_num(text_of(r, "closingPricePriorExDate"))
+        let b3close = if is_nan(bc) { 0.0 } else { bc }
+        let q = parse_br_num(text_of(r, "quotedPerShares"))
+        let qps = if not is_nan(q) and q > 0.0 { q } else { 1.0 }
+        // candidates: the same trading name, the same class, alive on the record date
+        var cands = []
+        for t in cands_all {
+            let s = series[t]
+            if s.class == class and first_date(s) <= dc and dc <= last_date(s) { cands.push(t) }
+        }
+        if len(cands) == 0 {
+            st.cash_no_candidate += 1
+            continue
+        }
+        var pick = cands[0]
+        if len(cands) > 1 {
+            st.cash_ambiguous += 1
+            var best = close_err(series[pick], dc, b3close, qps)
+            for k in 1..len(cands) {
+                let e = close_err(series[cands[k]], dc, b3close, qps)
+                if e < best {
+                    best = e
+                    pick = cands[k]
+                }
+            }
+        }
+        let s = series[pick]
+        let oi = idx_on_or_before(s, dc)
+        if b3close > 0.0 and oi >= 0 {
+            st.cash_close_checked += 1
+            if close_err(s, dc, b3close, qps) < 0.03 { st.cash_close_ok += 1 }
+        }
+        var y = 0.0
+        if b3close > 0.0 {
+            y = val / b3close
+        } else if oi >= 0 {
+            y = val / (s.bars[oi].close * qps)
+        } else {
+            continue
+        }
+        if not (y > 0.0 and y < 0.6) {
+            st.cash_bad_yield += 1
+            continue
+        }
+        // the same payment found in another file (another trading name) counts once
+        let key = str(pick) + sep + str(dc) + sep + kind + sep + str(int(round(val * 100000000.0)))
+        if contains(seen, key) {
+            if seen[key] != file_id {
+                st.cash_dup_across_files += 1
+                continue
+            }
+        } else {
+            seen[key] = file_id
+        }
+        bump(inout st.cash_kinds, kind)
+        st.cash_mapped += 1
+        let jcp = contains(kind, "JRS") or contains(kind, "JUROS")
+        evs[pick].push(Event { datacom: dc, ev: Ev.Cash(y, jcp), label: kind })
+    }
+}
+
+fn ev_key(e: Ev) -> (i64, i64) {
+    match e {
+        Split(m) => (0, int(round(m * 1000000000.0))),
+        Cash(y, j) => (1, int(round(y * 1000000000.0))),
+        SpinOff(i, ratio) => (2, int(round(ratio * 1000000000.0))),
+        Rights(i, s, price) => (3, int(round((s + price) * 1000000.0))),
+    }
+}
+
+fn is_cash(e: Ev) -> bool {
+    match e {
+        Cash(y, j) => true,
+        _ => false,
+    }
+}
+
+// By record date, label and amount (stable). Repeated stock events and subscriptions (the same
+// ISIN under more than one company) count once; identical cash payments inside one file are
+// legitimate installments.
+fn sorted_events(v: List[Event]) -> List[Event] {
+    var keys = []
+    for i in 0..len(v) {
+        let k = ev_key(v[i].ev)
+        keys.push((v[i].datacom, v[i].label, k.0, k.1, i))
+    }
+    keys.sort()
+    var out: List[Event] = []
+    var last = (0, "", -1, 0)
+    for k in keys {
+        let e = v[k.4]
+        let same = len(out) > 0 and k.0 == last.0 and k.1 == last.1 and k.2 == last.2 and k.3 == last.3
+        if same and not is_cash(e.ev) { continue }
+        out.push(e)
+        last = (k.0, k.1, k.2, k.3)
+    }
+    out
+}
+
+fn new_stats() -> EvStats {
+    EvStats {
+        supp_files: 0, cash_files: 0, stock_total: 0, stock_mapped: 0, stock_unmapped: 0, labels: [:], ignored: [:],
+        subs_total: 0, subs_used: 0, cash_total: 0, cash_mapped: 0, cash_no_candidate: 0, cash_ambiguous: 0,
+        cash_dup_across_files: 0, cash_close_checked: 0, cash_close_ok: 0, cash_bad_yield: 0, cash_kinds: [:],
+    }
+}
+
+// The events of every series (in the store's order).
+fn load_events(series: List[Series], dir: str) -> (List[List[Event]], EvStats) {
+    var evs: List[List[Event]] = []
+    for s in series { evs.push([]) }
+    var st = new_stats()
+    var by_isin: Map[str, List[i64]] = [:]
+    var by_name: Map[str, List[i64]] = [:]
+    for i in 0..len(series) {
+        for isin in series[i].isins {
+            if not contains(by_isin, isin) { by_isin[isin] = [] }
+            by_isin[isin].push(i)
+        }
+        for nm in series[i].names {
+            if not contains(by_name, nm.0) { by_name[nm.0] = [] }
+            if not contains(by_name[nm.0], i) { by_name[nm.0].push(i) }
+        }
+    }
+    var seen: Map[str, i64] = [:]
+    let files = list_dir(dir)
+    for fid in 0..len(files) {
+        let f = files[fid]
+        if starts_with(f, "supp_") {
+            st.supp_files += 1
+            stock_events(supp_companies(read_text(dir + "/" + f)), by_isin, inout evs, inout st)
+        } else if starts_with(f, "cash_") {
+            st.cash_files += 1
+            let cf = cash_file(read_text(dir + "/" + f))
+            if cf.0 { cash_events(cf.1, cf.2, fid, series, by_name, inout seen, inout evs, inout st) }
+        }
+    }
+    var out = []
+    for v in evs { out.push(sorted_events(v)) }
+    (out, st)
+}
+
+// ------------------------------------------------------------------ the report
+
+// "k=n" by count (the most first; ties by key), at most 14
+fn fmt_counts(m: Map[str, i64]) -> str {
+    var ks = keys(m)
+    ks.sort()
+    var order = []
+    for i in 0..len(ks) { order.push((-m[ks[i]], i)) }
+    order.sort()
+    var parts = []
+    for k in 0..min(14, len(order)) {
+        let key = ks[order[k].1]
+        parts.push(key + "=" + str(m[key]))
+    }
+    join(parts, " ")
+}
+
+fn print_ev_stats(st: EvStats) {
+    print("Eventos B3 (" + str(st.supp_files) + " arquivos de empresa, " + str(st.cash_files) + " de proventos):")
+    print("  ações (desdobr./grup./bonif./cisão): " + str(st.stock_total) + " lidos, " + str(st.stock_mapped) + " mapeados por ISIN, " + str(st.stock_unmapped) + " sem ISIN na base")
+    print("  tipos: " + fmt_counts(st.labels))
+    if len(st.ignored) > 0 { print("  ignorados: " + fmt_counts(st.ignored)) }
+    print("  subscrições: " + str(st.subs_total) + " lidas, " + str(st.subs_used) + " usadas")
+    print("  dinheiro: " + str(st.cash_total) + " lidos, " + str(st.cash_mapped) + " aplicados, " + str(st.cash_no_candidate) + " sem ticker correspondente, " + str(st.cash_ambiguous) + " ambíguos resolvidos pelo preço, " + str(st.cash_dup_across_files) + " duplicados entre arquivos, " + str(st.cash_bad_yield) + " yield absurdo")
+    if st.cash_close_checked > 0 {
+        print("  conferência de preço na data-com (B3 x COTAHIST): " + str(st.cash_close_ok) + "/" + str(st.cash_close_checked) + " batem (" + format_fixed(100.0 * float(st.cash_close_ok) / float(st.cash_close_checked), 1) + "%)")
+    }
+    print("  tipos de provento: " + fmt_counts(st.cash_kinds))
+}

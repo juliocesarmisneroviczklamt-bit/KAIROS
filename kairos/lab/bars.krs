@@ -1,0 +1,406 @@
+// The lab's bar store in Kairós: B3's yearly COTAHIST files (fixed width, 245 columns) become
+// one series per stock, with the stock's old codes chained by ISIN; written and read as the lab's
+// BarStore (bincode: little-endian, u64 lengths). Used by ingest.krs and build.krs.
+
+import "std/dates.krs"
+
+// a trading session of a stock: prices per share in R$, unadjusted (divided by FATCOT)
+struct Bar {
+    date: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    avg: f64,
+    bid: f64,       // best bid and ask at the close
+    ask: f64,
+    vol: f64,       // traded volume (R$)
+    qty: f64,       // shares traded
+    trades: i64,
+    fatcot: i64,
+    bdi: i64,
+    especi: str,    // the raw ESPECI field: class + ex-event markers + listing segment
+}
+
+struct Acc {
+    isins: List[str],
+    names: List[(str, i64, i64)],   // trading name, first and last date seen
+    class_n: Map[str, i64],
+    bars: List[Bar],
+}
+
+struct Series {
+    ticker: str,
+    aliases: List[str],             // the codes it had before (chained by ISIN)
+    isins: List[str],
+    names: List[(str, i64, i64)],
+    class: str,
+    bars: List[Bar],
+}
+
+// The digits of a field (anything else is ignored, as the lab does).
+fn num(s: str) -> i64 {
+    let x = parse_float(s)
+    if not is_nan(x) and x >= 0.0 and x == floor(x) { return int(x) }
+    var v = 0
+    for c in codes(s) {
+        if c >= 48 and c <= 57 { v = v * 10 + (c - 48) }
+    }
+    v
+}
+
+fn field(l: str, a: i64, b: i64) -> str {
+    trim(substr(l, a, b - a))
+}
+
+// Accepted: the regular lot and the special situations (judicial recovery etc.: otherwise a
+// stock leaves the data exactly when it is dying); stock classes and units, not funds, BDRs,
+// rights or receipts; BOVA11 kept as the trend strategy's asset.
+fn add_year(inout acc: Map[str, Acc], path: str) -> i64 {
+    let bdis = [2, 5, 6, 7, 8, 9, 11, 58]
+    let classes = ["ON", "PN", "PNA", "PNB", "PNC", "PND", "PNE", "PNF", "PNG", "PNH", "UNT"]
+    var accepted = 0
+    // TIPREG 01, TPMERC 010 (spot market), MODREF R$
+    for l in read_lines(path, [(0, "01"), (24, "010"), (52, "R$")]) {
+        if len(l) < 245 { continue }
+        let bdi = num(substr(l, 10, 2))
+        let ticker = field(l, 12, 24)
+        let bench = ticker == "BOVA11"
+        if not bench and not contains(bdis, bdi) { continue }
+        let especi = field(l, 39, 49)
+        // in the 90s the marker came glued to the class: "PNA*", "PNB*ED"
+        let words = split(especi, " ")
+        let class = split(words[0], "*")[0]
+        if not bench and not contains(classes, class) { continue }
+        if num(substr(l, 108, 13)) == 0 { continue }
+        let fat = float(max(num(substr(l, 210, 7)), 1))
+        let isin = field(l, 230, 242)
+        let name = field(l, 27, 39)
+        let bar = Bar {
+            date: num(substr(l, 2, 8)),
+            open: float(num(substr(l, 56, 13))) / 100.0 / fat,
+            high: float(num(substr(l, 69, 13))) / 100.0 / fat,
+            low: float(num(substr(l, 82, 13))) / 100.0 / fat,
+            close: float(num(substr(l, 108, 13))) / 100.0 / fat,
+            avg: float(num(substr(l, 95, 13))) / 100.0 / fat,
+            bid: float(num(substr(l, 121, 13))) / 100.0 / fat,
+            ask: float(num(substr(l, 134, 13))) / 100.0 / fat,
+            vol: float(num(substr(l, 170, 18))) / 100.0,
+            qty: float(num(substr(l, 152, 18))),
+            trades: num(substr(l, 147, 5)),
+            fatcot: int(fat),
+            bdi: bdi,
+            especi: especi,
+        }
+        accepted += 1
+        if not contains(acc, ticker) { acc[ticker] = Acc { isins: [], names: [], class_n: [:], bars: [] } }
+        if not contains(acc[ticker].isins, isin) { acc[ticker].isins.push(isin) }
+        let d = bar.date
+        var found = -1
+        let ns = acc[ticker].names
+        for j in 0..len(ns) {
+            if ns[j].0 == name {
+                found = j
+                break
+            }
+        }
+        if found < 0 {
+            acc[ticker].names.push((name, d, d))
+        } else {
+            acc[ticker].names[found] = (name, min(ns[found].1, d), max(ns[found].2, d))
+        }
+        acc[ticker].class_n[class] = get(acc[ticker].class_n, class, 0) + 1
+        acc[ticker].bars.push(bar)
+    }
+    accepted
+}
+
+// The bars by date (stable); on a repeated date the one with more volume.
+fn by_date(bars: List[Bar]) -> List[Bar] {
+    var keys = []
+    for i in 0..len(bars) { keys.push((bars[i].date, i)) }
+    keys.sort()
+    var out: List[Bar] = []
+    for k in keys {
+        let b = bars[k.1]
+        let n = len(out)
+        if n > 0 and out[n - 1].date == b.date {
+            if b.vol > out[n - 1].vol { out[n - 1] = b }
+        } else {
+            out.push(b)
+        }
+    }
+    out
+}
+
+// stable sort of names by first date
+fn by_first(names: List[(str, i64, i64)]) -> List[(str, i64, i64)] {
+    var keys = []
+    for i in 0..len(names) { keys.push((names[i].1, i)) }
+    keys.sort()
+    var out = []
+    for k in keys { out.push(names[k.1]) }
+    out
+}
+
+fn to_series(ticker: str, a: Acc) -> Series {
+    // the most frequent class (the first one seen, on a tie)
+    var class = ""
+    var best = -1
+    for (c, n) in items(a.class_n) {
+        if n > best {
+            best = n
+            class = c
+        }
+    }
+    Series { ticker: ticker, aliases: [], isins: a.isins, names: by_first(a.names), class: class, bars: by_date(a.bars) }
+}
+
+fn first_date(s: Series) -> i64 {
+    if len(s.bars) == 0 { 0 } else { s.bars[0].date }
+}
+
+fn last_date(s: Series) -> i64 {
+    if len(s.bars) == 0 { 0 } else { s.bars[len(s.bars) - 1].date }
+}
+
+fn root(inout parent: List[i64], x: i64) -> i64 {
+    var r = x
+    while parent[r] != r { r = parent[r] }
+    var y = x
+    while parent[y] != r {
+        let nx = parent[y]
+        parent[y] = r
+        y = nx
+    }
+    r
+}
+
+// Tickers that share an ISIN, without overlapping dates and with a short gap between them, are
+// the same stock under a new code (VVAR3 -> VIIA3): one series.
+fn chain_renames(series: List[Series]) -> (List[Series], List[str]) {
+    let n = len(series)
+    var parent = []
+    for i in 0..n { parent.push(i) }
+    var by_isin: Map[str, List[i64]] = [:]
+    for i in 0..n {
+        for isin in series[i].isins {
+            if len(isin) == 12 and starts_with(isin, "BR") {
+                if not contains(by_isin, isin) { by_isin[isin] = [] }
+                by_isin[isin].push(i)
+            }
+        }
+    }
+    for v in values(by_isin) {
+        if len(v) < 2 { continue }
+        var keys = []
+        for i in v { keys.push((first_date(series[i]), i)) }
+        keys.sort()
+        for w in 1..len(keys) {
+            let a = keys[w - 1].1
+            let b = keys[w].1
+            let la = last_date(series[a])
+            let fb = first_date(series[b])
+            if la < fb and date_days(fb) - date_days(la) <= 45 {
+                let ra = root(inout parent, a)
+                let rb = root(inout parent, b)
+                if ra != rb { parent[rb] = ra }
+            }
+        }
+    }
+    var groups: Map[i64, List[i64]] = [:]
+    for i in 0..n {
+        let r = root(inout parent, i)
+        if not contains(groups, r) { groups[r] = [] }
+        groups[r].push(i)
+    }
+    var out = []
+    var log = []
+    for idx in values(groups) {
+        if len(idx) == 1 {
+            out.push(series[idx[0]])
+            continue
+        }
+        var keys = []
+        for i in idx { keys.push((first_date(series[i]), i)) }
+        keys.sort()
+        var segs = []
+        for k in keys { segs.push(series[k.1]) }
+        var tickers = []
+        for s in segs { tickers.push(s.ticker) }
+        log.push(join(tickers, " -> "))
+        // the most recent segment gives the code
+        var merged = segs[len(segs) - 1]
+        var names = merged.names
+        var bars = []
+        for k in 0..len(segs) - 1 {
+            let s = segs[k]
+            merged.aliases.push(s.ticker)
+            for al in s.aliases { merged.aliases.push(al) }
+            for i in s.isins {
+                if not contains(merged.isins, i) { merged.isins.push(i) }
+            }
+            for nm in s.names { names.push(nm) }
+            for b in s.bars { bars.push(b) }
+        }
+        for b in merged.bars { bars.push(b) }
+        // by date, the first of a repeated date kept
+        var bk = []
+        for i in 0..len(bars) { bk.push((bars[i].date, i)) }
+        bk.sort()
+        var kept: List[Bar] = []
+        for k in bk {
+            let nk = len(kept)
+            if nk == 0 or kept[nk - 1].date != k.0 { kept.push(bars[k.1]) }
+        }
+        merged.bars = kept
+        merged.names = by_first(names)
+        out.push(merged)
+    }
+    // by ticker
+    var tk = []
+    for i in 0..len(out) { tk.push((out[i].ticker, i)) }
+    tk.sort()
+    var sorted = []
+    for k in tk { sorted.push(out[k.1]) }
+    log.sort()
+    (sorted, log)
+}
+
+// ------------------------------------------------------------------ bincode
+
+fn put_text(inout b: Bytes, s: str) {
+    b.put_u64(utf8_len(s))
+    b.put_str(s)
+}
+
+fn put_texts(inout b: Bytes, xs: List[str]) {
+    b.put_u64(len(xs))
+    for s in xs { put_text(inout b, s) }
+}
+
+fn encode(series: List[Series]) -> Bytes {
+    var b = bytes()
+    b.put_u64(len(series))
+    for s in series {
+        put_text(inout b, s.ticker)
+        put_texts(inout b, s.aliases)
+        put_texts(inout b, s.isins)
+        b.put_u64(len(s.names))
+        for nm in s.names {
+            put_text(inout b, nm.0)
+            b.put_u32(nm.1)
+            b.put_u32(nm.2)
+        }
+        put_text(inout b, s.class)
+        b.put_u64(len(s.bars))
+        for x in s.bars {
+            b.put_u32(x.date)
+            b.put_f64(x.open)
+            b.put_f64(x.high)
+            b.put_f64(x.low)
+            b.put_f64(x.close)
+            b.put_f64(x.avg)
+            b.put_f64(x.bid)
+            b.put_f64(x.ask)
+            b.put_f64(x.vol)
+            b.put_f64(x.qty)
+            b.put_u32(x.trades)
+            b.put_u32(x.fatcot)
+            b.put_u8(x.bdi)
+            put_text(inout b, x.especi)
+        }
+    }
+    b
+}
+
+fn rd_u64(b: Bytes, inout at: i64) -> i64 {
+    let v = get_u64(b, at)
+    at += 8
+    v
+}
+
+fn rd_text(b: Bytes, inout at: i64) -> str {
+    let n = rd_u64(b, inout at)
+    let s = get_str(b, at, n)
+    at += n
+    s
+}
+
+fn rd_texts(b: Bytes, inout at: i64) -> List[str] {
+    let n = rd_u64(b, inout at)
+    var out = []
+    for k in 0..n { out.push(rd_text(b, inout at)) }
+    out
+}
+
+fn decode_bars(b: Bytes) -> List[Series] {
+    var at = 0
+    let ns = rd_u64(b, inout at)
+    var out = []
+    for k in 0..ns {
+        let ticker = rd_text(b, inout at)
+        let aliases = rd_texts(b, inout at)
+        let isins = rd_texts(b, inout at)
+        let nn = rd_u64(b, inout at)
+        var names = []
+        for j in 0..nn {
+            let t = rd_text(b, inout at)
+            names.push((t, get_u32(b, at), get_u32(b, at + 4)))
+            at += 8
+        }
+        let class = rd_text(b, inout at)
+        let nb = rd_u64(b, inout at)
+        var bars = []
+        for j in 0..nb {
+            // the fixed part (85 bytes), then ESPECI
+            let base = at
+            at += 85
+            let especi = rd_text(b, inout at)
+            bars.push(Bar {
+                date: get_u32(b, base),
+                open: get_f64(b, base + 4),
+                high: get_f64(b, base + 12),
+                low: get_f64(b, base + 20),
+                close: get_f64(b, base + 28),
+                avg: get_f64(b, base + 36),
+                bid: get_f64(b, base + 44),
+                ask: get_f64(b, base + 52),
+                vol: get_f64(b, base + 60),
+                qty: get_f64(b, base + 68),
+                trades: get_u32(b, base + 76),
+                fatcot: get_u32(b, base + 80),
+                bdi: get_u8(b, base + 84),
+                especi: especi,
+            })
+        }
+        out.push(Series { ticker: ticker, aliases: aliases, isins: isins, names: names, class: class, bars: bars })
+    }
+    out
+}
+
+fn read_bars(path: str) -> List[Series] {
+    decode_bars(read_bytes(path))
+}
+
+// the stock's company: the first 4 letters of the code
+fn issuer_of(t: str) -> str {
+    substr(t, 0, 4)
+}
+
+// the last session on or before d (-1: none)
+fn idx_on_or_before(s: Series, d: i64) -> i64 {
+    var lo = 0
+    var hi = len(s.bars)
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if s.bars[mid].date <= d { lo = mid + 1 } else { hi = mid }
+    }
+    lo - 1
+}
+
+// the first session after d (-1: none)
+fn idx_after(s: Series, d: i64) -> i64 {
+    let i = idx_on_or_before(s, d) + 1
+    if i < len(s.bars) { i } else { -1 }
+}

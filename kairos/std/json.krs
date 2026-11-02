@@ -1,12 +1,15 @@
 // JSON (RFC 8259), written in Kairós: `import "std/json.krs"`.
 //
 //   json_parse(text) -> Json     a malformed text stops the program, saying where
+//   json_try(text) -> (bool, Json)   (true, value), or (false, Str(what is wrong and where))
 //   json_text(v) -> str          compact JSON; json_pretty(v): indented by two spaces
 //   json_get(v, key), json_at(v, i)                  a field / an element (Null when missing)
 //   json_num(v), json_str(v), json_bool(v), json_list(v), json_keys(v)
 //
 // Numbers are f64; whole numbers are written without decimals (202611, not 202611.0), and
-// NaN or infinities as null. Objects keep the order of their keys.
+// NaN or infinities as null. Objects keep the order of their keys. The reader is strict, as
+// RFC 8259 (and Rust's serde_json): no unknown escapes, no control characters inside strings,
+// no lone surrogates.
 
 enum Json {
     Null,
@@ -17,101 +20,139 @@ enum Json {
     Obj(Map[str, Json]),
 }
 
-fn json_parse(text: str) -> Json {
-    let c = codes(text)
-    var i = 0
-    let v = jp_value(c, inout i)
-    jp_ws(c, inout i)
-    if i < len(c) { jp_fail(i, "text after the value") }
-    v
+// where the reader is, and the first problem found ("" while there is none)
+struct JsonPos {
+    i: i64,
+    err: str,
 }
 
-fn jp_fail(i: i64, what: str) {
-    assert(false, "json: " + what + " at character " + str(i + 1))
+fn json_try(text: str) -> (bool, Json) {
+    let c = codes(text)
+    var p = JsonPos { i: 0, err: "" }
+    let v = jp_value(c, inout p)
+    if p.err == "" {
+        jp_ws(c, inout p)
+        if p.i < len(c) { jp_fail(inout p, "text after the value") }
+    }
+    if p.err != "" { return (false, Json.Str(p.err)) }
+    (true, v)
+}
+
+fn json_parse(text: str) -> Json {
+    let r = json_try(text)
+    if not r.0 { assert(false, "json: " + json_str(r.1)) }
+    r.1
+}
+
+fn jp_fail(inout p: JsonPos, what: str) {
+    if p.err == "" { p.err = what + " at character " + str(p.i + 1) }
 }
 
 // spaces, tabs and line breaks
-fn jp_ws(c: List[i64], inout i: i64) {
-    while i < len(c) and (c[i] == 32 or c[i] == 9 or c[i] == 10 or c[i] == 13) { i += 1 }
+fn jp_ws(c: List[i64], inout p: JsonPos) {
+    while p.i < len(c) and (c[p.i] == 32 or c[p.i] == 9 or c[p.i] == 10 or c[p.i] == 13) { p.i += 1 }
 }
 
-fn jp_value(c: List[i64], inout i: i64) -> Json {
-    jp_ws(c, inout i)
-    if i >= len(c) {
-        jp_fail(i, "missing value")
+fn jp_value(c: List[i64], inout p: JsonPos) -> Json {
+    jp_ws(c, inout p)
+    if p.i >= len(c) {
+        jp_fail(inout p, "missing value")
         return Json.Null
     }
-    let ch = c[i]
-    if ch == 123 { return jp_object(c, inout i) }                       // {
-    if ch == 91 { return jp_array(c, inout i) }                         // [
-    if ch == 34 { return Json.Str(jp_string(c, inout i)) }              // "
+    let ch = c[p.i]
+    if ch == 123 { return jp_object(c, inout p) }                       // {
+    if ch == 91 { return jp_array(c, inout p) }                         // [
+    if ch == 34 { return Json.Str(jp_string(c, inout p)) }              // "
     if ch == 116 {
-        jp_word(c, inout i, "true")
+        jp_word(c, inout p, "true")
         return Json.Bool(true)
     }
     if ch == 102 {
-        jp_word(c, inout i, "false")
+        jp_word(c, inout p, "false")
         return Json.Bool(false)
     }
     if ch == 110 {
-        jp_word(c, inout i, "null")
+        jp_word(c, inout p, "null")
         return Json.Null
     }
-    if ch == 45 or (ch >= 48 and ch <= 57) { return Json.Num(jp_number(c, inout i)) }   // - 0-9
-    jp_fail(i, "unexpected " + from_codes([ch]))
+    if ch == 45 or (ch >= 48 and ch <= 57) { return Json.Num(jp_number(c, inout p)) }   // - 0-9
+    jp_fail(inout p, "unexpected " + from_codes([ch]))
     Json.Null
 }
 
-fn jp_word(c: List[i64], inout i: i64, word: str) {
+fn jp_word(c: List[i64], inout p: JsonPos, word: str) {
     let w = codes(word)
     for k in 0..len(w) {
-        if i + k >= len(c) or c[i + k] != w[k] { jp_fail(i, "expected " + word) }
+        if p.i + k >= len(c) or c[p.i + k] != w[k] {
+            jp_fail(inout p, "expected " + word)
+            return
+        }
     }
-    i += len(w)
+    p.i += len(w)
 }
 
-fn jp_number(c: List[i64], inout i: i64) -> f64 {
-    let start = i
-    if c[i] == 45 { i += 1 }
+fn jp_number(c: List[i64], inout p: JsonPos) -> f64 {
+    let start = p.i
+    if c[p.i] == 45 { p.i += 1 }
     // digits, the point, the exponent and its sign
-    while i < len(c) and ((c[i] >= 48 and c[i] <= 57) or c[i] == 46 or c[i] == 101 or c[i] == 69 or c[i] == 43 or c[i] == 45) {
-        i += 1
+    while p.i < len(c) and ((c[p.i] >= 48 and c[p.i] <= 57) or c[p.i] == 46 or c[p.i] == 101 or c[p.i] == 69 or c[p.i] == 43 or c[p.i] == 45) {
+        p.i += 1
     }
     var digits = []
-    for k in start..i { digits.push(c[k]) }
+    for k in start..p.i { digits.push(c[k]) }
     let x = parse_float(from_codes(digits))
-    if is_nan(x) { jp_fail(start, "invalid number") }
+    if is_nan(x) {
+        p.i = start
+        jp_fail(inout p, "invalid number")
+    }
     x
 }
 
-fn jp_hex4(c: List[i64], inout i: i64) -> i64 {
+fn jp_hex4(c: List[i64], inout p: JsonPos) -> i64 {
     var u = 0
     for k in 0..4 {
-        if i >= len(c) { jp_fail(i, "short \\u escape") }
-        let h = c[i]
+        if p.i >= len(c) {
+            jp_fail(inout p, "short unicode escape")
+            return 0
+        }
+        let h = c[p.i]
         let d = if h >= 48 and h <= 57 { h - 48 } else if h >= 97 and h <= 102 { h - 87 } else if h >= 65 and h <= 70 { h - 55 } else { -1 }
-        if d < 0 { jp_fail(i, "invalid \\u escape") }
+        if d < 0 {
+            jp_fail(inout p, "invalid unicode escape")
+            return 0
+        }
         u = u * 16 + d
-        i += 1
+        p.i += 1
     }
     u
 }
 
-fn jp_string(c: List[i64], inout i: i64) -> str {
-    let start = i
-    i += 1
+fn jp_string(c: List[i64], inout p: JsonPos) -> str {
+    let start = p.i
+    p.i += 1
     var out = []
     while true {
-        if i >= len(c) { jp_fail(start, "unterminated string") }
-        let ch = c[i]
+        if p.i >= len(c) {
+            p.i = start
+            jp_fail(inout p, "unterminated string")
+            return ""
+        }
+        let ch = c[p.i]
         if ch == 34 {
-            i += 1
+            p.i += 1
             break
         }
+        if ch < 32 {
+            jp_fail(inout p, "control character in a string")
+            return ""
+        }
         if ch == 92 {
-            if i + 1 >= len(c) { jp_fail(i, "unterminated escape") }
-            let e = c[i + 1]
-            i += 2
+            if p.i + 1 >= len(c) {
+                jp_fail(inout p, "unterminated escape")
+                return ""
+            }
+            let e = c[p.i + 1]
+            p.i += 2
             if e == 110 {
                 out.push(10)
             } else if e == 116 {
@@ -122,78 +163,109 @@ fn jp_string(c: List[i64], inout i: i64) -> str {
                 out.push(8)
             } else if e == 102 {
                 out.push(12)
+            } else if e == 34 or e == 92 or e == 47 {
+                out.push(e)
             } else if e == 117 {
-                // \uXXXX, with surrogate pairs for code points above U+FFFF
-                var u = jp_hex4(c, inout i)
-                if u >= 55296 and u <= 56319 and i + 1 < len(c) and c[i] == 92 and c[i + 1] == 117 {
-                    i += 2
-                    let lo = jp_hex4(c, inout i)
+                // 4 hex digits, with surrogate pairs for code points above U+FFFF
+                var u = jp_hex4(c, inout p)
+                if p.err != "" { return "" }
+                if u >= 55296 and u <= 56319 and p.i + 1 < len(c) and c[p.i] == 92 and c[p.i + 1] == 117 {
+                    p.i += 2
+                    let lo = jp_hex4(c, inout p)
+                    if p.err != "" { return "" }
+                    if lo < 56320 or lo > 57343 {
+                        jp_fail(inout p, "invalid surrogate pair")
+                        return ""
+                    }
                     u = 65536 + (u - 55296) * 1024 + (lo - 56320)
+                }
+                if u >= 55296 and u <= 57343 {
+                    jp_fail(inout p, "lone surrogate")
+                    return ""
                 }
                 out.push(u)
             } else {
-                out.push(e)
+                p.i -= 2
+                jp_fail(inout p, "invalid escape")
+                return ""
             }
             continue
         }
         out.push(ch)
-        i += 1
+        p.i += 1
     }
     from_codes(out)
 }
 
-fn jp_array(c: List[i64], inout i: i64) -> Json {
-    i += 1
+fn jp_array(c: List[i64], inout p: JsonPos) -> Json {
+    p.i += 1
     var xs = []
-    jp_ws(c, inout i)
-    if i < len(c) and c[i] == 93 {
-        i += 1
+    jp_ws(c, inout p)
+    if p.i < len(c) and c[p.i] == 93 {
+        p.i += 1
         return Json.Arr(xs)
     }
     while true {
-        xs.push(jp_value(c, inout i))
-        jp_ws(c, inout i)
-        if i >= len(c) { jp_fail(i, "unterminated array") }
-        if c[i] == 44 {
-            i += 1
+        xs.push(jp_value(c, inout p))
+        if p.err != "" { return Json.Null }
+        jp_ws(c, inout p)
+        if p.i >= len(c) {
+            jp_fail(inout p, "unterminated array")
+            return Json.Null
+        }
+        if c[p.i] == 44 {
+            p.i += 1
             continue
         }
-        if c[i] == 93 {
-            i += 1
+        if c[p.i] == 93 {
+            p.i += 1
             break
         }
-        jp_fail(i, "expected , or ]")
+        jp_fail(inout p, "expected , or ]")
+        return Json.Null
     }
     Json.Arr(xs)
 }
 
-fn jp_object(c: List[i64], inout i: i64) -> Json {
-    i += 1
+fn jp_object(c: List[i64], inout p: JsonPos) -> Json {
+    p.i += 1
     var m: Map[str, Json] = [:]
-    jp_ws(c, inout i)
-    if i < len(c) and c[i] == 125 {
-        i += 1
+    jp_ws(c, inout p)
+    if p.i < len(c) and c[p.i] == 125 {
+        p.i += 1
         return Json.Obj(m)
     }
     while true {
-        jp_ws(c, inout i)
-        if i >= len(c) or c[i] != 34 { jp_fail(i, "expected a key in quotes") }
-        let k = jp_string(c, inout i)
-        jp_ws(c, inout i)
-        if i >= len(c) or c[i] != 58 { jp_fail(i, "expected :") }
-        i += 1
-        m[k] = jp_value(c, inout i)
-        jp_ws(c, inout i)
-        if i >= len(c) { jp_fail(i, "unterminated object") }
-        if c[i] == 44 {
-            i += 1
+        jp_ws(c, inout p)
+        if p.i >= len(c) or c[p.i] != 34 {
+            jp_fail(inout p, "expected a key in quotes")
+            return Json.Null
+        }
+        let k = jp_string(c, inout p)
+        if p.err != "" { return Json.Null }
+        jp_ws(c, inout p)
+        if p.i >= len(c) or c[p.i] != 58 {
+            jp_fail(inout p, "expected :")
+            return Json.Null
+        }
+        p.i += 1
+        m[k] = jp_value(c, inout p)
+        if p.err != "" { return Json.Null }
+        jp_ws(c, inout p)
+        if p.i >= len(c) {
+            jp_fail(inout p, "unterminated object")
+            return Json.Null
+        }
+        if c[p.i] == 44 {
+            p.i += 1
             continue
         }
-        if c[i] == 125 {
-            i += 1
+        if c[p.i] == 125 {
+            p.i += 1
             break
         }
-        jp_fail(i, "expected , or }")
+        jp_fail(inout p, "expected , or }")
+        return Json.Null
     }
     Json.Obj(m)
 }
