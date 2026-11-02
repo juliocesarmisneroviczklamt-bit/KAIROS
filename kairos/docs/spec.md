@@ -850,13 +850,17 @@ Essas funções usam só a linguagem, por isso rodam também no interpretador. L
   - `minimum` e `maximum`; `append_text`, `list_dir` e `file_date`, pelo WASI;
   - os tensores `nan_quantile`, `merge_days` e `contract`;
   - `randn`: o xoshiro256** e o Box-Muller do interpretador, com o `sin` e o `cos` da `libm` portados para Kairós (os mesmos bits, conferidos em `tests/rt/randn.krs`);
-  - `upper` e `lower`, como o `to_uppercase` e o `to_lowercase` do Rust (um caractere pode virar dois ou três; Σ no fim de uma palavra vira ς). As tabelas ([`rt_case.krs`](../compiler/rt_case.krs)) são geradas por [`gen_case.krs`](../compiler/gen_case.krs), que pergunta ao interpretador sobre cada ponto de código.
+  - `upper` e `lower`, como o `to_uppercase` e o `to_lowercase` do Rust (um caractere pode virar dois ou três; Σ no fim de uma palavra vira ς). As tabelas ([`rt_case.krs`](../compiler/rt_case.krs)) são geradas por [`gen_case.krs`](../compiler/gen_case.krs), que pergunta ao interpretador sobre cada ponto de código;
+  - `read_lines`, também da primeira entrada de um arquivo ZIP ([`rt_zip.krs`](../compiler/rt_zip.krs)):
+    - o inflate (RFC 1951) é escrito em Kairós: o decodificador do `puff.c` do zlib, com uma tabela para os códigos de até 9 bits;
+    - a saída passa por um buffer de onde as linhas completas saem conforme ele enche, guardando os últimos 32 KB que as próximas cópias podem ler;
+    - um COTAHIST da B3 (80 MB comprimidos, 322 mil linhas guardadas) sai igual ao do interpretador, em 4 s no node.
+- **Textos dentro de valores** (uma lista, uma struct) saem como o `{:?}` do Rust também além do ASCII: os caracteres que o Rust não considera imprimíveis, ou que estendem um grafema, viram `\u{...}`. A tabela também vem do `gen_case.krs`, conferida em todo ponto de código até U+1F000.
 - **A memória cresce um oitavo por vez**, não uma página por vez: o `momentum` compilado roda em 1,4 s no node, contra 40 s antes.
 - No Windows, o node 22 pode cair (segfault) com alguns desses módulos. Eles rodam quando as funções do WASI são chamadas através de JavaScript, e também no wasmi. O WASI do node no Windows também não lê pastas (`fd_readdir`), então `list_dir` só funciona nos outros runtimes.
 
 **Ainda não compila:**
 - `grad`, `value_and_grad` e as regras suaves (`smooth_max`, `smooth_min`, `smooth_step`);
-- `read_lines` (que também lê arquivos ZIP);
 - a internet (`http_get`, `http_get_all`, `download`): o WASI não tem rede.
 
 Um programa que os usa é recusado com W0001, no ponto exato.

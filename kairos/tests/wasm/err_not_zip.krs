@@ -1,0 +1,2 @@
+// error: R0011
+print(read_lines("tests/wasm/files/not_a.zip", []))

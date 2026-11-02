@@ -1,0 +1,2 @@
+// error: R0010
+print(read_lines("tests/wasm/files/lines.txt", [(0, "01"), (-3, "x")]))

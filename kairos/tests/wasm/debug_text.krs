@@ -1,0 +1,20 @@
+// A text inside a value as Rust's `{:?}` writes it: beyond ASCII, the characters that are not
+// printable or that extend a grapheme as \u{...} (every character up to U+1F000, in a hash)
+fn mix(h: i64, s: str) -> i64 {
+    var x = h
+    for c in codes(s) { x = bit_and(wrapping_mul(bit_xor(x, c), 1099511628211), 9223372036854775807) }
+    x
+}
+
+var h = 0
+var escaped = 0
+for c in 0..126976 {
+    if c >= 55296 and c <= 57343 { continue }
+    let s = str([from_codes([c])])
+    if find(s, from_codes([92, 117, 123])) >= 0 { escaped += 1 }
+    h = mix(h, s)
+}
+print("escaped", escaped, "hash", h)
+print([from_codes([97, 769]), from_codes([65279, 120]), from_codes([8203]), from_codes([173]), from_codes([8232]), from_codes([57344]), from_codes([888]), "ação", "日本", from_codes([128512]), from_codes([7, 127, 0])])
+// out: escaped 45025 hash 8506901329675493782
+// out: ["a\u{301}", "\u{feff}x", "\u{200b}", "\u{ad}", "\u{2028}", "\u{e000}", "\u{378}", "ação", "日本", "😀", "\u{7}\u{7f}\0"]

@@ -49,6 +49,10 @@ let up = dir_of(std_dir)
 let rt_path = (if up == "" { "" } else { up + "/" }) + "compiler/rt.krs"
 check_file(inout base, rt_path, read_text(rt_path))
 assert(not base.failed, "the runtime does not check: " + base.code + " " + base.msg)
+// read_lines and its ZIP archives (rt_zip.krs: it uses the runtime)
+let zip_path = (if up == "" { "" } else { up + "/" }) + "compiler/rt_zip.krs"
+check_file(inout base, zip_path, read_text(zip_path))
+assert(not base.failed, "the runtime of read_lines does not check: " + base.code + " " + str(base.elo) + " " + base.msg)
 // with the bridge to the lab (rt_b3.krs, over kairos/lab), checked when a program first reaches
 // `b3` (the module of a program that does is made again with it)
 var base_b3 = base

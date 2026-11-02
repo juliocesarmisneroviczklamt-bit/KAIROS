@@ -1,0 +1,23 @@
+// read_lines: the lines with given texts at given columns, from a text file or from the first
+// entry of a ZIP archive (stored, or deflated with fixed or dynamic codes)
+let keep = [(0, "01"), (9, "010"), (13, "R$")]
+for f in ["lines.txt", "lines_stored.zip", "lines_fixed.zip"] {
+    let ls = read_lines("tests/wasm/files/" + f, keep)
+    print(f, len(ls), ls)
+}
+print(read_lines("tests/wasm/files/lines.txt", []))
+print(len(read_lines("tests/wasm/files/lines.txt", [(1000, "")])), len(read_lines("tests/wasm/files/lines.txt", [(0, "")])))
+let big = read_lines("tests/wasm/files/big_dynamic.zip", [(0, "01"), (24, "010")])
+print("big", len(big), len(big[0]), substr(big[0], 0, 40), substr(big[len(big) - 1], 0, 40))
+var total = 0
+for l in big { total += len(l) }
+print("characters", total)
+print(len(read_lines("tests/wasm/files/big_dynamic.zip", [])))
+// out: lines.txt 1 ["01 VALE3 010 R$ 60.1"]
+// out: lines_stored.zip 1 ["01 VALE3 010 R$ 60.1"]
+// out: lines_fixed.zip 1 ["01 VALE3 010 R$ 60.1"]
+// out: ["\u{feff}01 PETR4 010 R$ 12.5", "02 header", "01 VALE3 010 R$ 60.1", "", "01 ITUB4 020 R$ 30", "01 SÃO 010 R$", "01 ação 010 R$ 7", "01 X", "01 last 010 R$ 1"]
+// out: 0 9
+// out: big 7658 224 012024020102PETR4       010PETROBRAS   P 012024120102PETR4       010PETROBRAS   P
+// out: characters 1776190
+// out: 12000

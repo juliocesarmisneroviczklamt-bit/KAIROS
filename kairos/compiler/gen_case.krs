@@ -48,6 +48,9 @@ var ign: List[i64] = []
 var cased: List[i64] = []
 var in_ign = false
 var in_cased = false
+// beyond ASCII, the characters Rust's `{:?}` writes as \u{...} (not printable, or grapheme extenders)
+var esc: List[i64] = []
+var in_esc = false
 let sigma = from_codes([931])
 for c in 0..1114112 {
     // the surrogates are not characters
@@ -74,6 +77,15 @@ for c in 0..1114112 {
         is_cased = alone
         is_ign = after_a and not alone
     }
+    var is_esc = false
+    if c >= 128 and (c < 55296 or c > 57343) {
+        let s = from_codes([c])
+        is_esc = str([s]) != "[\"" + s + "\"]"
+    }
+    if is_esc != in_esc {
+        esc.push(c)
+        in_esc = is_esc
+    }
     if is_ign != in_ign {
         ign.push(c)
         in_ign = is_ign
@@ -85,6 +97,7 @@ for c in 0..1114112 {
 }
 if in_ign { ign.push(1114112) }
 if in_cased { cased.push(1114112) }
+if in_esc { esc.push(1114112) }
 
 fn bounds(xs: List[i64]) -> str {
     var parts: List[str] = []
@@ -104,5 +117,7 @@ out = out + nl + "// case-ignorable: " + str(len(ign) / 2) + " ranges" + nl
 out = out + "fn rt_case_ignorable() -> str {" + nl + "    " + literal(bounds(ign)) + nl + "}" + nl
 out = out + nl + "// cased, and not case-ignorable: " + str(len(cased) / 2) + " ranges" + nl
 out = out + "fn rt_case_cased() -> str {" + nl + "    " + literal(bounds(cased)) + nl + "}" + nl
+out = out + nl + "// escaped by {:?}, beyond ASCII: " + str(len(esc) / 2) + " ranges" + nl
+out = out + "fn rt_case_escaped() -> str {" + nl + "    " + literal(bounds(esc)) + nl + "}" + nl
 write_text(args()[0], out)
-print("upper", n_up, "lower", n_low, "ignorable", len(ign) / 2, "cased", len(cased) / 2)
+print("upper", n_up, "lower", n_low, "ignorable", len(ign) / 2, "cased", len(cased) / 2, "escaped", len(esc) / 2)

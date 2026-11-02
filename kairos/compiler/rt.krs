@@ -212,19 +212,57 @@ fn rt_put_esc(q: i64, c: i64) -> i64 {
 }
 
 // A text inside a value (a list, a struct...), as Rust's `{:?}` writes it: between quotes, with
-// quotes, backslashes and control characters escaped. (Characters beyond ASCII are written as
-// they are: Rust also escapes the few it does not consider printable.)
+// quotes, backslashes and control characters escaped, and beyond ASCII the characters Rust does
+// not write as they are (not printable, or grapheme extenders: rt_case.krs) as \u{...}.
 fn rt_str_debug(s: str) -> str {
     let p = wasm_str_addr(s)
     let n = wasm_load32(p + 4)
+    var ascii = true
     var m = 2
-    for i in 0..n { m += rt_esc_len(wasm_load8(p + 8 + i)) }
+    for i in 0..n {
+        let b = wasm_load8(p + 8 + i)
+        if b >= 128 { ascii = false }
+        m += rt_esc_len(b)
+    }
+    if not ascii { return rt_str_debug_chars(s) }
     let q = rt_new_str(m)
     wasm_store8(q + 8, 34)
     var at = q + 9
     for i in 0..n { at = rt_put_esc(at, wasm_load8(p + 8 + i)) }
     wasm_store8(at, 34)
     wasm_str_at(q)
+}
+
+// the same, character by character
+fn rt_str_debug_chars(s: str) -> str {
+    var cs = [34]
+    for c in codes(s) {
+        if c == 0 or c == 9 or c == 10 or c == 13 or c == 34 or c == 92 {
+            cs.push(92)
+            cs.push(if c == 0 { 48 } else if c == 9 { 116 } else if c == 10 { 110 } else if c == 13 { 114 } else { c })
+        } else if c < 32 or c == 127 or (c >= 128 and rt_uni_in(c, 6)) {
+            // \u{...}: lowercase hex digits, without zeros in front
+            cs.push(92)
+            cs.push(117)
+            cs.push(123)
+            var ds: List[i64] = []
+            var x = c
+            while x > 0 or len(ds) == 0 {
+                ds.push(rt_hex_digit(x % 16))
+                x = x / 16
+            }
+            var k = len(ds) - 1
+            while k >= 0 {
+                cs.push(ds[k])
+                k -= 1
+            }
+            cs.push(125)
+        } else {
+            cs.push(c)
+        }
+    }
+    cs.push(34)
+    from_codes(cs)
 }
 
 // ------------------------------------------------------------------ lists
@@ -651,6 +689,11 @@ fn rt_decode(p: i64, n: i64) -> str {
         if n >= 3 and wasm_load8(p) == 239 and wasm_load8(p + 1) == 187 and wasm_load8(p + 2) == 191 { start = 3 }
         return rt_text_of(p + start, n - start)
     }
+    rt_latin1(p, n)
+}
+
+// The n bytes at p as Latin-1 text: each byte a character.
+fn rt_latin1(p: i64, n: i64) -> str {
     var m = 0
     for i in 0..n { m += if wasm_load8(p + i) < 128 { 1 } else { 2 } }
     let q = rt_new_str(m)
@@ -904,6 +947,13 @@ fn rt_errno_text(e: i64) -> str {
     if e == 20 { return "File exists (os error 17)" }
     if e == 54 { return "Not a directory (os error 20)" }
     if e == 31 { return "Is a directory (os error 21)" }
+    // ZIP archives (rt_zip.krs)
+    if e == -10 { return "corrupt deflate stream" }
+    if e == -11 { return "invalid Zip archive: Could not find EOCD" }
+    if e == -12 { return "invalid Zip archive: Invalid central directory size or offset" }
+    if e == -13 { return "specified file not found in archive" }
+    if e == -14 { return "invalid Zip archive: Invalid local file header" }
+    if e <= -1000 { return "compression method not supported: " + str(-1000 - e) }
     "WASI error " + str(e)
 }
 
@@ -1408,11 +1458,11 @@ fn rt_uni_at(p: i64, k: i64) -> i64 {
 }
 
 // which: 0 alphabetic, 1 alphanumeric, 2 uppercase, 3 white space, 4 case-ignorable, 5 cased (and
-// not case-ignorable)
+// not case-ignorable), 6 escaped by Rust's `{:?}`
 fn rt_uni_in(c: i64, which: i64) -> bool {
     // not a character: negative, a surrogate, beyond U+10FFFF
     if c < 0 or c > 1114111 or (c >= 55296 and c <= 57343) { return false }
-    let t = if which == 0 { rt_uni_alphabetic() } else if which == 1 { rt_uni_alphanumeric() } else if which == 2 { rt_uni_uppercase() } else if which == 3 { rt_uni_whitespace() } else if which == 4 { rt_case_ignorable() } else { rt_case_cased() }
+    let t = if which == 0 { rt_uni_alphabetic() } else if which == 1 { rt_uni_alphanumeric() } else if which == 2 { rt_uni_uppercase() } else if which == 3 { rt_uni_whitespace() } else if which == 4 { rt_case_ignorable() } else if which == 5 { rt_case_cased() } else { rt_case_escaped() }
     let p = wasm_str_addr(t)
     var lo = 0
     var hi = wasm_load32(p + 4) / 4
