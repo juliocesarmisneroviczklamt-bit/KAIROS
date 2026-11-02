@@ -1,0 +1,3 @@
+// Changing a protocol's terms after the fact is exactly what protocols prevent.
+protocol "golden-v1" { research: until 201812  holdout: from 201901  rule: "accept if alpha > 0" }
+protocol "golden-v1" { research: until 201906  holdout: from 201907  rule: "accept if alpha > 0" }   // error: E0112

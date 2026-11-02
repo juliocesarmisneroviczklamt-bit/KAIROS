@@ -369,6 +369,7 @@ impl Checker {
                 | B::SmoothMax
                 | B::SmoothMin
                 | B::SmoothStep
+                | B::OpenOnce
         )
     }
 
@@ -632,6 +633,7 @@ impl Checker {
             B::Grad | B::ValueAndGrad => return self.grad_ty(b, all, named, sp),
             B::Randn => return self.randn_ty(all, named, sp),
             B::SmoothMax | B::SmoothMin | B::SmoothStep => return self.smooth_ty(b, all, named, sp),
+            B::OpenOnce => return self.open_once_ty(all, named, sp),
             _ => {}
         }
         let name = builtin_name(b);
@@ -940,48 +942,128 @@ impl Checker {
                 if args[0].name.is_some() {
                     return Err(Diag::new("E0120", args[0].expr.span, "positional arguments must come before named ones"));
                 }
-                let Some(&sid) = self.struct_ids.get("Evaluation") else {
-                    return Err(Diag::new("E0100", sp, "the prelude's `Evaluation` struct is missing"));
-                };
-                let want = Ty::Tensor(month_asset, Box::new(Ty::Float));
-                let (hw, tw) = self.expr(&args[0].expr, Some(&want))?;
-                if self.unify(&tw, &want).is_err() {
-                    let code = if self.tensor_parts(&tw).is_some() { "E0201" } else { "E0101" };
-                    return Err(Diag::new(code, args[0].expr.span, format!("`b3.evaluate` needs weights of type `{}`, found `{}`", self.show(&want), self.show(&tw)))
-                        .hint("one weight per month and asset; a month whose weights are all zero stays in cash (CDI)"));
-                }
-                let mut opts: Vec<(&str, HExpr, Ty)> = vec![
-                    ("cost_bps", HExpr::Lit(Value::Float(25.0)), Ty::Float),
-                    ("lag", HExpr::Lit(Value::Int(1)), Ty::Int),
-                    ("capital", HExpr::Lit(Value::Float(1_000_000.0)), Ty::Float),
-                    ("real_costs", HExpr::Lit(Value::Bool(false)), Ty::Bool),
-                    ("tax", HExpr::Lit(Value::Bool(false)), Ty::Bool),
-                ];
-                let mut seen: Vec<&str> = Vec::new();
+                let mut named = Vec::new();
                 for a in &args[1..] {
                     let Some((nm, nsp)) = &a.name else {
                         return Err(Diag::new("E0120", a.expr.span, "positional arguments must come before named ones")
                             .hint("e.g. `b3.evaluate(w, cost_bps: 25.0, lag: 1)`"));
                     };
-                    let Some(k) = opts.iter().position(|(o, _, _)| *o == nm.as_str()) else {
-                        return Err(Diag::new("E0120", *nsp, format!("`b3.evaluate` has no option `{nm}`"))
-                            .hint("its options are cost_bps, lag, capital, real_costs and tax"));
-                    };
-                    if seen.contains(&nm.as_str()) {
-                        return Err(Diag::new("E0112", *nsp, format!("option `{nm}` is given twice")));
-                    }
-                    seen.push(nm.as_str());
-                    let t = opts[k].2.clone();
-                    let (h, ht) = self.expr(&a.expr, Some(&t))?;
-                    self.expect_ty(&ht, &t, a.expr.span)?;
-                    opts[k].1 = h;
+                    named.push((nm.as_str(), *nsp, &a.expr));
                 }
-                let mut xs = vec![hw];
-                xs.extend(opts.into_iter().map(|(_, h, _)| h));
+                let (sid, xs) = self.weights_and_options("b3.evaluate", &args[0].expr, false, &named, sp)?;
                 host(HostFn::Evaluate { result: sid }, xs, Ty::Struct(sid))
             }
+            "holdout" => {
+                nargs(1)?;
+                let ExprKind::Str(name) = &args[0].expr.kind else {
+                    return Err(Diag::new("E0101", args[0].expr.span, "`b3.holdout` takes the protocol's name in quotes"));
+                };
+                let Some(proto) = self.protocols.iter().position(|p| p.name == *name) else {
+                    return Err(Diag::new("E0100", args[0].expr.span, format!("no protocol named `{name}`"))
+                        .hint(format!("declare it first: `protocol \"{name}\" {{ research: until 201812  holdout: from 201901  rule: \"...\" }}`")));
+                };
+                host(HostFn::Holdout { proto: proto as u32 }, vec![], Ty::Holdout)
+            }
             _ => Err(Diag::new("E0100", sp, format!("the `b3` module has no function `{method}`"))
-                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate")),
+                .hint("available: monthly_returns, eligible, cdi, months, tickers, month_index, evaluate, holdout")),
+        }
+    }
+
+    /// The weights (`Tensor[month, asset; f64]`, or a function without parameters returning them
+    /// when `as_fn`) and the options of an evaluation, with their defaults: [weights, cost_bps, lag,
+    /// capital, real_costs, tax]. Also returns `Evaluation`'s id.
+    fn weights_and_options(
+        &mut self,
+        what: &str,
+        w: &Expr,
+        as_fn: bool,
+        named: &[(&str, Span, &Expr)],
+        sp: Span,
+    ) -> KResult<(u32, Vec<HExpr>)> {
+        let Some(&sid) = self.struct_ids.get("Evaluation") else {
+            return Err(Diag::new("E0100", sp, "the prelude's `Evaluation` struct is missing"));
+        };
+        let tensor = Ty::Tensor(vec![AX_MONTH, AX_ASSET], Box::new(Ty::Float));
+        let want = if as_fn { Ty::Fn(vec![], Box::new(tensor)) } else { tensor };
+        let (hw, tw) = self.expr(w, Some(&want))?;
+        if self.unify(&tw, &want).is_err() {
+            // a tensor with other axes is an axis error; anything else (including a tensor where
+            // the function is expected) is a type error
+            let code = if !as_fn && self.tensor_parts(&tw).is_some() { "E0201" } else { "E0101" };
+            let (needs, hint) = if as_fn {
+                (
+                    "a function without parameters that returns the weights",
+                    "the holdout's data exists only while that function runs: e.g. `open_once(h, || weights())`",
+                )
+            } else {
+                ("weights", "one weight per month and asset; a month whose weights are all zero stays in cash (CDI)")
+            };
+            return Err(Diag::new(code, w.span, format!("`{what}` needs {needs} of type `{}`, found `{}`", self.show(&want), self.show(&tw)))
+                .hint(hint));
+        }
+        let mut opts: Vec<(&str, HExpr, Ty)> = vec![
+            ("cost_bps", HExpr::Lit(Value::Float(25.0)), Ty::Float),
+            ("lag", HExpr::Lit(Value::Int(1)), Ty::Int),
+            ("capital", HExpr::Lit(Value::Float(1_000_000.0)), Ty::Float),
+            ("real_costs", HExpr::Lit(Value::Bool(false)), Ty::Bool),
+            ("tax", HExpr::Lit(Value::Bool(false)), Ty::Bool),
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for (nm, nsp, e) in named {
+            let Some(k) = opts.iter().position(|(o, _, _)| o == nm) else {
+                return Err(Diag::new("E0120", *nsp, format!("`{what}` has no option `{nm}`"))
+                    .hint("its options are cost_bps, lag, capital, real_costs and tax"));
+            };
+            if seen.contains(nm) {
+                return Err(Diag::new("E0112", *nsp, format!("option `{nm}` is given twice")));
+            }
+            seen.push(nm);
+            let t = opts[k].2.clone();
+            let (h, ht) = self.expr(e, Some(&t))?;
+            self.expect_ty(&ht, &t, e.span)?;
+            opts[k].1 = h;
+        }
+        let mut xs = vec![hw];
+        xs.extend(opts.into_iter().map(|(_, h, _)| h));
+        Ok((sid, xs))
+    }
+
+    /// `open_once(h, || weights(), ...)`: evaluates on the holdout of `h`'s protocol, once (M5).
+    /// The months of the holdout exist only while the function runs.
+    fn open_once_ty(&mut self, all: &[(&Expr, bool)], named: &[(&str, Span, &Expr)], sp: Span) -> KResult<(HExpr, Ty)> {
+        if all.len() != 2 {
+            return Err(Diag::new("E0103", sp, "`open_once` takes the holdout and the function that computes the weights")
+                .hint("e.g. `open_once(h, || weights(), lag: 1)`"));
+        }
+        let (hh, th) = self.expr(all[0].0, None)?;
+        if self.resolve(&th) != Ty::Holdout {
+            return Err(Diag::new("E0101", all[0].0.span, format!("`open_once` needs a holdout, found `{}`", self.show(&th)))
+                .hint("get it from a protocol: `let h = b3.holdout(\"name\")`"));
+        }
+        let (sid, ws) = self.weights_and_options("open_once", all[1].0, true, named, sp)?;
+        let mut xs = vec![hh];
+        xs.extend(ws);
+        Ok((HExpr::Host(HostFn::OpenOnce { result: sid }, xs, sp), Ty::Struct(sid)))
+    }
+
+    /// `protocol "name" { ... }`: declaring the same protocol again is fine; changing its terms
+    /// under the same name is not.
+    pub(super) fn declare_protocol(&mut self, p: &ProtocolDecl) -> KResult<()> {
+        let def = ProtocolDef {
+            name: p.name.clone(),
+            research_until: p.research_until,
+            holdout_from: p.holdout_from,
+            min_months: p.min_months,
+            rule: p.rule.clone(),
+        };
+        match self.protocols.iter().find(|q| q.name == p.name) {
+            Some(q) if *q == def => Ok(()),
+            Some(_) => Err(Diag::new("E0112", p.span, format!("protocol `{}` is already defined with other terms", p.name))
+                .hint("changing a protocol after seeing results is exactly what protocols prevent: give the new one another name")),
+            None => {
+                self.protocols.push(def);
+                Ok(())
+            }
         }
     }
 }

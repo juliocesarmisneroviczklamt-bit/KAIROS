@@ -15,13 +15,13 @@ O repositório tem duas partes que trabalham juntas:
 ## O que torna a Kairós diferente
 
 1. **Tipos temporais** (M3, pronto). Usar dado do futuro numa decisão é erro de compilação: o compilador sabe quando cada valor fica conhecido.
-2. **Holdout de uso único** (M5). Os dados de validação só podem ser abertos uma vez, e cada avaliação entra sozinha no registro de tentativas.
+2. **Holdout de uso único** (M5, pronto). O protocolo declarado no programa esconde o holdout de todos os programas até ele ser aberto, uma única vez. Cada avaliação entra sozinha no registro de tentativas, com Deflated Sharpe.
 3. **Diferenciação nativa** (M4, pronto). `grad` é parte da linguagem, inclusive através de regras discretas, via relaxações declaradas (`smooth_max`, `smooth_step`). O motor de IA (MLP, Adam) é escrito em Kairós.
 4. **Tensores com eixos nomeados** (M2, pronto). Misturar eixos é erro de compilação.
 
 Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo menos visíveis, os erros que fabricam alpha falso.
 
-## Estado: v0.4.0 (M4)
+## Estado: v0.5.0 (M5)
 
 | marco | entrega | estado |
 |---|---|---|
@@ -29,8 +29,8 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M2 | tensores com eixos nomeados + módulo `b3` sobre os dados reais | ✅ |
 | M3 | tipos temporais: usar dado do futuro numa decisão não compila | ✅ |
 | M4 | `grad` nativo + motor de IA escrito em Kairós (MLP, Adam genérico) | ✅ |
-| M5 | holdout de uso único + registro de testes e DSR automáticos | próximo |
-| M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR) | planejado |
+| M5 | holdout de uso único + protocolos + registro de testes e DSR automáticos | ✅ |
+| M6 | primeiro modelo inédito (carteira treinada no patrimônio depois de IR) | próximo |
 | M7 | back-end nativo (Cranelift) | planejado |
 
 ## Exemplo: momentum na B3
@@ -67,6 +67,34 @@ error[E0301]: use of future information
    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^ known at end(m), but the portfolio of month m is decided at end(m - 1)
    = hint: `b3.evaluate` trades the weights of month m at the close of month m - 1: use data up to `m - 1` (momentum skips the last month: `m - 2`)
 ```
+
+## Holdout de uso único
+
+O laboratório já gastou o holdout de 2019 em diante numa busca de alpha. Por isso, um protocolo novo só pode reservar o futuro ([`kairos/examples/holdout.krs`](kairos/examples/holdout.krs)):
+
+```krs
+protocol "momentum-demo" {
+    research: until 202610
+    holdout: from 202611
+    min_months: 12
+    rule: "accept if the holdout's CAPM alpha > 0 and its PSR >= 90%"
+}
+let research = b3.evaluate(weights(), cost_bps: 25.0, lag: 0)    // só enxerga até 2026-10
+let h = b3.holdout("momentum-demo")
+let final = open_once(h, || weights(), cost_bps: 25.0, lag: 0)   // o holdout só existe aqui dentro
+```
+
+```text
+research: 310 months, Sharpe 0.22142871787716945
+trials in the registry: 14 -> DSR 0.0919859189145863
+runtime error[R0503]: the holdout of protocol "momentum-demo" starts in 2026-11, but the data ends in 2026-10: there is nothing to open yet
+   = hint: nothing was opened or recorded: run again when the data has more months
+```
+
+- **O momentum é só mais uma tentativa:** com as 14 do registro do laboratório, a chance de o Sharpe dele ser real (DSR) é de 9%.
+- **O holdout reservado** fica escondido de todos os programas até haver 12 meses de dados novos. Aí ele abre, uma vez, e o resultado fica no livro-razão (`kairos ledger`).
+- **Abrir de novo** é erro na compilação (E0501) e entre execuções (R0502).
+- **Um holdout no passado** é recusado (R0502): aqueles meses já foram vistos pela busca do laboratório.
 
 ## Como usar
 

@@ -20,6 +20,8 @@ pub enum Value {
     Func(Rc<FuncVal>),
     /// named-axis tensor (M2); a tensor with no axes left is always a scalar `Float`/`Bool`
     Tensor(Rc<TensorVal>),
+    /// the holdout of a protocol (M5): affine, opened at most once (index of the protocol)
+    Holdout(u32),
     /// a float or float tensor tracked by `grad` (M4): index of its node on the active tape
     Node(u32),
 }
@@ -47,6 +49,7 @@ impl PartialEq for Value {
             (Func(a), Func(b)) => Rc::ptr_eq(a, b),
             (Tensor(a), Tensor(b)) => a == b,
             (Node(a), Node(b)) => a == b,
+            (Holdout(a), Holdout(b)) => a == b,
             _ => false,
         }
     }

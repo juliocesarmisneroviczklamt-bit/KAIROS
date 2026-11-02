@@ -885,6 +885,12 @@ impl<'a> An<'a> {
                 // the evaluation of a whole history is known at its end
                 TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown }
             }
+            HostFn::Holdout { .. } => TV::ALWAYS,
+            HostFn::OpenOnce { .. } => {
+                // the holdout trades the same way: no look-ahead there either
+                self.check_weights(&vals[1], sp)?;
+                TV { time: Time::new(At::Late, sp), rows: None, int: Lin::Unknown }
+            }
         })
     }
 

@@ -80,6 +80,11 @@ impl Session {
         Ok(echo)
     }
 
+    /// The `b3` data module of this session.
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
     pub fn render(&self, d: &Diag) -> String {
         match self.sources.get(d.span.file as usize) {
             Some((name, src)) => diag::render(d, src, name),

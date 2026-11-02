@@ -61,6 +61,23 @@ pub struct Data {
 impl Data {
     pub fn load(p: &Paths) -> Result<Self> {
         let panel: Panel = util::load_bin(&p.panel)?;
+        let cdi = macrodata::load_cdi(&p.raw_bcb)?;
+        let ew = macrodata::load_factors(&p.raw_nefin.join("nefin_factors_equally_weighted_monthly.csv"), true)?;
+        let vw = macrodata::load_factors(&p.raw_nefin.join("nefin_factors_monthly.csv"), true)?;
+        let ipca = macrodata::load_ipca(&p.raw_bcb)?;
+        Ok(Self::build(panel, &cdi, &ew, &vw, ipca))
+    }
+
+    /// Monta os dados a partir do painel e das séries macro já lidas: CDI diário (AAAAMMDD ->
+    /// fração), fatores NEFIN mensais equal- e value-weighted (AAAAMM) e IPCA mensal (AAAAMM).
+    /// Serve também para dados sintéticos em testes.
+    pub fn build(
+        panel: Panel,
+        cdi: &BTreeMap<u32, f64>,
+        ew: &BTreeMap<u32, Factors>,
+        vw: &BTreeMap<u32, Factors>,
+        ipca: BTreeMap<u32, f64>,
+    ) -> Self {
         let cal = Cal::new(&panel.dates);
         let (nm, nt, nd) = (cal.months.len(), panel.tks.len(), panel.dates.len());
         let mut mret = vec![vec![0.0f64; nm]; nt];
@@ -74,7 +91,6 @@ impl Data {
                 last_px[t][m] = d.px;
             }
         }
-        let cdi = macrodata::load_cdi(&p.raw_bcb)?;
         let mut cdi_d = vec![0.0f64; nd];
         for i in 0..nd {
             let cur = panel.dates[i];
@@ -86,12 +102,9 @@ impl Data {
             cdi_d[i] = g - 1.0;
         }
         let cdi_m = cal.mrange.iter().map(|&(a, b)| compound(&cdi_d[a..b])).collect();
-        let ew = macrodata::load_factors(&p.raw_nefin.join("nefin_factors_equally_weighted_monthly.csv"), true)?;
-        let vw = macrodata::load_factors(&p.raw_nefin.join("nefin_factors_monthly.csv"), true)?;
         let nef = cal.months.iter().map(|m| ew.get(m).copied()).collect();
         let nef_vw = cal.months.iter().map(|m| vw.get(m).copied()).collect();
-        let ipca = macrodata::load_ipca(&p.raw_bcb)?;
-        Ok(Data { panel, cal, mret, traded, last_px, cdi_d, cdi_m, nef, nef_vw, ipca })
+        Data { panel, cal, mret, traded, last_px, cdi_d, cdi_m, nef, nef_vw, ipca }
     }
 
     /// Janela [s, e) de índices de data em que a carteira do mês `mi` fica montada, com `lag`

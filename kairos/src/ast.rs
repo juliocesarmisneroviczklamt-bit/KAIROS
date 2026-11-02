@@ -8,7 +8,23 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Axis(AxisDecl),
+    Protocol(ProtocolDecl),
     Stmt(Stmt),
+}
+
+/// `protocol "momentum-v1" { research: until 201812  holdout: from 201901  rule: "..." }` (M5)
+#[derive(Debug, Clone)]
+pub struct ProtocolDecl {
+    pub name: String,
+    /// last month (YYYYMM) of the research period
+    pub research_until: i64,
+    /// first month (YYYYMM) of the holdout
+    pub holdout_from: i64,
+    /// the holdout opens only once it has at least this many months of data (default 12)
+    pub min_months: i64,
+    /// the acceptance rule, in words, fixed before any result is seen
+    pub rule: String,
+    pub span: Span,
 }
 
 /// `axis asset` or `axis month: temporal(monthly)`

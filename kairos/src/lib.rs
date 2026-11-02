@@ -14,6 +14,7 @@ pub mod bridge;
 pub mod diag;
 pub mod hir;
 pub mod interp;
+pub mod ledger;
 pub mod lexer;
 pub mod parser;
 pub mod session;

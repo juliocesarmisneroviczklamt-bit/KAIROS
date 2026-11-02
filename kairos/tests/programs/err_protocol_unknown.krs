@@ -1,0 +1,2 @@
+// A holdout belongs to a declared protocol.
+let h = b3.holdout("never-declared")   // error: E0100

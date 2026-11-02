@@ -31,6 +31,8 @@ pub enum Ty {
     Var(u32),
     /// type parameter of a generic function (`fn adam[P](...)`): a differentiable type
     Param(u32),
+    /// the holdout of a protocol (M5): affine, it can be used only once
+    Holdout,
     /// named-axis tensor: axis ids kept sorted (the order of axes never matters for typing),
     /// element `f64` or `bool`; never empty (a tensor with no axes is a scalar)
     Tensor(Vec<u32>, Box<Ty>),
@@ -52,6 +54,16 @@ pub struct AxisDef {
 enum Kind {
     Any,
     Num,
+}
+
+/// `protocol "name" { ... }` (M5)
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProtocolDef {
+    pub name: String,
+    pub research_until: i64,
+    pub holdout_from: i64,
+    pub min_months: i64,
+    pub rule: String,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +93,12 @@ struct Local {
     slot: u32,
     ty: Ty,
     mutable: bool,
+    /// a holdout (M5): usable once, never inside a loop or a lambda
+    affine: bool,
+    /// loop nesting where it was declared
+    loop_depth: u32,
+    /// copied into a lambda
+    captured: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -99,11 +117,13 @@ struct Ctx {
     /// (outer slot, inner slot) for lambdas
     captures: Vec<(u32, u32)>,
     loops: u32,
+    /// affine locals already used (slots)
+    consumed: std::collections::HashSet<u32>,
 }
 
 impl Ctx {
     fn new(kind: CtxKind, ret: Ty) -> Self {
-        Ctx { scopes: vec![HashMap::new()], n_slots: 0, ret, kind, captures: Vec::new(), loops: 0 }
+        Ctx { scopes: vec![HashMap::new()], n_slots: 0, ret, kind, captures: Vec::new(), loops: 0, consumed: Default::default() }
     }
 }
 
@@ -118,6 +138,8 @@ pub struct Checker {
     pub structs: Vec<StructDef>,
     struct_ids: HashMap<String, u32>,
     pub enums: Vec<EnumDef>,
+    /// declared protocols (M5); `b3.evaluate` follows the last one
+    pub protocols: Vec<ProtocolDef>,
     enum_ids: HashMap<String, u32>,
     pub sigs: Vec<FnSig>,
     fn_ids: HashMap<String, u32>,
@@ -184,6 +206,7 @@ impl Checker {
             structs: Vec::new(),
             struct_ids: HashMap::new(),
             enums: Vec::new(),
+            protocols: Vec::new(),
             enum_ids: HashMap::new(),
             sigs: Vec::new(),
             fn_ids: HashMap::new(),
@@ -231,6 +254,7 @@ impl Checker {
                     new_enums.push((id, e));
                 }
                 Item::Axis(a) => self.declare_axis(a)?,
+                Item::Protocol(p) => self.declare_protocol(p)?,
                 _ => {}
             }
         }
@@ -365,7 +389,8 @@ impl Checker {
         for (name, ty, inout) in &sig.params {
             let slot = ctx.n_slots;
             ctx.n_slots += 1;
-            ctx.scopes[0].insert(name.clone(), Local { slot, ty: ty.clone(), mutable: *inout });
+            let affine = matches!(ty, Ty::Holdout);
+            ctx.scopes[0].insert(name.clone(), Local { slot, ty: ty.clone(), mutable: *inout, affine, loop_depth: 0, captured: false });
         }
         self.ctxs.push(ctx);
         // the type parameters are in scope in the body (`let z: P = ...`)
@@ -520,6 +545,7 @@ impl Checker {
                 format!("fn({}) -> {}", ps.iter().map(|x| self.show(x)).collect::<Vec<_>>().join(", "), self.show(&r))
             }
             Ty::Param(p) => self.type_param_names.get(p as usize).cloned().unwrap_or_else(|| format!("T{p}")),
+            Ty::Holdout => "Holdout".into(),
             Ty::Tensor(axes, e) => {
                 let names: Vec<&str> = axes.iter().map(|a| self.axes[*a as usize].name.as_str()).collect();
                 format!("Tensor[{}; {}]", names.join(", "), self.show(&e))
@@ -595,6 +621,10 @@ impl Checker {
                         arity(1)?;
                         Ty::List(Box::new(self.resolve_type(&args[0])?))
                     }
+                    "Holdout" => {
+                        arity(0)?;
+                        Ty::Holdout
+                    }
                     "Tensor" => {
                         return Err(Diag::new("E0101", *span, "`Tensor` needs its axes and element type")
                             .hint("write it like `Tensor[month, asset; f64]`"));
@@ -650,10 +680,12 @@ impl Checker {
     }
 
     fn declare(&mut self, name: &str, ty: Ty, mutable: bool) -> u32 {
+        let affine = matches!(self.resolve(&ty), Ty::Holdout);
         let c = self.ctx();
+        let loop_depth = c.loops;
         let slot = c.n_slots;
         c.n_slots += 1;
-        c.scopes.last_mut().expect("scope").insert(name.to_string(), Local { slot, ty, mutable });
+        c.scopes.last_mut().expect("scope").insert(name.to_string(), Local { slot, ty, mutable, affine, loop_depth, captured: false });
         slot
     }
 
@@ -678,7 +710,7 @@ impl Checker {
             let slot = c.n_slots;
             c.n_slots += 1;
             c.captures.push((outer.slot, slot));
-            let l = Local { slot, ty: outer.ty, mutable: false };
+            let l = Local { slot, ty: outer.ty, mutable: false, affine: outer.affine, loop_depth: 0, captured: true };
             c.scopes[0].insert(name.to_string(), l.clone());
             return Some(l);
         }
@@ -874,6 +906,9 @@ impl Checker {
                 let Some(l) = self.lookup(n) else {
                     return Err(Diag::new("E0100", e.span, format!("cannot find `{n}` in this scope")));
                 };
+                if l.affine {
+                    return Err(Diag::new("E0501", e.span, format!("holdout `{n}` cannot be assigned or passed as `inout`")).hint("a holdout is opened once: `open_once(h, weights)`"));
+                }
                 if !l.mutable {
                     return Err(Diag::new("E0104", e.span, format!("cannot modify `{n}`: it is not mutable"))
                         .hint(format!("declare it with `var {n} = ...` (or as an `inout` parameter)")));
@@ -1256,7 +1291,7 @@ impl Checker {
         for ((name, _, _), t) in params.iter().zip(ptys.iter()) {
             let slot = ctx.n_slots;
             ctx.n_slots += 1;
-            ctx.scopes[0].insert(name.clone(), Local { slot, ty: t.clone(), mutable: false });
+            ctx.scopes[0].insert(name.clone(), Local { slot, ty: t.clone(), mutable: false, affine: false, loop_depth: 0, captured: false });
         }
         self.ctxs.push(ctx);
         let r = self.expr(body, Some(&ret));
@@ -1269,8 +1304,27 @@ impl Checker {
         Ok((HExpr::Lambda(def, outer), Ty::Fn(ptys, Box::new(ret))))
     }
 
+    /// A holdout is affine: using it consumes it (M5, E0501).
+    fn consume(&mut self, n: &str, l: &Local, sp: Span) -> KResult<()> {
+        let hint = "a holdout is opened once: use it in a single place, outside loops and lambdas";
+        if l.captured {
+            return Err(Diag::new("E0501", sp, format!("holdout `{n}` cannot be used inside a lambda")).hint(hint));
+        }
+        let c = self.ctx();
+        if c.loops > l.loop_depth {
+            return Err(Diag::new("E0501", sp, format!("holdout `{n}` cannot be used inside a loop: it would be opened more than once")).hint(hint));
+        }
+        if !c.consumed.insert(l.slot) {
+            return Err(Diag::new("E0501", sp, format!("holdout `{n}` was already used")).label("a holdout can be opened (or handed over) only once").hint(hint));
+        }
+        Ok(())
+    }
+
     fn name_expr(&mut self, n: &str, sp: Span) -> KResult<(HExpr, Ty)> {
         if let Some(l) = self.lookup(n) {
+            if l.affine {
+                self.consume(n, &l, sp)?;
+            }
             return Ok((HExpr::Local(l.slot), l.ty));
         }
         if let Some(&fid) = self.fn_ids.get(n) {

@@ -1,0 +1,13 @@
+// Single-use holdout (M5): `open_once` consumes the holdout, so a second look does not
+// compile. (Compile errors stop the program before any data is read.)
+protocol "golden-v1" {
+    research: until 201812
+    holdout: from 201901
+    rule: "accept if the holdout's CAPM alpha > 0"
+}
+fn weights() -> Tensor[month, asset; f64] {
+    zeros_like(b3.monthly_returns())
+}
+let h = b3.holdout("golden-v1")
+let first = open_once(h, || weights(), lag: 0)
+let again = open_once(h, || weights(), lag: 1)   // error: E0501

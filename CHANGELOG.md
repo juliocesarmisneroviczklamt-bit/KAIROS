@@ -2,6 +2,60 @@
 
 Versões da linguagem Kairós (pasta `kairos/`). Cada versão vira uma release no GitHub, gerada automaticamente por `.github/workflows/release.yml` a partir da seção correspondente deste arquivo.
 
+## 0.5.0 — M5: holdout de uso único, protocolos e registro de tentativas
+
+**O holdout abre uma vez, e cada avaliação conta.** É a garantia nº 2 da linguagem: olhar a validação de novo e testar até dar certo deixam rastro, ou não compilam.
+
+```krs
+protocol "momentum-demo" {
+    research: until 202610
+    holdout: from 202611
+    min_months: 12
+    rule: "accept if the holdout's CAPM alpha > 0 and its PSR >= 90%"
+}
+let research = b3.evaluate(weights(), lag: 0)                // só enxerga até 2026-10
+let h = b3.holdout("momentum-demo")                          // Holdout: usável uma vez
+let final = open_once(h, || weights(), lag: 0)               // o holdout só existe aqui dentro
+let again = open_once(h, || weights(), lag: 1)               // error[E0501]: holdout `h` was already used
+```
+
+- **`protocol "nome" { research: until AAAAMM  holdout: from AAAAMM  min_months: N  rule: "..." }`:**
+  - quem declara um protocolo só enxerga a pesquisa: os tensores de `b3.*` terminam em `research: until`;
+  - na primeira execução, o protocolo é registrado com hash no livro-razão `results/holdout_ledger.csv`;
+  - a partir daí, os meses do holdout ficam escondidos de **todos** os programas até a abertura;
+  - mudar o protocolo com o mesmo nome é E0112.
+- **`Holdout` é um tipo afim:**
+  - `b3.holdout("nome")` o cria, e `open_once(h, || pesos(), ...)` o consome;
+  - usar de novo, num laço ou numa lambda é **E0501**;
+  - os meses do holdout só existem enquanto a função de pesos roda, e a avaliação é uma carteira nova a partir do primeiro mês do holdout.
+- **Livro-razão entre execuções:**
+  - **Gravação:** a abertura é gravada antes de qualquer mês do holdout ser visto, e o resultado depois. Abrir de novo é **R0502**.
+  - **Holdout sem dados suficientes** (`min_months`, padrão 12): **R0503**, sem gravar nada.
+  - **Holdout novo:** precisa começar depois de todo mês que um programa Kairós já viu.
+  - **Origem:** o livro-razão nasce com a busca do laboratório, que já abriu 2019-01..2026-10. Hoje o único holdout limpo é o futuro.
+- **Registro de tentativas automático:**
+  - toda `b3.evaluate` entra em `results/registro_testes.csv`, junto com as estratégias que o laboratório testou em Rust;
+  - séries idênticas não contam duas vezes;
+  - `Evaluation` ganhou `trials` (tentativas no registro) e `dsr` (Deflated Sharpe Ratio). Rodando o momentum com o registro atual do laboratório: 14 tentativas, DSR 9%.
+- **`kairos ledger`** mostra o livro-razão, e **`kairos ledger withdraw <nome>`** desiste de um protocolo nunca aberto. A variável `KAIROS_RESULTS` escolhe outra pasta de resultados.
+- **Novos erros:**
+
+  | código | situação |
+  |---|---|
+  | E0501 | holdout usado duas vezes, num laço ou numa lambda |
+  | R0500 | livro-razão ou registro ilegível ou impossível de gravar |
+  | R0502 | holdout já aberto ou retirado, ou que começa em meses já vistos |
+  | R0503 | holdout ainda sem `min_months` meses de dados |
+  | R0504 | `b3.evaluate` ou `open_once` dentro de uma abertura |
+  | R0505 | falha da função de pesos durante a abertura (o holdout fica gasto) |
+
+- **Testes:**
+  - 7 testes dourados novos;
+  - 5 testes de integração num mercado sintético (`tests/holdout.rs`), que rodam em todas as plataformas da CI;
+  - o laboratório ganhou `Data::build`, que monta os dados sem ler arquivos.
+- **Exemplo:** `examples/holdout.krs`.
+- **Limite honesto:** o livro-razão só sabe o que programas Kairós viram, e é um arquivo que o dono pode editar. Ele mantém honesto quem quer ser honesto.
+
 ## 0.4.0 — M4: diferenciação nativa e o motor de IA em Kairós
 
 **`grad` faz parte da linguagem, e uma rede neural escrita em Kairós aprende.**

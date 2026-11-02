@@ -6,8 +6,8 @@ Correções de segurança saem numa nova versão de correção da linha mais rec
 
 | versão | suporte |
 | ------- | ------- |
-| 0.2.x (a mais recente) | :white_check_mark: |
-| < 0.2 | :x: |
+| 0.5.x (a mais recente) | :white_check_mark: |
+| < 0.5 | :x: |
 
 ## Como reportar uma vulnerabilidade
 

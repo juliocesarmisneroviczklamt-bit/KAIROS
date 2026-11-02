@@ -69,6 +69,8 @@ struct Evaluation {
     t_alpha: f64,      // t statistic of the alpha
     turnover: f64,     // traded value per year, as a fraction of wealth (buys + sells)
     cost_bps: f64,     // average cost paid per traded real, in basis points
+    trials: i64,       // trials the DSR accounts for: the whole registry (research), 1 (holdout)
+    dsr: f64,          // deflated Sharpe ratio: P(true Sharpe > best of `trials` tries without skill)
 }
 
 // ------------------------------------------------------------------ AI engine (M4)

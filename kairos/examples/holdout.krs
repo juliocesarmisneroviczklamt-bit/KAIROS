@@ -1,0 +1,50 @@
+// Single-use holdout (M5): the research discipline, written into the program.
+//
+// The protocol is fixed before any result is seen. From then on:
+//   - this program sees only the research period;
+//   - every program sees nothing of the holdout, which is reserved in the ledger
+//     (results/holdout_ledger.csv);
+//   - the holdout opens once, inside `open_once`, and the opening is recorded;
+//   - every research evaluation is a trial in results/registro_testes.csv, and its DSR
+//     discounts all the trials there.
+//
+// The only data nobody has looked at is the future: the lab's alpha search already opened
+// 2019-01..2026-10, so a holdout has to start in 2026-11 or later. Until the protocol's 12
+// months exist, `open_once` refuses (R0503) and records nothing.
+//
+// Running this registers the protocol in your ledger. To try it without that:
+//   KAIROS_RESULTS=/some/empty/folder kairos run kairos/examples/holdout.krs
+// and to give up a protocol whose holdout was never opened: `kairos ledger withdraw <name>`.
+
+protocol "momentum-demo" {
+    research: until 202610
+    holdout: from 202611
+    min_months: 12
+    rule: "accept if the holdout's CAPM alpha > 0 and its PSR >= 90%"
+}
+
+// the same function computes the weights in the research and in the holdout
+fn weights() -> Tensor[month, asset; f64] {
+    let ret = b3.monthly_returns()
+    let elig = b3.eligible()
+    var w = zeros_like(ret)
+    for m in max(12, b3.month_index(200101))..size(ret, month) {
+        let alive = elig[month: m] and not is_nan(ret[month: m - 1])
+        let signal = prod(1.0 + fill_nan(ret[month: m - 12 ..= m - 2], 0.0), over: month) - 1.0
+        let s = where(alive, signal, nan)
+        let cnt = int(nan_count(s, over: asset))
+        if cnt < 15 { continue }
+        let k = int(round(float(cnt) / 3.0))
+        w[month: m] = where(top_k(s, k, over: asset), 1.0 / float(k), 0.0)
+    }
+    w
+}
+
+let research = b3.evaluate(weights(), cost_bps: 25.0, lag: 0)
+print("research:", research.months, "months, Sharpe", research.sharpe)
+print("trials in the registry:", research.trials, "-> DSR", research.dsr)
+
+let h = b3.holdout("momentum-demo")                              // Holdout: usable once
+let final = open_once(h, || weights(), cost_bps: 25.0, lag: 0)   // the holdout exists only in here
+print("holdout:", final)
+// open_once(h, || weights())   // error[E0501]: holdout `h` was already used

@@ -626,6 +626,7 @@ impl<'a> Interp<'a> {
             },
             Value::Tensor(t) => crate::tensor::describe(t, |a| self.ck.axes[a as usize].name.clone()),
             Value::Node(_) => self.display(&self.fwd(v), top),
+            Value::Holdout(p) => format!("<holdout of protocol {:?}>", self.ck.protocols[*p as usize].name),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Runtime of tensor operators, tensor builtins and the `b3` module (M2).
 
 use super::*;
-use crate::bridge::{EvalCfg, HostErr};
+use crate::bridge::{EvalCfg, EvalOut, HostErr};
 use crate::tensor::{self, Elem, Op, Red, Sel, TData, TErr, TensorVal, map_n};
 
 /// Largest tensor `zeros`/`ones`/`full` may build (2^28 elements = 2 GB of f64).
@@ -416,6 +416,9 @@ impl Interp<'_> {
         // the simulator has no gradient (yet): it sees plain values
         let v: Vec<Value> = v.iter().map(|x| self.deep_fwd(x)).collect();
         let host = self.host;
+        let ck = self.ck;
+        // the program's protocols fence the data it sees (M5)
+        let protos = &ck.protocols;
         let herr = |e: HostErr| {
             let mut d = Diag::new(e.code, sp, e.msg);
             if let Some(h) = e.hint {
@@ -423,45 +426,87 @@ impl Interp<'_> {
             }
             Ctl::Err(d)
         };
+        let cfg_of = |o: &[Value]| EvalCfg {
+            cost_bps: float_of(&o[0]),
+            lag: as_int(o[1].clone()),
+            capital: float_of(&o[2]),
+            real_costs: as_bool(o[3].clone()),
+            tax: as_bool(o[4].clone()),
+        };
         Ok(match hf {
-            HostFn::MonthlyReturns => Value::Tensor(host.monthly_returns().map_err(herr)?),
-            HostFn::Eligible => Value::Tensor(host.eligible().map_err(herr)?),
-            HostFn::Cdi => Value::Tensor(host.cdi().map_err(herr)?),
-            HostFn::Months => Value::List(Rc::new(host.months().map_err(herr)?.into_iter().map(Value::Int).collect())),
+            HostFn::MonthlyReturns => Value::Tensor(host.monthly_returns(protos).map_err(herr)?),
+            HostFn::Eligible => Value::Tensor(host.eligible(protos).map_err(herr)?),
+            HostFn::Cdi => Value::Tensor(host.cdi(protos).map_err(herr)?),
+            HostFn::Months => Value::List(Rc::new(host.months(protos).map_err(herr)?.into_iter().map(Value::Int).collect())),
             HostFn::Tickers => {
                 Value::List(Rc::new(host.tickers().map_err(herr)?.into_iter().map(|s| Value::Str(s.into())).collect()))
             }
-            HostFn::MonthIndex => Value::Int(host.month_index(as_int(v[0].clone())).map_err(herr)?),
+            HostFn::MonthIndex => Value::Int(host.month_index(as_int(v[0].clone()), protos).map_err(herr)?),
             HostFn::Evaluate { result } => {
-                let cfg = EvalCfg {
-                    cost_bps: float_of(&v[1]),
-                    lag: as_int(v[2].clone()),
-                    capital: float_of(&v[3]),
-                    real_costs: as_bool(v[4].clone()),
-                    tax: as_bool(v[5].clone()),
-                };
-                let ev = host.evaluate(tensor_of(&v[0]), &cfg).map_err(herr)?;
-                let def = &self.ck.structs[result as usize];
-                let mut fields = Vec::with_capacity(def.fields.len());
-                for (name, _) in &def.fields {
-                    fields.push(match name.as_str() {
-                        "months" => Value::Int(ev.months),
-                        "cagr" => Value::Float(ev.cagr),
-                        "vol" => Value::Float(ev.vol),
-                        "sharpe" => Value::Float(ev.sharpe),
-                        "max_dd" => Value::Float(ev.max_dd),
-                        "beta" => Value::Float(ev.beta),
-                        "alpha" => Value::Float(ev.alpha),
-                        "t_alpha" => Value::Float(ev.t_alpha),
-                        "turnover" => Value::Float(ev.turnover),
-                        "cost_bps" => Value::Float(ev.cost_bps),
-                        other => {
-                            return Err(Ctl::Err(Diag::new("R0199", sp, format!("internal: `Evaluation.{other}` is not produced by `b3.evaluate`"))));
+                let ev = host.evaluate(tensor_of(&v[0]), &cfg_of(&v[1..]), protos).map_err(herr)?;
+                self.evaluation(result, &ev, sp)?
+            }
+            HostFn::Holdout { proto } => {
+                host.holdout(protos, proto as usize).map_err(herr)?;
+                Value::Holdout(proto)
+            }
+            HostFn::OpenOnce { result } => {
+                let Value::Holdout(k) = v[0] else { unreachable!("the checker gives `open_once` a holdout") };
+                let cfg = cfg_of(&v[2..]);
+                host.begin_opening(protos, k as usize).map_err(herr)?;
+                // the holdout's months exist only while the weights function runs
+                match self.call_value(&v[1], vec![], sp) {
+                    Ok(w) => {
+                        let w = self.deep_fwd(&w);
+                        let ev = host.finish_opening(protos, Ok(tensor_of(&w)), &cfg).map_err(herr)?;
+                        self.evaluation(result, &ev, sp)?
+                    }
+                    Err(Ctl::Err(d)) => {
+                        let spent = format!("the weights function failed while the holdout was open: {} {}", d.code, d.msg);
+                        // the opening is recorded as failed; only a ledger that cannot be written
+                        // takes precedence over the program's own error
+                        if let Err(e) = host.finish_opening(protos, Err(spent), &cfg) {
+                            if e.code == "R0500" {
+                                return Err(herr(e));
+                            }
                         }
-                    });
+                        let name = &protos[k as usize].name;
+                        let spent = format!("the holdout of protocol \"{name}\" was open, so it is spent: the failure is recorded in the ledger");
+                        let hint = match &d.hint {
+                            Some(h) => format!("{h}\n{spent}"),
+                            None => spent,
+                        };
+                        return Err(Ctl::Err(d.hint(hint)));
+                    }
+                    Err(other) => return Err(other),
                 }
-                Value::Struct(result, Rc::new(fields))
             }
         })
+    }
+
+    /// The prelude's `Evaluation`, field by field.
+    fn evaluation(&self, result: u32, ev: &EvalOut, sp: Span) -> R<Value> {
+        let def = &self.ck.structs[result as usize];
+        let mut fields = Vec::with_capacity(def.fields.len());
+        for (name, _) in &def.fields {
+            fields.push(match name.as_str() {
+                "months" => Value::Int(ev.months),
+                "cagr" => Value::Float(ev.cagr),
+                "vol" => Value::Float(ev.vol),
+                "sharpe" => Value::Float(ev.sharpe),
+                "max_dd" => Value::Float(ev.max_dd),
+                "beta" => Value::Float(ev.beta),
+                "alpha" => Value::Float(ev.alpha),
+                "t_alpha" => Value::Float(ev.t_alpha),
+                "turnover" => Value::Float(ev.turnover),
+                "cost_bps" => Value::Float(ev.cost_bps),
+                "trials" => Value::Int(ev.trials),
+                "dsr" => Value::Float(ev.dsr),
+                other => {
+                    return Err(Ctl::Err(Diag::new("R0199", sp, format!("internal: `Evaluation.{other}` is not produced by `b3.evaluate`"))));
+                }
+            });
+        }
+        Ok(Value::Struct(result, Rc::new(fields)))
     }
 }

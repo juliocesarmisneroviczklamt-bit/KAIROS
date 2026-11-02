@@ -1,0 +1,2 @@
+// The holdout comes after the research period.
+protocol "golden-v1" { research: until 201912  holdout: from 201901  rule: "r" }   // error: E0001

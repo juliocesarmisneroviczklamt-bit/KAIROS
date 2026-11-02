@@ -22,8 +22,8 @@ struct Parser {
 
 fn reserved_err(r: &str, sp: Span) -> Diag {
     let hint = match r {
-        "smooth" => "smooth relaxations arrive with `grad` in milestone M4",
-        "protocol" | "sink" => "protocols and affine (use-once) values arrive in milestone M5",
+        "smooth" => "`smooth` is reserved for declared relaxations; today use `smooth_max`, `smooth_min` and `smooth_step`",
+        "sink" => "sinks arrive in a later milestone",
         "kernel" | "compute" | "schedule" | "unsafe" | "parallel" => {
             "the kernel and low-level layers arrive with the native backend (M7)"
         }
@@ -137,6 +137,7 @@ impl Parser {
             Tok::Struct => Ok(Item::Struct(self.struct_decl()?)),
             Tok::Enum => Ok(Item::Enum(self.enum_decl()?)),
             Tok::Axis => Ok(Item::Axis(self.axis_decl()?)),
+            Tok::Protocol => Ok(Item::Protocol(self.protocol_decl()?)),
             _ => {
                 let (s, block_like) = self.stmt()?;
                 if !(self.eat(&Tok::Semi) || *self.peek() == Tok::Eof || block_like) {
@@ -196,6 +197,70 @@ impl Parser {
         };
         let body = self.block()?;
         Ok(FnDecl { name, type_params, params, ret, known_at, span: start.to(body.span), body })
+    }
+
+    /// `protocol "name" { research: until 201812  holdout: from 201901  rule: "..." }`
+    fn protocol_decl(&mut self) -> KResult<ProtocolDecl> {
+        let start = self.expect(Tok::Protocol, "`protocol`")?;
+        let name = match self.peek().clone() {
+            Tok::Str(s) => {
+                self.bump();
+                s
+            }
+            _ => return Err(self.err_expected("the protocol's name in quotes, e.g. `protocol \"momentum-v1\" { ... }`")),
+        };
+        self.expect(Tok::LBrace, "`{`")?;
+        let fields_hint = "the fields are `research: until YYYYMM`, `holdout: from YYYYMM`, `rule: \"...\"` and, optionally, `min_months: N` (default 12)";
+        let (mut until, mut from, mut rule, mut min_months) = (None, None, None, None);
+        loop {
+            while self.eat(&Tok::Semi) || self.eat(&Tok::Comma) {}
+            if self.eat(&Tok::RBrace) {
+                break;
+            }
+            let (field, fsp) = self.ident("a protocol field")?;
+            self.expect(Tok::Colon, "`:`")?;
+            let month = |p: &mut Self, kw: &str| -> KResult<i64> {
+                let (w, wsp) = p.ident(&format!("`{kw}`"))?;
+                if w != kw {
+                    return Err(Diag::new("E0001", wsp, format!("expected `{kw}`")).hint(fields_hint));
+                }
+                match p.peek().clone() {
+                    Tok::Int(v) if (100_001..=999_912).contains(&v) && (1..=12).contains(&(v % 100)) => {
+                        p.bump();
+                        Ok(v)
+                    }
+                    _ => Err(p.err_expected("a month as YYYYMM, e.g. `201812`")),
+                }
+            };
+            match field.as_str() {
+                "research" => until = Some(month(self, "until")?),
+                "holdout" => from = Some(month(self, "from")?),
+                "rule" => match self.peek().clone() {
+                    Tok::Str(s) => {
+                        self.bump();
+                        rule = Some(s);
+                    }
+                    _ => return Err(self.err_expected("the rule in quotes")),
+                },
+                // the holdout cannot be opened before it has this many months of data
+                "min_months" => match self.peek().clone() {
+                    Tok::Int(v) if (1..=1200).contains(&v) => {
+                        self.bump();
+                        min_months = Some(v);
+                    }
+                    _ => return Err(self.err_expected("a number of months between 1 and 1200")),
+                },
+                other => return Err(Diag::new("E0001", fsp, format!("unknown protocol field `{other}`")).hint(fields_hint)),
+            }
+        }
+        let span = start.to(self.prev_span());
+        let (Some(research_until), Some(holdout_from), Some(rule)) = (until, from, rule) else {
+            return Err(Diag::new("E0001", span, "the protocol needs `research`, `holdout` and `rule`").hint(fields_hint));
+        };
+        if holdout_from <= research_until {
+            return Err(Diag::new("E0001", span, "the holdout must start after the research period ends"));
+        }
+        Ok(ProtocolDecl { name, research_until, holdout_from, min_months: min_months.unwrap_or(12), rule, span })
     }
 
     fn axis_decl(&mut self) -> KResult<AxisDecl> {
@@ -362,7 +427,7 @@ impl Parser {
                 let span = start.to(init.span);
                 Ok((Stmt::Let { mutable, pat, ty, init, span }, false))
             }
-            Tok::Fn | Tok::Struct | Tok::Enum | Tok::Axis => {
+            Tok::Fn | Tok::Struct | Tok::Enum | Tok::Axis | Tok::Protocol => {
                 Err(Diag::new("E0003", self.span(), "declarations are only allowed at the top level (for now)"))
             }
             _ => {

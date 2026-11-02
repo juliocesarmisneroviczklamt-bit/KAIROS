@@ -29,6 +29,7 @@ pub enum Tok {
     Struct,
     Enum,
     Axis,
+    Protocol,
     Inout,
     True,
     False,
@@ -83,8 +84,8 @@ pub struct Token {
 }
 
 /// Reserved for later milestones (axes, time, smooth, linear types, kernels...).
-pub const RESERVED: [&str; 17] = [
-    "trait", "protocol", "kernel", "compute", "schedule", "unsafe", "parallel", "smooth", "sink",
+pub const RESERVED: [&str; 16] = [
+    "trait", "kernel", "compute", "schedule", "unsafe", "parallel", "smooth", "sink",
     "import", "pub", "as", "loop", "type", "const", "use", "self",
 ];
 
@@ -106,6 +107,7 @@ fn keyword(s: &str) -> Option<Tok> {
         "enum" => Tok::Enum,
         "inout" => Tok::Inout,
         "axis" => Tok::Axis,
+        "protocol" => Tok::Protocol,
         "true" => Tok::True,
         "false" => Tok::False,
         "and" => Tok::And,
@@ -143,6 +145,7 @@ pub fn describe(t: &Tok) -> String {
                 Tok::Enum => "enum",
                 Tok::Inout => "inout",
                 Tok::Axis => "axis",
+                Tok::Protocol => "protocol",
                 Tok::True => "true",
                 Tok::False => "false",
                 Tok::And => "and",

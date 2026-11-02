@@ -15,7 +15,7 @@
   - o momentum escrito em Kairós sobre os dados reais da B3 reproduz **bit a bit** o resultado do laboratório em Rust (`tests/b3_bridge.rs`).
 - **M3 (tipos temporais) pronto:** usar informação do futuro numa decisão é erro de compilação (§6.1). A versão do momentum que olha o mês corrente não compila.
 - **M4 (diferenciação nativa + motor de IA) pronto:** `grad` reverso sobre o caminho executado, espaço tangente (aritmética de structs), funções genéricas, regras suaves e um MLP com Adam escritos em Kairós que aprende (§8.1).
-- A garantia de holdout chega no M5 (§13).
+- **M5 (holdout de uso único) pronto:** protocolos cercam os dados de pesquisa e reservam o holdout para todos os programas; o holdout abre uma vez (E0501 na compilação, R0502 entre execuções); toda avaliação vira tentativa no registro, com DSR (§7.1).
 
 ## 1. Por que mais uma linguagem
 
@@ -107,10 +107,10 @@ fn fast_sum(x: List[f64]) -> f64 {
 - `struct`, `enum`, `inout`;
 - `and`, `or`, `not`, `true`, `false`.
 
-**No M2:** `axis`.
+**No M2:** `axis`. **No M5:** `protocol`.
 
 **Reservadas para os próximos marcos:** usar qualquer uma como nome é erro E0002, com a dica de quando ela chega.
-- `smooth` (M4), `protocol` e `sink` (M5);
+- `smooth` (relaxações declaradas; hoje há `smooth_max`, `smooth_min` e `smooth_step`) e `sink`;
 - `kernel`, `compute`, `schedule`, `unsafe`, `parallel` (M7);
 - `trait`, `import`, `pub`, `as`, `loop`, `type`, `const`, `use`, `self`.
 
@@ -342,6 +342,74 @@ let again = holdout.open_once(|h| b3.evaluate(other, h))         // error[E0501]
 - **O `protocol` é gravado com hash** na primeira execução; mudar o texto cria outro protocolo.
 - **Toda `b3.evaluate` em dados de pesquisa vira tentativa no registro**, e `Evaluation.dsr` já vem descontado pelo número de tentativas.
 
+### 7.1 O que o M5 implementa (v0.5.0)
+
+A sintaxe ficou mais simples que o esboço acima. Os dados continuam vindo de `b3.*`, e o protocolo é que decide o que cada programa enxerga:
+
+```krs
+protocol "momentum-demo" {
+    research: until 202610          // último mês da pesquisa (AAAAMM)
+    holdout: from 202611            // primeiro mês do holdout
+    min_months: 12                  // opcional (padrão 12): o holdout só abre com 12 meses de dados
+    rule: "accept if the holdout's CAPM alpha > 0 and its PSR >= 90%"
+}
+
+fn weights() -> Tensor[month, asset; f64] { ... }                // lê b3.monthly_returns() etc.
+
+let research = b3.evaluate(weights(), cost_bps: 25.0, lag: 0)    // só a pesquisa existe aqui
+let h = b3.holdout("momentum-demo")                              // h: Holdout (afim)
+let final = open_once(h, || weights(), cost_bps: 25.0, lag: 0)   // o holdout só existe aqui dentro
+```
+
+**O protocolo cerca os dados.**
+- **No próprio programa:** quem declara um protocolo só enxerga os meses até `research: until`. Isso vale para `b3.monthly_returns()`, `b3.eligible()`, `b3.cdi()`, `b3.months()` e `b3.month_index()`; os tensores simplesmente terminam ali.
+- **Em todos os programas:** o protocolo é registrado com hash no livro-razão `results/holdout_ledger.csv` na primeira execução. Enquanto o holdout não for aberto, os meses dele ficam escondidos de **todos** os programas, e uma nota avisa onde os dados param.
+- **Com defasagem:** com `lag: k > 0`, a carteira do último mês visível precisaria dos primeiros pregões do mês seguinte, então ela não é negociada.
+
+**O holdout abre uma vez.**
+- **Na compilação:** `Holdout` é afim. `open_once` o consome, e usá-lo de novo, dentro de um laço ou capturado por uma lambda é **E0501**.
+- **Uma lambda só:** `open_once` recebe a *função* que calcula os pesos, não os pesos. Os meses do holdout passam a existir enquanto ela roda. Fora dela, a cerca continua.
+- **A avaliação do holdout:**
+  - é uma carteira nova a partir do primeiro mês do holdout;
+  - não entra no registro de tentativas: vem com `trials = 1`;
+  - o `dsr` dela é a probabilidade de o Sharpe ser positivo (PSR).
+- **Entre execuções:** o livro-razão grava a abertura antes de qualquer mês do holdout ser visto, e depois o resultado. Rodar de novo dá **R0502** já em `b3.holdout(...)`, antes da pesquisa, com a data e o resultado da abertura.
+- **Se a função de pesos falhar durante a abertura,** o holdout está gasto do mesmo jeito: a falha fica registrada.
+- **R0503:** se o holdout ainda não tem `min_months` meses de dados, nada é aberto e nada é registrado.
+
+**Um holdout novo começa depois de tudo o que já foi visto.**
+- **A marca d'água:** o livro-razão guarda o último mês que qualquer programa Kairós (ou abertura) viu.
+- **R0502 no registro:** um protocolo cujo holdout comece até essa marca é recusado na primeira execução.
+- **O livro-razão nasce com a busca do laboratório:** `quant-b3 busca` já abriu 2019-01..2026-10 (protocolo `results/protocolo_busca.md`). Por isso hoje **o único holdout limpo é o futuro**, a partir de 2026-11.
+- **Abrir um holdout que se sobrepõe a outro pendente** estraga o outro, que passa a dar R0502.
+- **`kairos ledger`** mostra o livro-razão, e **`kairos ledger withdraw <nome>`** desiste de um protocolo nunca aberto (os meses dele deixam de ser cercados).
+
+**Toda avaliação de pesquisa é uma tentativa.**
+- **O registro:** cada `b3.evaluate` entra em `results/registro_testes.csv`, o mesmo registro das estratégias que o laboratório testou em Rust.
+- **A chave:** nome do programa, hash dos pesos e opções.
+- **Sem contar duas vezes:** uma série de retornos idêntica a uma já registrada (mesmo n, Sharpe, assimetria e curtose) não conta de novo.
+- **Os campos novos de `Evaluation`:**
+  - `trials` é o tamanho do registro;
+  - `dsr` é o Deflated Sharpe Ratio (Bailey & López de Prado), a probabilidade de o Sharpe verdadeiro superar o melhor de `trials` tentativas feitas sem habilidade nenhuma.
+- **Sem pasta de resultados** (testes, uso embutido), o livro-razão e o registro ficam em memória. `KAIROS_RESULTS` escolhe outra pasta.
+
+**Erros novos:**
+
+| código | situação |
+|---|---|
+| E0501 | holdout usado duas vezes, num laço ou numa lambda |
+| R0500 | livro-razão ou registro ilegível ou impossível de gravar (nada roda sem eles) |
+| R0502 | holdout já aberto, protocolo retirado, ou holdout que começa em meses já vistos |
+| R0503 | o holdout ainda não tem `min_months` meses de dados (nada é gravado) |
+| R0504 | `b3.evaluate` ou `open_once` dentro da função de pesos de um `open_once` |
+| R0505 | registro da falha da função de pesos durante a abertura |
+
+O E0502 do esboço virou R0502: quem detecta a segunda abertura entre execuções é o runtime, não o compilador.
+
+**Limites:**
+- **O livro-razão mantém honesto quem quer ser honesto.** É um arquivo comum, que o dono pode editar.
+- **Ele só sabe o que programas Kairós viram.** O que alguém olhou em planilha, Python ou nas ferramentas em Rust do laboratório fica de fora; por isso o protocolo bom é o que reserva o futuro.
+
 ## 8. Diferenciação nativa e regras suaves (M4, garantia nº 3)
 
 - `grad(f)` devolve o gradiente em relação ao 1º argumento; `grad(f, wrt: 2)` escolhe outro. `value_and_grad(f)` devolve os dois.
@@ -517,6 +585,6 @@ print(holdout.open_once(|h| b3.evaluate(|m| weights(θ, h.features(m)), h)))
 | M2 | tensores com eixos nomeados + ponte com os dados da B3 | ✅ erros de eixo na compilação (E0200–E0202); o momentum em Kairós (`examples/momentum.krs`) reproduz **bit a bit** os 9 números do `quant-b3` (CAGR, vol, Sharpe, maxDD, beta, alpha, t, giro, custo) |
 | M3 | tipos temporais | ✅ o momentum continua idêntico ao `quant-b3` e a versão que olha `ret[month: m]` (o futuro) **não compila** (E0301); 14 testes de vazamento: `if`, `continue`, laços, estatística do histórico inteiro, funções anotadas, escolha por backtest |
 | M4 | `grad` nativo + `smooth` + motor de IA em Kairós (MLP, MSE, SGD, Adam) | ✅ gradiente confere com diferença finita (até 10⁻¹⁰); o MLP escrito em Kairós aprende `y = x³ − x` (perda 0,566 → 0,00017), com os mesmos bits em todos os sistemas |
-| M5 | holdout de uso único + protocolo + registro e DSR automáticos | 2º acesso = erro; tentativas no registro |
+| M5 | holdout de uso único + protocolo + registro e DSR automáticos | ✅ 2º acesso = erro (E0501 na compilação, R0502 entre execuções, pelo livro-razão); o protocolo cerca os dados de pesquisa e reserva o holdout para todos os programas; toda avaliação vira tentativa no `registro_testes.csv` com DSR; 7 testes dourados e 5 de integração num mercado sintético |
 | M6 | primeiro modelo inédito (carteira com IR suave) | protocolo antes; simulador real; DSR; paper trading |
 | M7 | back-end nativo Cranelift + `kairos-bench`; candidato: elemento `t3` (pesos ternários {−1, 0, +1}, 5 por byte, matmul só com soma e subtração, como no BitNet b1.58), com kernel CPU e CUDA | ≤ 1,2× Rust nos benchmarks numéricos |

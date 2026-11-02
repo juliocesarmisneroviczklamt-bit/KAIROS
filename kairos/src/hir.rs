@@ -71,6 +71,8 @@ pub enum Builtin {
     SmoothMax,
     SmoothMin,
     SmoothStep,
+    // ---- M5
+    OpenOnce,
     /// element-wise `and` / `or` of bool tensors (the scalar forms short-circuit and are HIR nodes)
     TAnd,
     TOr,
@@ -135,6 +137,7 @@ pub const BUILTINS: &[(&str, Builtin)] = &[
     ("smooth_max", Builtin::SmoothMax),
     ("smooth_min", Builtin::SmoothMin),
     ("smooth_step", Builtin::SmoothStep),
+    ("open_once", Builtin::OpenOnce),
     // keywords, so never reachable by name: listed only for messages
     ("and", Builtin::TAnd),
     ("or", Builtin::TOr),
@@ -149,8 +152,14 @@ pub enum HostFn {
     Months,
     Tickers,
     MonthIndex,
-    /// args: weights, cost_bps, lag, capital, real_costs, tax; returns the `Evaluation` struct
+    /// args: weights, cost_bps, lag, capital, real_costs, tax, research_until (YYYYMM, 0: the
+    /// whole history), protocol name; returns the `Evaluation` struct
     Evaluate { result: u32 },
+    /// `b3.holdout("name")`: the holdout of a protocol (M5)
+    Holdout { proto: u32 },
+    /// `open_once(h, weights, ...)`: args as `Evaluate`, then the protocol: name, research_until,
+    /// holdout_from, rule
+    OpenOnce { result: u32 },
 }
 
 /// Selector of one tensor axis: `axis: i` (removes the axis) or `axis: a .. b` / `a ..= b`.

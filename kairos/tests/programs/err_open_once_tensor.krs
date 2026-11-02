@@ -1,0 +1,6 @@
+// `open_once` takes the function that computes the weights, not the weights: the months of the
+// holdout exist only while that function runs.
+protocol "golden-v1" { research: until 201812  holdout: from 201901  rule: "accept if alpha > 0" }
+let w = zeros_like(b3.monthly_returns())
+let h = b3.holdout("golden-v1")
+print(open_once(h, w).sharpe)   // error: E0101

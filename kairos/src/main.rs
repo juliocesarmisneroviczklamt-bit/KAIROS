@@ -11,6 +11,9 @@ usage:
   kairos run <file.krs>     check and run a program
   kairos check <file.krs>   type-check only
   kairos repl               interactive session (also: just `kairos`)
+  kairos ledger             the holdout ledger: months seen, protocols, holdouts opened
+  kairos ledger withdraw <protocol>
+                            give up a protocol whose holdout was never opened
   kairos --version";
 
 fn main() {
@@ -41,6 +44,7 @@ fn real_main(args: Vec<String>) -> i32 {
         Some("run") => file_cmd(args.get(2), true),
         Some("check") => file_cmd(args.get(2), false),
         Some("repl") | None => repl(),
+        Some("ledger") => ledger_cmd(&args[2..]),
         Some("--version") | Some("-V") => {
             println!("kairos {}", env!("CARGO_PKG_VERSION"));
             0
@@ -69,6 +73,9 @@ fn file_cmd(path: Option<&String>, run: bool) -> i32 {
         }
     };
     let mut s = Session::new(Box::new(std::io::stdout()));
+    // the program's name in the registry of trials
+    let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+    s.host().set_program(&stem);
     let res = if run { s.run(path, &src).map(|_| ()) } else { s.check(path, &src) };
     match res {
         Ok(()) => {
@@ -79,6 +86,35 @@ fn file_cmd(path: Option<&String>, run: bool) -> i32 {
         }
         Err(d) => {
             eprint!("{}", s.render(&d));
+            1
+        }
+    }
+}
+
+/// `kairos ledger [withdraw <protocol>]`
+fn ledger_cmd(rest: &[String]) -> i32 {
+    let host = kairos::bridge::Host::new();
+    let res = match rest {
+        [] => host.ledger_report(),
+        [w, which] if w == "withdraw" => host.withdraw(which),
+        _ => {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+    };
+    match res {
+        Ok(text) => {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error[{}]: {}", e.code, e.msg);
+            if let Some(h) = e.hint {
+                eprintln!("  = hint: {h}");
+            }
             1
         }
     }
@@ -113,6 +149,7 @@ fn open_delims(src: &str) -> i32 {
 fn repl() -> i32 {
     println!("Kairós {} — type :help for help, :q to quit", env!("CARGO_PKG_VERSION"));
     let mut s = Session::new(Box::new(std::io::stdout()));
+    s.host().set_program("repl");
     let stdin = std::io::stdin();
     let mut buf = String::new();
     let mut n = 0;
