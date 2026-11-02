@@ -1,0 +1,8 @@
+axis feature
+axis output
+let x = zeros(month: 3, asset: 2)
+let y = zeros(asset: 2)
+let b = x > 0.0
+let o = observed(x)
+let p = observed(x[asset: 0 .. 1], lag: -1)
+let d = observed(zeros(day: 3), lag: 2)

@@ -1,0 +1,10 @@
+let d = b3.daily_returns()
+let m = merge_days(d)
+let s = d[session: 0]
+let c = b3.cdi()
+let e = b3.eligible()
+let r = b3.monthly_returns()
+let ss = b3.sessions()
+let sd = b3.session_dates()
+let nf = b3.nefin("rm_rf", vw: true)
+let nd = b3.nefin_daily("rf")

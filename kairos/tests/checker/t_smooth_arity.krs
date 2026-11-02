@@ -1,0 +1,1 @@
+let a = smooth_max(1.0, scale: 10.0)

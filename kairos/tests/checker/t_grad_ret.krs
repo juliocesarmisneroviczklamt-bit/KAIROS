@@ -1,0 +1,2 @@
+fn f(x: f64) -> str { "a" }
+let g = grad(f)

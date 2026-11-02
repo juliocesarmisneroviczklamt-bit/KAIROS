@@ -1,0 +1,3 @@
+fn f(x: Tensor[month, asset; f64], m: i64) -> Tensor[asset; f64] { x[month: m] }
+fn g(x: Tensor[asset, month; f64]) -> Tensor[month, asset; f64] { x }
+fn h(b: Tensor[asset; bool]) -> f64 { count(b) }

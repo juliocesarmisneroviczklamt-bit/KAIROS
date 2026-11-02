@@ -1,0 +1,3 @@
+let a = zeros(month: 2) > 0.0
+let c = zeros(asset: 2) > 0.0
+let z = a or c

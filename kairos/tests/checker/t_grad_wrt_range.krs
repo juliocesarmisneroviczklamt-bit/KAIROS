@@ -1,0 +1,3 @@
+fn f(x: f64) -> f64 { x }
+let g = grad(f, wrt: 2)
+let h = grad(f, wrt: -1)

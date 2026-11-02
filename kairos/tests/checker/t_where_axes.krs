@@ -1,0 +1,2 @@
+let c = zeros(month: 2) > 0.0
+let w = where(c, zeros(asset: 2), 0.0)

@@ -1,7 +1,7 @@
 // The type checker of Kairós, written in Kairós (M12), second part: the bodies. Statements,
 // patterns, expressions and calls get the types src/types.rs gives them, by the same
 // unification in the same order, and fail with the same first error. What is not ported yet
-// (tensor operations, `b3`, `grad`, holdouts...) stops the check with the code K0000.
+// (a builtin added to the Rust checker and not here yet) stops the check with the code K0000.
 import "check.krs"
 
 fn mix_hint() -> str {
@@ -691,7 +691,11 @@ fn index_expr(inout ck: Checker, e: Node) -> Ty {
     let obj = e.kids[0]
     let to = expr0(inout ck, obj)
     if ck.failed { return Ty.TUnit }
-    if is_tensor(ck, to) { return unsupported(inout ck, e, "indexing a tensor") }
+    if is_tensor(ck, to) {
+        let kept = tensor_sels(inout ck, tensor_axes(ck, to), to, e.kids[1].kids)
+        if ck.failed { return Ty.TUnit }
+        return mk_tensor(kept, elem_of(ck, to))
+    }
     let idx = list_index(inout ck, e.kids[1].kids, to)
     if ck.failed { return Ty.TUnit }
     match resolve(ck, to) {
@@ -749,7 +753,18 @@ fn logic_expr(inout ck: Checker, e: Node) -> Ty {
         expect_at(inout ck, tr, Ty.TBool, r)
         return Ty.TBool
     }
-    unsupported(inout ck, e, "`" + e.kind + "` on tensors")
+    // element-wise on bool tensors (no short-circuit)
+    let word = "`" + e.kind + "`"
+    let axes = frame_axes(inout ck, [(tl, l), (tr, r)], word, e)
+    if ck.failed { return Ty.TUnit }
+    let first = elem_of(ck, tl)
+    let et = elem_of(ck, tr)
+    if not unify(inout ck, first, et) {
+        return fail_at(inout ck, "E0101", r, word + " mixes `" + show(ck, first) + "` and `" + show(ck, et) + "` values", "")
+    }
+    let elem = resolve(ck, first)
+    if elem != Ty.TBool { return fail_at(inout ck, "E0101", e, word + " needs `bool` values, found `" + show(ck, elem) + "`", "") }
+    mk_tensor(axes, Ty.TBool)
 }
 
 fn assign_expr(inout ck: Checker, e: Node) -> Ty {
@@ -758,12 +773,26 @@ fn assign_expr(inout ck: Checker, e: Node) -> Ty {
     if target.kind == "index" {
         let whole = place(inout ck, target.kids[0])
         if ck.failed { return Ty.TUnit }
-        if is_tensor(ck, whole.0) { return unsupported(inout ck, e, "assigning to a tensor slice") }
+        let tw = whole.0
+        if is_tensor(ck, tw) {
+            let elem = elem_of(ck, tw)
+            let kept = tensor_sels(inout ck, tensor_axes(ck, tw), tw, target.kids[1].kids)
+            if ck.failed { return Ty.TUnit }
+            let tv = expr1(inout ck, value, elem)
+            if ck.failed { return Ty.TUnit }
+            check_tensor_store(inout ck, kept, elem, tv, e.text, true, value, e)
+            return Ty.TUnit
+        }
     }
     let p = place(inout ck, target)
     if ck.failed { return Ty.TUnit }
     let t = p.0
-    if is_tensor(ck, t) { return unsupported(inout ck, e, "assigning a tensor") }
+    if is_tensor(ck, t) {
+        let tv = expr1(inout ck, value, t)
+        if ck.failed { return Ty.TUnit }
+        check_tensor_store(inout ck, tensor_axes(ck, t), elem_of(ck, t), tv, e.text, false, value, e)
+        return Ty.TUnit
+    }
     let tv = expr1(inout ck, value, t)
     expect_at(inout ck, tv, t, value)
     if ck.failed { return Ty.TUnit }
@@ -1089,7 +1118,7 @@ fn binary(inout ck: Checker, e: Node) -> Ty {
     if ck.failed { return Ty.TUnit }
     let tr = expr1(inout ck, e.kids[1], tl)
     if ck.failed { return Ty.TUnit }
-    if is_tensor(ck, tl) or is_tensor(ck, tr) { return unsupported(inout ck, e, "arithmetic on tensors") }
+    if is_tensor(ck, tl) or is_tensor(ck, tr) { return tensor_binary(inout ck, op, tl, tr, e.kids[0], e.kids[1], e) }
     let tg = tangent_binary(inout ck, op, tl, tr, e)
     if ck.failed { return Ty.TUnit }
     if tg.0 { return tg.1 }
@@ -1232,7 +1261,22 @@ fn b3_call(inout ck: Checker, e: Node) -> Ty {
         expect_at(inout ck, t, Ty.TInt, x)
         return Ty.TInt
     }
-    if method == "evaluate" or method == "simulate" { return unsupported(inout ck, e, what) }
+    if method == "evaluate" or method == "simulate" {
+        let first = call_args[0]
+        if first.kids[0].kind != "-" { return fail_at(inout ck, "E0120", first.kids[1], "positional arguments must come before named ones", "") }
+        var named: List[(str, Node, Node)] = []
+        for k in 1..len(call_args) {
+            let a = call_args[k]
+            if a.kids[0].kind == "-" {
+                return fail_at(inout ck, "E0120", a.kids[1], "positional arguments must come before named ones", "e.g. `b3.evaluate(w, cost_bps: 25.0, lag: 1)`")
+            }
+            named.push((a.kids[0].text, a.kids[0], a.kids[1]))
+        }
+        let t = weights_and_options(inout ck, "b3.evaluate", first.kids[1], false, named, e)
+        if ck.failed or method == "evaluate" { return t }
+        if not contains(ck.struct_ids, "Simulation") { return fail_at(inout ck, "E0100", e, "the prelude's `Simulation` struct is missing", "") }
+        return Ty.TStruct(ck.struct_ids["Simulation"])
+    }
     if method == "record_trial" {
         for k in 0..len(call_args) {
             let want = if k < 4 { Ty.TStr } else { Ty.TList(fl) }
@@ -1633,25 +1677,238 @@ fn call_builtin(inout ck: Checker, name: str, has_recv: bool, recv: Node, call_a
     unsupported(inout ck, e, "`" + name + "`")
 }
 
-// `max(a, b)` / `min(a, b)` of two values.
+// ------------------------------------------------------------------ tensors
+//
+// A tensor type is `Tensor[axes; f64|bool]`. Element-wise operations need one operand's axes to
+// contain every other operand's (smaller operands repeat along the missing axes); anything else
+// is E0201. Reductions, indices, ranks and contractions always name the axis.
+
+// The tensor type over these axes (sorted); with no axes left it is a scalar.
+fn mk_tensor(axes: List[i64], elem: Ty) -> Ty {
+    if len(axes) == 0 { return elem }
+    Ty.TTensor(sorted_ids(axes), elem)
+}
+
+fn tensor_axes(ck: Checker, t: Ty) -> List[i64] {
+    match resolve(ck, t) {
+        TTensor(a, x) => a,
+        _ => [],
+    }
+}
+
+fn axes_str(ck: Checker, axes: List[i64]) -> str {
+    var names = []
+    for a in axes { names.push(ck.axes[a].name) }
+    "[" + join(names, ", ") + "]"
+}
+
+fn int_expr(inout ck: Checker, e: Node) {
+    let t = expr1(inout ck, e, Ty.TInt)
+    expect_at(inout ck, t, Ty.TInt, e)
+}
+
+// An integer written as a constant (`3`, `-1`): (it is one, its value).
+fn int_const(inout ck: Checker, e: Node, what: str) -> (bool, i64) {
+    if e.kind == "int" { return (true, parse_int(e.text)) }
+    if e.kind == "neg" and e.kids[0].kind == "int" { return (true, -parse_int(e.kids[0].text)) }
+    let _ = fail_at(inout ck, "E0101", e, "`" + what + "` must be an integer constant", "")
+    (false, 0)
+}
+
+// An axis written as an argument: `over: asset`, `size(x, month)`.
+fn axis_of_expr(inout ck: Checker, e: Node) -> i64 {
+    if e.kind == "name" { return axis_id(inout ck, e.text, e.lo, e.hi) }
+    let _ = fail_at(inout ck, "E0200", e, "expected an axis name", "e.g. `over: asset`")
+    -1
+}
+
+// The element type for a new tensor: an integer literal or unknown becomes `f64`; only `f64`
+// and `bool` are allowed.
+fn tensor_elem(inout ck: Checker, t: Ty, e: Node) -> Ty {
+    var x = resolve(ck, t)
+    match x {
+        TVar(v) => {
+            let _ = unify(inout ck, x, Ty.TFloat)
+            x = Ty.TFloat
+        },
+        _ => {},
+    }
+    if not (x == Ty.TFloat or x == Ty.TBool) {
+        return fail_at(inout ck, "E0101", e, "tensor elements must be `f64` or `bool`, found `" + show(ck, x) + "`", "")
+    }
+    x
+}
+
+fn need_tensor(inout ck: Checker, name: str, t: Ty, e: Node) -> bool {
+    if is_tensor(ck, t) { return true }
+    let _ = fail_at(inout ck, "E0101", e, "`" + name + "` needs a tensor, found `" + show(ck, t) + "`", "")
+    false
+}
+
+fn need_elem(inout ck: Checker, name: str, t: Ty, want: Ty, e: Node) {
+    if elem_of(ck, t) != want {
+        let _ = fail_at(inout ck, "E0101", e, "`" + name + "` needs a `" + show(ck, want) + "` tensor, found `" + show(ck, t) + "`", "")
+    }
+}
+
+fn has_axis(inout ck: Checker, axes: List[i64], a: i64, t: Ty, at: Node) {
+    if not contains(axes, a) {
+        let _ = fail_at(inout ck, "E0201", at, "`" + show(ck, t) + "` has no axis `" + ck.axes[a].name + "`", "")
+    }
+}
+
+fn without(axes: List[i64], a: i64) -> List[i64] {
+    var out: List[i64] = []
+    for x in axes {
+        if x != a { out.push(x) }
+    }
+    out
+}
+
+// Selects `x[month: i, asset: a .. b]`: the axes that remain.
+fn tensor_sels(inout ck: Checker, axes: List[i64], t: Ty, idx: List[Node]) -> List[i64] {
+    var kept = axes
+    var seen: List[i64] = []
+    for it in idx {
+        let an = it.kids[0]
+        let ie = it.kids[1]
+        if an.kind == "-" {
+            let _ = fail_at(inout ck, "E0202", ie, "tensor indices must name their axis", "write `x[" + ck.axes[axes[0]].name + ": i]`: axes have names, not positions")
+            return kept
+        }
+        let id = axis_id(inout ck, an.text, an.lo, an.hi)
+        if ck.failed { return kept }
+        if not contains(axes, id) {
+            let _ = fail_at(inout ck, "E0201", an, "`" + show(ck, t) + "` has no axis `" + an.text + "`", "")
+            return kept
+        }
+        if contains(seen, id) {
+            let _ = fail_at(inout ck, "E0112", an, "axis `" + an.text + "` is indexed twice", "")
+            return kept
+        }
+        if ie.kind == "range" {
+            int_expr(inout ck, ie.kids[0])
+            int_expr(inout ck, ie.kids[1])
+        } else {
+            kept = without(kept, id)
+            int_expr(inout ck, ie)
+        }
+        if ck.failed { return kept }
+        seen.push(id)
+    }
+    kept
+}
+
+// The axes of an element-wise combination: the tensor operand with the most axes (the last
+// of them) must contain every other tensor operand's axes. Scalars repeat everywhere.
+fn frame_axes(inout ck: Checker, ops: List[(Ty, Node)], what: str, e: Node) -> List[i64] {
+    var parts: List[(i64, List[i64])] = []
+    for i in 0..len(ops) {
+        if is_tensor(ck, ops[i].0) { parts.push((i, tensor_axes(ck, ops[i].0))) }
+    }
+    if len(parts) == 0 { return [] }
+    var bi = 0
+    for k in 0..len(parts) {
+        if len(parts[k].1) >= len(parts[bi].1) { bi = k }
+    }
+    for k in 0..len(parts) {
+        var inside = true
+        for x in parts[k].1 {
+            if not contains(parts[bi].1, x) { inside = false }
+        }
+        if not inside {
+            let _ = fail_at(inout ck, "E0201", e, "incompatible axes in " + what, "element-wise operations need one side's axes to contain the other's: reduce with `sum(x, over: ...)`, select with `x[axis: i]` or use `contract(x, w, over: ...)`")
+            return []
+        }
+    }
+    parts[bi].1
+}
+
+// `x op y` where at least one side is a tensor.
+fn tensor_binary(inout ck: Checker, op: str, tl: Ty, tr: Ty, l: Node, r: Node, e: Node) -> Ty {
+    let what = if l.kind == "name" and r.kind == "name" { "`" + l.text + " " + op + " " + r.text + "`" } else { "`" + op + "`" }
+    let axes = frame_axes(inout ck, [(tl, l), (tr, r)], what, e)
+    if ck.failed { return Ty.TUnit }
+    let el = elem_of(ck, tl)
+    let er = elem_of(ck, tr)
+    if not unify(inout ck, el, er) {
+        let x = show(ck, el)
+        let y = show(ck, er)
+        let mixed = (x == "i64" and y == "f64") or (x == "f64" and y == "i64")
+        return fail_at(inout ck, if mixed { "E0107" } else { "E0101" }, e, "cannot apply `" + op + "` to `" + show(ck, tl) + "` and `" + show(ck, tr) + "`", if mixed { mix_hint() } else { "" })
+    }
+    let elem = resolve(ck, el)
+    if op == "==" or op == "!=" { return mk_tensor(axes, Ty.TBool) }
+    if elem != Ty.TFloat { return fail_at(inout ck, "E0101", e, "`" + op + "` needs `f64` values, found `" + show(ck, elem) + "`", "") }
+    if op == "<" or op == "<=" or op == ">" or op == ">=" { mk_tensor(axes, Ty.TBool) } else { mk_tensor(axes, Ty.TFloat) }
+}
+
+// Store into a tensor: `slice` is a selection like `x[month: i] = v`, otherwise the whole
+// variable. A slice takes a scalar (filling it) or a tensor with exactly its axes; `op=` also
+// accepts any tensor whose axes the destination contains. A whole variable keeps its type.
+fn check_tensor_store(inout ck: Checker, dst: List[i64], elem: Ty, tv: Ty, op: str, slice: bool, value: Node, e: Node) {
+    let dst_ty = mk_tensor(dst, elem)
+    if op != "=" {
+        if elem != Ty.TFloat {
+            let _ = fail_at(inout ck, "E0101", e, "`" + op + "=` needs `f64` values, found `" + show(ck, dst_ty) + "`", "")
+            return
+        }
+        if is_tensor(ck, tv) {
+            var inside = true
+            for a in tensor_axes(ck, tv) {
+                if not contains(dst, a) { inside = false }
+            }
+            if not (elem_of(ck, tv) == Ty.TFloat and inside) {
+                let _ = fail_at(inout ck, "E0201", value, "cannot apply `" + op + "=` with `" + show(ck, tv) + "` to `" + show(ck, dst_ty) + "`", "the right side's axes must be among the destination's")
+            }
+            return
+        }
+        expect_at(inout ck, tv, Ty.TFloat, value)
+        return
+    }
+    if is_tensor(ck, tv) {
+        if tensor_axes(ck, tv) != dst {
+            let _ = fail_at(inout ck, "E0201", value, "cannot store `" + show(ck, tv) + "` into `" + show(ck, dst_ty) + "`", "the stored tensor must have exactly the destination's axes")
+        } else if elem_of(ck, tv) != elem {
+            mismatch(inout ck, show(ck, tv), show(ck, dst_ty), value.lo, value.hi, "")
+        }
+        return
+    }
+    if slice or len(dst) == 0 {
+        expect_at(inout ck, tv, elem, value)
+        return
+    }
+    mismatch(inout ck, show(ck, tv), show(ck, dst_ty), value.lo, value.hi, "to set every element write `x = full_like(x, v)`, or assign a slice: `x[month: i] = v`")
+}
+
+// `max(a, b)` / `min(a, b)`: numbers, or element-wise when a tensor is involved.
 fn max_min2(inout ck: Checker, name: str, all: List[(Node, bool)], e: Node) -> Ty {
     let ta = expr0(inout ck, all[0].0)
     if ck.failed { return Ty.TUnit }
     let ea = elem_of(ck, ta)
     let tb = expr1(inout ck, all[1].0, ea)
     if ck.failed { return Ty.TUnit }
-    if is_tensor(ck, ta) or is_tensor(ck, tb) { return unsupported(inout ck, e, "`" + name + "` of tensors") }
+    if is_tensor(ck, ta) or is_tensor(ck, tb) {
+        let axes = frame_axes(inout ck, [(ta, all[0].0), (tb, all[1].0)], "`" + name + "`", e)
+        if ck.failed { return Ty.TUnit }
+        let eb = elem_of(ck, tb)
+        if not unify(inout ck, ea, eb) or resolve(ck, ea) != Ty.TFloat {
+            return fail_at(inout ck, "E0101", e, "`" + name + "` needs `f64` values, found `" + show(ck, ta) + "` and `" + show(ck, tb) + "`", "")
+        }
+        return mk_tensor(axes, Ty.TFloat)
+    }
     expect_at(inout ck, tb, ta, all[1].0)
     ensure_numeric(inout ck, ta, e, "`" + name + "`")
     ta
 }
 
-// The builtins that understand tensors, on scalars and lists (their tensor forms are not
-// ported yet).
+// The builtins that understand tensors.
 fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
-    if contains(["observed", "grad", "value_and_grad", "randn", "smooth_max", "smooth_min", "smooth_step", "open_once"], name) {
-        return unsupported(inout ck, e, "`" + name + "`")
-    }
+    if name == "observed" { return observed_ty(inout ck, all, named, e) }
+    if name == "grad" or name == "value_and_grad" { return grad_ty(inout ck, name, all, named, e) }
+    if name == "randn" { return randn_ty(inout ck, all, named, e) }
+    if name == "smooth_max" or name == "smooth_min" or name == "smooth_step" { return smooth_ty(inout ck, name, all, named, e) }
+    if name == "open_once" { return open_once_ty(inout ck, all, named, e) }
     let n = len(all)
     let takes_over = contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count", "rank", "top_k", "bottom_k", "nan_quantile", "contract"], name)
     let takes_sizes = name == "zeros" or name == "ones" or name == "full"
@@ -1661,15 +1918,42 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
             if q.0 != "over" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "the axis is given as `over: axis`") }
         }
     }
-    if takes_over and len(named) > 0 { return unsupported(inout ck, e, "`over:`") }
+    // `over: axis`: (given, the axis, where it is written)
+    var has_over = false
+    var over = -1
+    var over_at = none_node()
+    if takes_over and len(named) > 0 {
+        over_at = named[0].2
+        over = axis_of_expr(inout ck, over_at)
+        if ck.failed { return Ty.TUnit }
+        has_over = true
+    }
     let fty = Ty.TFloat
     if contains(["sum", "mean", "prod", "max", "min", "nan_sum", "nan_mean", "nan_prod", "nan_count", "count"], name) {
-        if (name == "max" or name == "min") and n == 2 { return max_min2(inout ck, name, all, e) }
+        if (name == "max" or name == "min") and n == 2 {
+            if has_over { return fail_at(inout ck, "E0103", over_at, "`" + name + "` of two values takes no `over:`", "") }
+            return max_min2(inout ck, name, all, e)
+        }
         if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
         let e0 = all[0].0
         let t = expr0(inout ck, e0)
         if ck.failed { return Ty.TUnit }
-        if is_tensor(ck, t) { return unsupported(inout ck, e, "`" + name + "` of a tensor") }
+        if is_tensor(ck, t) {
+            if name == "count" {
+                need_elem(inout ck, name, t, Ty.TBool, e0)
+            } else if name != "sum" and name != "mean" {
+                need_elem(inout ck, name, t, fty, e0)
+            }
+            if ck.failed { return Ty.TUnit }
+            let axes = tensor_axes(ck, t)
+            if has_over {
+                has_axis(inout ck, axes, over, t, over_at)
+                if ck.failed { return Ty.TUnit }
+                return mk_tensor(without(axes, over), fty)
+            }
+            return fty
+        }
+        if has_over { return fail_at(inout ck, "E0201", over_at, "`over:` needs a tensor, found `" + show(ck, t) + "`", "") }
         if name == "sum" {
             let elem = list_elem(inout ck, t, e0)
             ensure_numeric(inout ck, elem, e0, "`sum`")
@@ -1695,7 +1979,10 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         let x = all[0].0
         let t = if name == "abs" { expr0(inout ck, x) } else { expr1(inout ck, x, fty) }
         if ck.failed { return Ty.TUnit }
-        if is_tensor(ck, t) { return unsupported(inout ck, e, "`" + name + "` of a tensor") }
+        if is_tensor(ck, t) {
+            need_elem(inout ck, name, t, fty, x)
+            return t
+        }
         // field by field on the tangent space (rounding is not differentiable)
         if tangent(ck, t) and not (name == "floor" or name == "ceil" or name == "round") { return t }
         if name == "abs" {
@@ -1709,7 +1996,10 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
         let t = expr1(inout ck, all[0].0, fty)
         if ck.failed { return Ty.TUnit }
-        if is_tensor(ck, t) { return unsupported(inout ck, e, "`is_nan` of a tensor") }
+        if is_tensor(ck, t) {
+            need_elem(inout ck, name, t, fty, all[0].0)
+            return mk_tensor(tensor_axes(ck, t), Ty.TBool)
+        }
         expect_at(inout ck, t, fty, all[0].0)
         return Ty.TBool
     }
@@ -1720,7 +2010,10 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         let tv = expr1(inout ck, all[1].0, fty)
         expect_at(inout ck, tv, fty, all[1].0)
         if ck.failed { return Ty.TUnit }
-        if is_tensor(ck, t) { return unsupported(inout ck, e, "`fill_nan` of a tensor") }
+        if is_tensor(ck, t) {
+            need_elem(inout ck, name, t, fty, all[0].0)
+            return t
+        }
         expect_at(inout ck, t, fty, all[0].0)
         return fty
     }
@@ -1740,18 +2033,328 @@ fn tensor_builtin(inout ck: Checker, name: str, all: List[(Node, bool)], named: 
         if not unify(inout ck, ea, eb) {
             return fail_at(inout ck, "E0101", all[2].0, "`where` branches have different types: `" + show(ck, ta) + "` and `" + show(ck, tb) + "`", "")
         }
-        if is_tensor(ck, tc) or is_tensor(ck, ta) or is_tensor(ck, tb) { return unsupported(inout ck, e, "`where` on tensors") }
-        return resolve(ck, ea)
+        if not (is_tensor(ck, tc) or is_tensor(ck, ta) or is_tensor(ck, tb)) { return resolve(ck, ea) }
+        let axes = frame_axes(inout ck, [(tc, all[0].0), (ta, all[1].0), (tb, all[2].0)], "`where`", e)
+        if ck.failed { return Ty.TUnit }
+        let elem = tensor_elem(inout ck, ea, all[1].0)
+        if ck.failed { return Ty.TUnit }
+        return mk_tensor(axes, elem)
     }
-    if name == "zeros_like" {
-        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
+    if name == "size" {
+        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
+        let t = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        let ax = axis_of_expr(inout ck, all[1].0)
+        if ck.failed { return Ty.TUnit }
+        if not is_tensor(ck, t) {
+            return fail_at(inout ck, "E0101", all[0].0, "`size` needs a tensor, found `" + show(ck, t) + "`", "the length of a list is `len(xs)`")
+        }
+        has_axis(inout ck, tensor_axes(ck, t), ax, t, all[1].0)
+        return Ty.TInt
+    }
+    if takes_sizes {
+        if not arity_ok(inout ck, name, n, if name == "full" { 1 } else { 0 }, e, true) { return Ty.TUnit }
+        if len(named) == 0 {
+            let v = if name == "full" { "0.0, " } else { "" }
+            return fail_at(inout ck, "E0103", e, "`" + name + "` needs the size of each axis", "e.g. `" + name + "(" + v + "month: 12, asset: 3)`")
+        }
+        var elem = fty
+        if name == "full" {
+            let tv = expr1(inout ck, all[0].0, fty)
+            if ck.failed { return Ty.TUnit }
+            elem = tensor_elem(inout ck, tv, all[0].0)
+            if ck.failed { return Ty.TUnit }
+        }
+        var axes: List[i64] = []
+        for q in named {
+            let id = axis_id(inout ck, q.0, q.1.lo, q.1.hi)
+            if ck.failed { return Ty.TUnit }
+            if contains(axes, id) { return fail_at(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
+            int_expr(inout ck, q.2)
+            if ck.failed { return Ty.TUnit }
+            axes.push(id)
+        }
+        return mk_tensor(axes, elem)
+    }
+    if name == "zeros_like" or name == "full_like" {
+        if not arity_ok(inout ck, name, n, if name == "full_like" { 2 } else { 1 }, e, true) { return Ty.TUnit }
         let t = expr0(inout ck, all[0].0)
         if ck.failed { return Ty.TUnit }
         // the zero of the tangent space (optimizer state, accumulated gradients)
-        if tangent(ck, t) or resolve(ck, t) == fty { return t }
-        return unsupported(inout ck, e, "`zeros_like` of a tensor")
+        if name == "zeros_like" and (tangent(ck, t) or resolve(ck, t) == fty) { return t }
+        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        var elem = fty
+        if name == "full_like" {
+            let tv = expr1(inout ck, all[1].0, fty)
+            if ck.failed { return Ty.TUnit }
+            elem = tensor_elem(inout ck, tv, all[1].0)
+            if ck.failed { return Ty.TUnit }
+        }
+        return mk_tensor(tensor_axes(ck, t), elem)
+    }
+    if name == "tensor" {
+        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
+        let t = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        let ax = axis_of_expr(inout ck, all[1].0)
+        if ck.failed { return Ty.TUnit }
+        let x = list_elem(inout ck, t, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        let elem = tensor_elem(inout ck, x, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        return Ty.TTensor([ax], elem)
+    }
+    if name == "to_list" {
+        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
+        let t = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        if len(tensor_axes(ck, t)) != 1 {
+            return fail_at(inout ck, "E0201", all[0].0, "`to_list` needs a tensor with one axis, found `" + show(ck, t) + "`", "select or reduce the other axes first")
+        }
+        return Ty.TList(elem_of(ck, t))
+    }
+    if name == "nan_quantile" or name == "rank" or name == "top_k" or name == "bottom_k" {
+        if not arity_ok(inout ck, name, n, if name == "rank" { 1 } else { 2 }, e, true) { return Ty.TUnit }
+        let t = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        need_elem(inout ck, name, t, fty, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        let axes = tensor_axes(ck, t)
+        // the axis: `over:`, or the only axis of a one-axis tensor
+        var ax = -1
+        if has_over {
+            has_axis(inout ck, axes, over, t, over_at)
+            ax = over
+        } else if len(axes) == 1 {
+            ax = axes[0]
+        } else {
+            return fail_at(inout ck, "E0201", e, "`" + name + "` over which axis of `" + show(ck, t) + "`?", "name it with `over: " + ck.axes[axes[0]].name + "`")
+        }
+        if ck.failed { return Ty.TUnit }
+        if name == "nan_quantile" {
+            let tq = expr1(inout ck, all[1].0, fty)
+            expect_at(inout ck, tq, fty, all[1].0)
+            return mk_tensor(without(axes, ax), fty)
+        }
+        if name != "rank" { int_expr(inout ck, all[1].0) }
+        return mk_tensor(axes, if name == "rank" { fty } else { Ty.TBool })
+    }
+    if name == "merge_days" {
+        if not arity_ok(inout ck, name, n, 1, e, true) { return Ty.TUnit }
+        let t = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        if not need_tensor(inout ck, name, t, all[0].0) { return Ty.TUnit }
+        let axes = tensor_axes(ck, t)
+        if not contains(axes, 0) or not contains(axes, 3) {
+            return fail_at(inout ck, "E0201", all[0].0, "`merge_days` needs a tensor with the axes `month` and `session`, found `" + show(ck, t) + "`", "the daily data of `b3` comes as `Tensor[month, session, asset]`")
+        }
+        var out = [1]
+        for a in axes {
+            if a != 0 and a != 3 { out.push(a) }
+        }
+        return mk_tensor(out, elem_of(ck, t))
+    }
+    if name == "contract" {
+        if not arity_ok(inout ck, name, n, 2, e, true) { return Ty.TUnit }
+        let tx = expr0(inout ck, all[0].0)
+        if ck.failed { return Ty.TUnit }
+        let ty2 = expr0(inout ck, all[1].0)
+        if ck.failed { return Ty.TUnit }
+        if not need_tensor(inout ck, name, tx, all[0].0) { return Ty.TUnit }
+        if not need_tensor(inout ck, name, ty2, all[1].0) { return Ty.TUnit }
+        need_elem(inout ck, name, tx, fty, all[0].0)
+        need_elem(inout ck, name, ty2, fty, all[1].0)
+        if ck.failed { return Ty.TUnit }
+        if not has_over { return fail_at(inout ck, "E0103", e, "`contract` needs the axis to sum over", "e.g. `contract(x, w, over: feature)`") }
+        let ax_x = tensor_axes(ck, tx)
+        let ax_y = tensor_axes(ck, ty2)
+        has_axis(inout ck, ax_x, over, tx, over_at)
+        has_axis(inout ck, ax_y, over, ty2, over_at)
+        if ck.failed { return Ty.TUnit }
+        var out: List[i64] = []
+        for a in ax_x {
+            if a != over and not contains(out, a) { out.push(a) }
+        }
+        for a in ax_y {
+            if a != over and not contains(out, a) { out.push(a) }
+        }
+        return mk_tensor(out, fty)
     }
     unsupported(inout ck, e, "`" + name + "`")
+}
+
+// `grad(f)` / `grad(f, wrt: k)` / `value_and_grad(f)`: f returns f64 (a loss); the result is a
+// function with the same parameters returning the gradient (and the value) with respect to
+// parameter k (from 1).
+fn grad_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+    if len(all) != 1 {
+        return fail_at(inout ck, "E0103", e, "`" + name + "` takes the function to differentiate", "e.g. `" + name + "(loss)` or `" + name + "(loss, wrt: 2)`")
+    }
+    var wrt = 1
+    for q in named {
+        if q.0 != "wrt" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "choose the parameter with `wrt: k` (from 1)") }
+        let c = int_const(inout ck, q.2, "wrt:")
+        if not c.0 { return Ty.TUnit }
+        wrt = c.1
+    }
+    let f = all[0].0
+    let tf = expr0(inout ck, f)
+    if ck.failed { return Ty.TUnit }
+    var ps: List[Ty] = []
+    var r = Ty.TUnit
+    let rf = resolve(ck, tf)
+    match rf {
+        TFn(a, b) => {
+            ps = a
+            r = b
+        },
+        _ => { return fail_at(inout ck, "E0101", f, "`" + name + "` needs a function, found `" + show(ck, rf) + "`", "pass a named function, or a lambda with typed parameters: `|x: f64| x * x`") },
+    }
+    if not unify(inout ck, r, Ty.TFloat) {
+        return fail_at(inout ck, "E0401", f, "`" + name + "` needs a function that returns `f64` (a loss), found one returning `" + show(ck, r) + "`", "")
+    }
+    let k = wrt - 1
+    if k < 0 or k >= len(ps) {
+        return fail_at(inout ck, "E0103", e, "`wrt: " + str(wrt) + "`, but the function has " + str(len(ps)) + " parameter(s)", "")
+    }
+    let p = ps[k]
+    if not differentiable(ck, p) {
+        return fail_at(inout ck, "E0402", f, "cannot differentiate with respect to a `" + show(ck, p) + "`", "differentiable types: f64, f64 tensors, and structs, tuples and lists of them")
+    }
+    let ret = if name == "value_and_grad" { Ty.TTuple([Ty.TFloat, p]) } else { p }
+    Ty.TFn(ps, ret)
+}
+
+// `randn(seed: k, month: 12, asset: 3)`: reproducible normal samples.
+fn randn_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+    let example = "e.g. `randn(seed: 7, feature: 4, hidden: 16)`"
+    if len(all) > 0 { return fail_at(inout ck, "E0103", e, "`randn` takes only named arguments", example) }
+    var seed = -1
+    for i in 0..len(named) {
+        if named[i].0 == "seed" and seed < 0 { seed = i }
+    }
+    if seed < 0 { return fail_at(inout ck, "E0103", e, "`randn` needs `seed:` (results must be reproducible)", example) }
+    int_expr(inout ck, named[seed].2)
+    if ck.failed { return Ty.TUnit }
+    var axes: List[i64] = []
+    for q in named {
+        if q.0 == "seed" { continue }
+        let id = axis_id(inout ck, q.0, q.1.lo, q.1.hi)
+        if ck.failed { return Ty.TUnit }
+        if contains(axes, id) { return fail_at(inout ck, "E0112", q.1, "axis `" + q.0 + "` is given twice", "") }
+        int_expr(inout ck, q.2)
+        if ck.failed { return Ty.TUnit }
+        axes.push(id)
+    }
+    if len(axes) == 0 { return fail_at(inout ck, "E0103", e, "`randn` needs the size of each axis", example) }
+    mk_tensor(axes, Ty.TFloat)
+}
+
+// `smooth_max(x, y, scale: s)`, `smooth_min`, `smooth_step(x, scale: s)`: the exact rule outside
+// `grad`, a smooth relaxation (softplus, sigmoid) inside it.
+fn smooth_ty(inout ck: Checker, name: str, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+    let want = if name == "smooth_step" { 1 } else { 2 }
+    if len(all) != want { return fail_at(inout ck, "E0103", e, "`" + name + "` takes " + str(want) + " value(s) and `scale:`", "") }
+    var scale = -1
+    for i in 0..len(named) {
+        if named[i].0 == "scale" and scale < 0 { scale = i }
+    }
+    if scale < 0 {
+        return fail_at(inout ck, "E0103", e, "`" + name + "` needs `scale:`: how wide the smooth transition is", "e.g. `" + name + "(x" + (if want == 2 { ", 0.0" } else { "" }) + ", scale: 100.0)`")
+    }
+    for q in named {
+        if q.0 != "scale" { return fail_at(inout ck, "E0120", q.1, "`" + name + "` has no argument `" + q.0 + "`", "") }
+    }
+    let fty = Ty.TFloat
+    var t = Ty.TUnit
+    if name == "smooth_step" {
+        t = expr1(inout ck, all[0].0, fty)
+        if ck.failed { return Ty.TUnit }
+        if is_tensor(ck, t) { need_elem(inout ck, name, t, fty, all[0].0) } else { expect_at(inout ck, t, fty, all[0].0) }
+        if ck.failed { return Ty.TUnit }
+    } else {
+        t = max_min2(inout ck, if name == "smooth_max" { "max" } else { "min" }, all, e)
+        if ck.failed { return Ty.TUnit }
+        if resolve(ck, t) == Ty.TInt { return fail_at(inout ck, "E0101", e, "`" + name + "` needs `f64` values", "") }
+    }
+    let se = named[scale].2
+    let ts = expr1(inout ck, se, fty)
+    expect_at(inout ck, ts, fty, se)
+    t
+}
+
+// `observed(x)` / `observed(x, lag: k)`: row `t` of `x` (over its temporal axis) becomes known at
+// the end of `t + k`.
+fn observed_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+    if len(all) != 1 { return fail_at(inout ck, "E0103", e, "`observed` takes 1 positional argument, but " + str(len(all)) + " were given", "") }
+    for q in named {
+        if q.0 != "lag" { return fail_at(inout ck, "E0120", q.1, "`observed` has no argument `" + q.0 + "`", "the delay is given as `lag: k`") }
+        let x = q.2
+        if not (x.kind == "int" or (x.kind == "neg" and x.kids[0].kind == "int")) {
+            return fail_at(inout ck, "E0101", x, "`lag:` must be an integer constant", "e.g. `observed(x, lag: 1)`")
+        }
+    }
+    let t = expr0(inout ck, all[0].0)
+    if ck.failed { return Ty.TUnit }
+    if not need_tensor(inout ck, "observed", t, all[0].0) { return Ty.TUnit }
+    var temporal = 0
+    for a in tensor_axes(ck, t) {
+        if ck.axes[a].temporal != "" { temporal += 1 }
+    }
+    if temporal != 1 {
+        return fail_at(inout ck, "E0201", all[0].0, "`observed` needs a tensor with exactly one temporal axis, found `" + show(ck, t) + "`", "temporal axes are `month`, `day` and those declared with `axis name: temporal(...)`")
+    }
+    t
+}
+
+// The weights (`Tensor[month, asset; f64]`, or a function without parameters returning them
+// when `as_fn`) and the options of an evaluation: the `Evaluation` struct.
+fn weights_and_options(inout ck: Checker, what: str, w: Node, as_fn: bool, named: List[(str, Node, Node)], e: Node) -> Ty {
+    if not contains(ck.struct_ids, "Evaluation") { return fail_at(inout ck, "E0100", e, "the prelude's `Evaluation` struct is missing", "") }
+    let sid = ck.struct_ids["Evaluation"]
+    let tensor = Ty.TTensor([0, 2], Ty.TFloat)
+    let want = if as_fn { Ty.TFn([], tensor) } else { tensor }
+    let tw = expr1(inout ck, w, want)
+    if ck.failed { return Ty.TUnit }
+    if not unify(inout ck, tw, want) {
+        // a tensor with other axes is an axis error; anything else (including a tensor where
+        // the function is expected) is a type error
+        let code = if not as_fn and is_tensor(ck, tw) { "E0201" } else { "E0101" }
+        let needs = if as_fn { "a function without parameters that returns the weights" } else { "weights" }
+        let hint = if as_fn { "the holdout's data exists only while that function runs: e.g. `open_once(h, || weights())`" } else { "one weight per month and asset; a month whose weights are all zero stays in cash (CDI)" }
+        return fail_at(inout ck, code, w, "`" + what + "` needs " + needs + " of type `" + show(ck, want) + "`, found `" + show(ck, tw) + "`", hint)
+    }
+    let opts = ["cost_bps", "lag", "capital", "real_costs", "tax", "cap_adv", "trial"]
+    let otys = [Ty.TFloat, Ty.TInt, Ty.TFloat, Ty.TBool, Ty.TBool, Ty.TFloat, Ty.TBool]
+    var seen: List[str] = []
+    for q in named {
+        var k = -1
+        for i in 0..len(opts) {
+            if opts[i] == q.0 { k = i }
+        }
+        if k < 0 { return fail_at(inout ck, "E0120", q.1, "`" + what + "` has no option `" + q.0 + "`", "its options are cost_bps, lag, capital, real_costs, tax, cap_adv and trial") }
+        if contains(seen, q.0) { return fail_at(inout ck, "E0112", q.1, "option `" + q.0 + "` is given twice", "") }
+        seen.push(q.0)
+        let t = expr1(inout ck, q.2, otys[k])
+        expect_at(inout ck, t, otys[k], q.2)
+        if ck.failed { return Ty.TUnit }
+    }
+    Ty.TStruct(sid)
+}
+
+// `open_once(h, || weights(), ...)`: evaluates on the holdout of `h`'s protocol, once (M5).
+fn open_once_ty(inout ck: Checker, all: List[(Node, bool)], named: List[(str, Node, Node)], e: Node) -> Ty {
+    if len(all) != 2 {
+        return fail_at(inout ck, "E0103", e, "`open_once` takes the holdout and the function that computes the weights", "e.g. `open_once(h, || weights(), lag: 1)`")
+    }
+    let th = expr0(inout ck, all[0].0)
+    if ck.failed { return Ty.TUnit }
+    if resolve(ck, th) != Ty.THoldout {
+        return fail_at(inout ck, "E0101", all[0].0, "`open_once` needs a holdout, found `" + show(ck, th) + "`", "get it from a protocol: `let h = b3.holdout(\"name\")`")
+    }
+    weights_and_options(inout ck, "open_once", all[1].0, true, named, e)
 }
 
 // ------------------------------------------------------------------ functions and files
@@ -1813,7 +2416,7 @@ fn top_name(inout ck: Checker, p: Node) {
 // body, then the top-level statements.
 fn check_items(inout ck: Checker, items: List[Node]) {
     declare_items(inout ck, items)
-    if ck.failed or ck.skip_bodies { return }
+    if ck.failed { return }
     for it in items {
         if it.kind == "let" or it.kind == "var" { top_name(inout ck, it.kids[0]) }
     }

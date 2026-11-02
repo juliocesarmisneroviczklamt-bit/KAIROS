@@ -5,10 +5,7 @@ import "body.krs"
 
 let std_dir = args()[0]
 var base = new_checker(std_dir)
-// the prelude (and the standard library it imports) by its declarations: its bodies use tensors
-base.skip_bodies = true
 check_file(inout base, "<prelude>", read_text(std_dir + "/prelude.krs"))
-base.skip_bodies = false
 assert(not base.failed, "the prelude does not check: " + base.code + " " + base.msg)
 for k in 1..len(args()) {
     let path = args()[k]

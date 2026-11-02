@@ -130,6 +130,6 @@ A biblioteca padrão é escrita em Kairós: [`std/prelude.krs`](std/prelude.krs)
 
 | marco | entrega |
 |---|---|
-| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós (em andamento: léxico, parser e verificador de tipos, sem as operações de tensores, em [`compiler/`](compiler)) |
+| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós (em andamento: léxico, parser e verificador de tipos em [`compiler/`](compiler); falta a análise temporal e o interpretador) |
 | — | paper trading em Kairós (aguarda decisão: os dados novos são o holdout reservado do M6) |
 | depois | o elemento ternário `t3` (pesos {−1, 0, +1}), tensores no código nativo e AOT |

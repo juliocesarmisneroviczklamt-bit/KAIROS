@@ -36,7 +36,7 @@ Nenhuma linguagem cria alpha sozinha. A proposta é tornar impossíveis, ou pelo
 | M9 | arquivos, texto, mapas, internet e a biblioteca padrão escrita em Kairós (JSON, CSV, datas) | ✅ registro de tentativas e coleta macro em Kairós, iguais ao Rust |
 | M10 | a base de dados montada em Kairós: COTAHIST, eventos da B3, painel | ✅ `bars.bin`, cache de eventos e `panel.bin` iguais aos do Rust, byte a byte |
 | M11 | o simulador (custos, impacto, IR) escrito em Kairós | ✅ `b3.evaluate`/`b3.simulate` rodam [`std/sim.krs`](kairos/std/sim.krs), com os mesmos bits do simulador Rust |
-| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós | em andamento: léxico, parser e verificador de tipos (sem as operações de tensores) já são Kairós, iguais ao Rust |
+| M12 | auto-hospedagem: o compilador da Kairós escrito em Kairós | em andamento: léxico, parser e verificador de tipos já são Kairós, iguais ao Rust; falta a análise temporal e o interpretador |
 | — | paper trading em Kairós | aguarda decisão: os dados de nov/2026 em diante são o holdout reservado do M6 |
 
 ## Exemplo: momentum na B3

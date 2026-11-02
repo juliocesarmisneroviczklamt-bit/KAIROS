@@ -1,0 +1,1 @@
+let r = randn(seed: 1.5, asset: 2)

@@ -1,0 +1,2 @@
+let g = grad(|x: f64| x * x)
+let h = grad(|x| x * x)

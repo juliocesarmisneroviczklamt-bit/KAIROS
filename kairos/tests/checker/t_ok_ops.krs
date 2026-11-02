@@ -1,0 +1,15 @@
+axis feature
+axis output
+let x = zeros(month: 3, asset: 2)
+let y = zeros(asset: 2)
+let b = x > 0.0
+let z = x + y
+let w = x * 2.0 - y / 3.0
+let c = b and x < 1.0
+let n = not b
+let m = -x
+let s = sum(x, over: asset)
+let t = sum(x)
+let q = x[month: 0]
+let r = x[month: 0 .. 2, asset: 1]
+let e = x == x

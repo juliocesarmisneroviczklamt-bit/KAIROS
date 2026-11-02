@@ -1,0 +1,2 @@
+let x = zeros(month: 3)
+let z = x + zeros(asset: 2)

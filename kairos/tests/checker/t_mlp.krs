@@ -1,0 +1,17 @@
+axis sample
+axis feature
+axis hidden
+axis output
+struct Net { w1: Tensor[feature, hidden; f64], w2: Tensor[hidden, output; f64] }
+fn fwd(p: Net, x: Tensor[sample, feature; f64]) -> Tensor[sample, output; f64] { contract(tanh(contract(x, p.w1, over: feature)), p.w2, over: hidden) }
+fn loss(p: Net, x: Tensor[sample, feature; f64], y: Tensor[sample, output; f64]) -> f64 { let d = fwd(p, x) - y
+ mean(d * d) }
+let p = Net { w1: randn(seed: 1, feature: 2, hidden: 3), w2: randn(seed: 2, hidden: 3, output: 1) }
+let g = grad(loss)
+let vg = value_and_grad(loss, wrt: 1)
+let x = randn(seed: 3, sample: 4, feature: 2)
+let y = randn(seed: 4, sample: 4, output: 1)
+let gp = g(p, x, y)
+var q = p
+q = q - 0.1 * gp
+let z = zeros_like(p)

@@ -1,0 +1,7 @@
+axis feature
+axis output
+let x = zeros(month: 3, asset: 2)
+let y = zeros(asset: 2)
+let b = x > 0.0
+var v = x
+v[month: 0] = b[month: 0]

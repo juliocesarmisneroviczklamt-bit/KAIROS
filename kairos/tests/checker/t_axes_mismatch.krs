@@ -1,0 +1,3 @@
+let x = zeros(month: 3)
+let y = zeros(asset: 2)
+let z = x + y

@@ -1,0 +1,2 @@
+let w = zeros(month: 3, asset: 2)
+let e = b3.evaluate(w, lag: 1.5)

@@ -1,0 +1,4 @@
+let w = zeros(month: 3, asset: 2)
+let e = b3.evaluate(w)
+let f = b3.evaluate(w, cost_bps: 10.0, lag: 2, tax: true, trial: false)
+let s = b3.simulate(w, capital: 1000.0)

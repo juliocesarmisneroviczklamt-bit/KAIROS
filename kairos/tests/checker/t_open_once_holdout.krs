@@ -1,0 +1,1 @@
+let e = open_once(1, || zeros(month: 3, asset: 2))

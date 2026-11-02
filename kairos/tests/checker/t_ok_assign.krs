@@ -1,0 +1,13 @@
+axis feature
+axis output
+let x = zeros(month: 3, asset: 2)
+let y = zeros(asset: 2)
+let b = x > 0.0
+var v = zeros(month: 3, asset: 2)
+v[month: 0] = 1.0
+v[month: 1] = y
+v[month: 0, asset: 1] = 2.0
+v += y
+v *= 2.0
+v = v * 2.0
+v[month: 2] += 1.0
